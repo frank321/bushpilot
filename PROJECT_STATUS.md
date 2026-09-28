@@ -1,7 +1,7 @@
 # Project Status — Memory-Aware Local MLX Model Launcher
 
 **Last updated:** 2026-09-28 (end of this working session — added live tool-calling verification
-for all 14 models)
+for all 14 models, plus KV-cache quantization decode-speed cost data for 2 models)
 **Location:** `~/scripts/` (this project is separate from the `devx-agent-eval` repo, though it
 references research originally done there — `LITELLM_ROUTING_PLAN.md` in that repo is the
 upstream source for several findings reused here)
@@ -204,6 +204,27 @@ of what the prose docs say. Fix the docs opportunistically, not before the next 
       full methodology and cross-stack evidence. The 5 NOT_SUPPORTED models also got an explicit
       `❌ TOOL CALLS DO NOT WORK` warning appended to their `display.known_issues` text — the field
       actually shown in the interactive picker, unlike the schema notes.
+14. **Confirmed `--kv-bits 8` (the KV-cache quantization flag `start_litellm_proxy.sh` launches
+    every model with unconditionally) has a real decode-speed cost at short context, and that
+    cost is NOT the same across model sizes** — full methodology, data, and analysis now in
+    `HARDWARE_SPEED_ESTIMATION.md` §10 (this is formula-research territory, not a one-off
+    finding, since it's meant to feed a future dynamic KV-bit-selection feature). Same
+    fixed-prompt benchmark as this doc's existing speed-calibration data (§6): tested
+    `Qwen2.5-Coder-3B-Instruct-4bit` and `Qwen3.5-9B-MLX-8bit`, each with vs. without the
+    production `--kv-bits 8 --kv-group-size 64 --quantized-kv-start 0` flags. Result: **3B model
+    is 8.7% SLOWER decode with KV quantization on (125.8→114.8 tok/s); 9B model is only ~1.0%
+    slower (30.3→30.0 tok/s, within run-to-run noise).** `peak_memory` was identical with/without
+    quantization on both models — confirms this is pure per-step quantize/dequantize compute
+    overhead, not a memory-savings trade-off, at this short (150-output-token) context length;
+    quantization's actual memory benefit only shows up once the KV cache itself is large, which a
+    short exchange never reaches. The mechanism (not yet independently confirmed, but the
+    straightforward explanation): quantization overhead is roughly fixed-cost per decode step,
+    but a bigger model's dense compute per token is proportionally much larger, so the same fixed
+    overhead is a smaller fraction of total time for bigger models — the opposite of the naive
+    assumption that a bigger KV cache means bigger quantization savings/cost. Only 2 models (both
+    dense, one short context length) measured so far — see new open item below and
+    `HARDWARE_SPEED_ESTIMATION.md` §11's item 6 for what's needed before this becomes an actual
+    dynamic-selection feature.
 
 ---
 
@@ -252,6 +273,13 @@ of what the prose docs say. Fix the docs opportunistically, not before the next 
    deprioritize/exclude `NOT_SUPPORTED` models, when the launch mode is `opencode`/`claude` (a
    non-tool-calling chat mode wouldn't need this filter at all, so this should be conditional on
    mode, not a blanket exclusion).
+9. **Dynamic `--kv-bits` selection is a documented finding, not yet a feature.** Per item #14
+   above, KV quantization costs real decode speed on smaller models at short context for no
+   memory-safety benefit, but `start_litellm_proxy.sh` still passes `--kv-bits 8` unconditionally
+   to every model regardless of size or requested context. Needs the additional calibration data
+   `HARDWARE_SPEED_ESTIMATION.md` §11 item 6 describes (an MoE model, a 14B+ model, and a genuine
+   long-context run to find the actual crossover point) before a real heuristic can be wired into
+   `model_advisor.py`.
 
 ---
 
@@ -335,6 +363,17 @@ it never even tries to parse tool calls out of its output. models.json now has a
 block per model (same style as verification), but model_advisor.py does NOT read it either — same
 gap pattern as max_context_verified_safe above.
 
+Also this session: confirmed --kv-bits 8 (the KV quantization flag start_litellm_proxy.sh passes
+to every model unconditionally) has a real decode-speed cost at short context, and that cost is
+NOT uniform across model sizes. Same fixed-prompt benchmark as HARDWARE_SPEED_ESTIMATION.md's
+existing speed-calibration data: Qwen2.5-Coder-3B-Instruct-4bit is 8.7% slower with KV
+quantization on (125.8→114.8 tok/s decode); Qwen3.5-9B-MLX-8bit is only ~1.0% slower (30.3→30.0
+tok/s, within noise). peak_memory was identical with/without quantization on both — confirms this
+is pure per-step compute overhead, not a memory trade-off, at this short context length. Full
+data, mechanism discussion, and open items (need an MoE model, a 14B+ model, and a genuine
+long-context run before this becomes a real dynamic-selection feature) are in
+HARDWARE_SPEED_ESTIMATION.md §10-11.
+
 Next priorities, in the order PROJECT_STATUS.md's "What's NOT done yet" section lists them:
 1. model_advisor.py needs to clamp recommendations to a model's max_context_verified_safe field
    when present, instead of only computing from free memory/KV-cache size.
@@ -351,6 +390,13 @@ Next priorities, in the order PROJECT_STATUS.md's "What's NOT done yet" section 
    flag/wiring, as opposed to monitor_memory.sh itself) against the actual MLX server.
 7. Minor, non-blocking: bootstrap_mlx's mlx-lm package-existence check always reports "not
    installed" due to the hyphen-vs-import-name mismatch.
+8. model_advisor.py should warn on (and arguably deprioritize/exclude, when launch mode is
+   opencode/claude specifically) models with tool_calling.verdict == NOT_SUPPORTED
+   (qwen2.5-coder-3b/7b-3bit/7b-4bit/14b-instruct and phi-4-mini-instruct-4bit) — it doesn't
+   consult that field at all right now.
+9. Dynamic --kv-bits selection needs more calibration data (an MoE model, a 14B+ model, a genuine
+   long-context run to find the real crossover point) before it can become an actual
+   model_advisor.py feature rather than just a documented finding.
 8. model_advisor.py should warn on (and arguably deprioritize/exclude, when launch mode is
    opencode/claude specifically) models with tool_calling.verdict == NOT_SUPPORTED
    (qwen2.5-coder-3b/7b-3bit/7b-4bit/14b-instruct and phi-4-mini-instruct-4bit) — it doesn't

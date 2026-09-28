@@ -301,7 +301,59 @@ fields it depends on have been confirmed to exist and contain the expected value
 
 ---
 
-## 10. Open items before implementation
+## 10. `--kv-bits` quantization is a real decode-speed cost at short context, and the cost is NOT
+##     the same across model sizes — confirmed on 2 models, not assumed universal
+
+**Motivating question:** `start_litellm_proxy.sh` launches every model with
+`--kv-bits 8 --kv-group-size 64 --quantized-kv-start 0` unconditionally (see its `mlx_args`
+construction). Does this cost anything when the KV cache barely grows — e.g. a short interactive
+coding exchange — and if so, does that cost scale the same way across model sizes? This matters
+directly for the planned dynamic-KV-bit-selection feature (choose whether to quantize based on
+hardware + model, not a hardcoded flag) — a formula needs real per-size data, not a single
+data point assumed to generalize.
+
+**Methodology:** same fixed-prompt benchmark as §6 (`"Write a 200-word short story about a robot
+exploring an old library."`, `max_tokens=150`, `temperature=0.0`, warmed up first, 3 runs read
+directly from each response's own `timings.predicted_per_second` field — not derived from wall
+clock). For each model, ran the identical prompt against two server configs: no `--kv-bits` flag
+at all (full-precision KV cache) vs. the exact production flags above (`--kv-bits 8
+--kv-group-size 64 --quantized-kv-start 0`).
+
+**Result — the slowdown is real, but its magnitude is inversely related to model size:**
+
+| Model | No KV quant (avg tok/s) | Production `--kv-bits 8` (avg tok/s) | Decode slowdown | Peak memory (either config) |
+|---|---|---|---|---|
+| `Qwen2.5-Coder-3B-Instruct-4bit` | 125.77 | 114.83 | **8.7%** | 1.90 GB (unchanged) |
+| `Qwen3.5-9B-MLX-8bit` | 30.30 | 30.00 | **1.0%** (within run-to-run noise) | 10.61 GB (unchanged) |
+
+Both models' `peak_memory` was identical (to 3 decimal places) with and without quantization —
+confirming the mechanism at play here is NOT memory savings at this short context (150 output
+tokens isn't enough KV cache growth for quantization's byte-size reduction to matter at all), it's
+**pure per-step quantize/dequantize compute overhead being added to every decode step, for a KV
+cache too small to benefit from the size reduction it buys.**
+
+**Why the cost differs so much between the two models (not yet independently confirmed, but the
+mechanism is the straightforward one):** the quantize/dequantize work per decode step is roughly
+fixed-cost (bounded by KV cache size, which is nearly identical between a 3B and 9B model at the
+same short context — same head_dim/kv_head-scale ballpark, not 3x different). A 9B model's dense
+matrix-multiply work per token is far larger than a 3B model's, so that same fixed quantization
+overhead is a much smaller *fraction* of total per-token time for the bigger model — consistent
+with 8.7% (3B) vs. ~1% (9B, indistinguishable from noise). **This means "disable KV quantization
+for short-context speed" is a real, worthwhile lever specifically for smaller/faster models, and
+roughly free to leave enabled on larger/slower ones** — the opposite of what you'd naively guess
+("bigger model = more to quantize = bigger savings/cost").
+
+**Implication for the planned dynamic KV-bit feature:** a first-pass heuristic consistent with
+this data would be something like *"disable `--kv-bits` when the model's baseline decode speed is
+above some threshold (e.g. >100 tok/s unquantized) AND the requested context size is small enough
+that quantization's memory-safety benefit doesn't matter yet; use it once either condition
+flips."* This is deliberately vague on the exact threshold — **only 2 models have been measured
+this way so far**, both at one short context length (150 output tokens, ~30-46 prompt tokens);
+see open items below.
+
+---
+
+## 11. Open items before implementation
 
 1. **`dense_fixed_gb` for MoE active-weight estimation (§7)** is a stopgap number for one specific
    model, not a general solution. Any additional MoE model needs either its own calibration
@@ -317,8 +369,19 @@ fields it depends on have been confirmed to exist and contain the expected value
    confirm the computed byte-per-token figure matches real observed memory growth.
 5. **Page size (§2)** was hardcoded as 16384 for this Apple Silicon machine — a real implementation
    must read it from `vm_stat`'s own header rather than assuming it, for portability to Intel Macs.
+6. **`--kv-bits` dynamic selection (§10)** only has 2 data points (3B and 9B, both dense, both at
+   one short context length ~150 output tokens on this M5 Pro). Before wiring an actual
+   quantize/don't-quantize decision into `model_advisor.py` or `start_litellm_proxy.sh`, need: (a)
+   at least one MoE model and one larger dense model (14B+) measured the same way, to confirm the
+   "cost inversely scales with model size" pattern holds rather than being a 2-point coincidence;
+   (b) the SAME comparison repeated at a genuinely long context (thousands of tokens generated,
+   not 150) to find the crossover point where quantization's memory-bandwidth savings start
+   outweighing its per-step compute cost — §10's data only proves the cost exists at short
+   context, it says nothing about where quantization starts being a net win rather than a net
+   loss; (c) a decision on what "hardware spec" should feed into this — e.g. total RAM/available
+   bandwidth likely changes where that crossover point sits, not just the model's own size.
 
-None of these block writing the detection/estimation script, but all five should be called out in
+None of these block writing the detection/estimation script, but all six should be called out in
 the script's own comments (mirroring how this document treats them), not silently smoothed over —
 consistent with this whole research effort's practice of recording what's actually confirmed versus
 what's still an approximation.
