@@ -1,0 +1,424 @@
+{
+  "models": {
+    "mlx-community/Qwen3.5-9B-MLX-8bit": {
+      "model_id": "mlx-community/Qwen3.5-9B-MLX-8bit",
+      "verdict": "SAFE",
+      "reason": "max-kv-size correctly rejected oversized requests at both moderate scale (bound=256 vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=32 vs ~150-token prompt). High max-kv-size (1024) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 831 context tokens (771 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe": {
+        "http_code": 200,
+        "prompt_tokens": 771,
+        "completion_tokens": 13,
+        "content": "ZEBRA-9471-QUARTZ",
+        "error": null
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 76 context tokens (75 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-09-28T00:54:28.236328+00:00",
+      "mlx_vlm_version": "0.7.0",
+      "mlx_version": "0.32.2",
+      "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/Qwen3.5-0.8B-4bit": {
+      "model_id": "mlx-community/Qwen3.5-0.8B-4bit",
+      "verdict": "SAFE",
+      "reason": "max-kv-size correctly rejected oversized requests at both moderate scale (bound=256 vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=32 vs ~150-token prompt). High max-kv-size (1024) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 831 context tokens (771 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe": {
+        "http_code": 200,
+        "prompt_tokens": 771,
+        "completion_tokens": 13,
+        "content": "ZEBRA-9471-QUARTZ",
+        "error": null
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 76 context tokens (75 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-09-28T00:54:52.485570+00:00",
+      "mlx_vlm_version": "0.7.0",
+      "mlx_version": "0.32.2",
+      "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/gemma-4-12B-it-8bit": {
+      "model_id": "mlx-community/gemma-4-12B-it-8bit",
+      "verdict": "SAFE",
+      "reason": "max-kv-size correctly rejected oversized requests at both moderate scale (bound=256 vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=32 vs ~150-token prompt). High max-kv-size (1024) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 833 context tokens (773 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe": {
+        "http_code": 200,
+        "prompt_tokens": 773,
+        "completion_tokens": 12,
+        "content": "ZEBRA-9471-QUARTZ",
+        "error": null
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 78 context tokens (77 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-09-28T01:01:42.079103+00:00",
+      "mlx_vlm_version": "0.7.0",
+      "mlx_version": "0.32.2",
+      "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/gemma-4-26b-a4b-it-4bit": {
+      "model_id": "mlx-community/gemma-4-26b-a4b-it-4bit",
+      "verdict": "SAFE",
+      "reason": "max-kv-size correctly rejected oversized requests at both moderate scale (bound=256 vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=32 vs ~150-token prompt). High max-kv-size (1024) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 833 context tokens (773 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe": {
+        "http_code": 200,
+        "prompt_tokens": 773,
+        "completion_tokens": 12,
+        "content": "ZEBRA-9471-QUARTZ",
+        "error": null
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 78 context tokens (77 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-09-28T01:02:13.694767+00:00",
+      "mlx_vlm_version": "0.7.0",
+      "mlx_version": "0.32.2",
+      "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/Qwen3.8-27B-4bit": {
+      "model_id": "mlx-community/Qwen3.8-27B-4bit",
+      "verdict": "SAFE",
+      "reason": "max-kv-size correctly rejected oversized requests at both moderate scale (bound=256 vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=32 vs ~150-token prompt). High max-kv-size (1024) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 831 context tokens (771 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe": {
+        "http_code": 200,
+        "prompt_tokens": 771,
+        "completion_tokens": 13,
+        "content": "ZEBRA-9471-QUARTZ",
+        "error": null
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 76 context tokens (75 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-09-28T01:02:47.377608+00:00",
+      "mlx_vlm_version": "0.7.0",
+      "mlx_version": "0.32.2",
+      "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit": {
+      "model_id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+      "verdict": "SAFE",
+      "reason": "max-kv-size correctly rejected oversized requests at both moderate scale (bound=256 vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=32 vs ~150-token prompt). High max-kv-size (1024) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 827 context tokens (767 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe": {
+        "http_code": 200,
+        "prompt_tokens": 767,
+        "completion_tokens": 13,
+        "content": "ZEBRA-9471-QUARTZ",
+        "error": null
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 72 context tokens (71 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-09-28T01:03:19.880007+00:00",
+      "mlx_vlm_version": "0.7.0",
+      "mlx_version": "0.32.2",
+      "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit": {
+      "model_id": "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit",
+      "verdict": "SAFE",
+      "reason": "max-kv-size correctly rejected oversized requests at both moderate scale (bound=256 vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=32 vs ~150-token prompt). High max-kv-size (1024) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 848 context tokens (788 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe": {
+        "http_code": 200,
+        "prompt_tokens": 788,
+        "completion_tokens": 13,
+        "content": "ZEBRA-9471-QUARTZ",
+        "error": null
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 93 context tokens (92 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-09-28T01:10:12.068059+00:00",
+      "mlx_vlm_version": "0.7.0",
+      "mlx_version": "0.32.2",
+      "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/Phi-4-mini-instruct-4bit": {
+      "model_id": "mlx-community/Phi-4-mini-instruct-4bit",
+      "verdict": "SAFE",
+      "reason": "max-kv-size correctly rejected oversized requests at both moderate scale (bound=256 vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=32 vs ~150-token prompt). High max-kv-size (1024) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 820 context tokens (760 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe": {
+        "http_code": 200,
+        "prompt_tokens": 760,
+        "completion_tokens": 11,
+        "content": "ZEBRA-9471-QUARTZ",
+        "error": null
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 65 context tokens (64 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-09-28T01:13:21.428716+00:00",
+      "mlx_vlm_version": "0.7.0",
+      "mlx_version": "0.32.2",
+      "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit": {
+      "model_id": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+      "verdict": "SAFE",
+      "reason": "max-kv-size correctly rejected oversized requests at both moderate scale (bound=256 vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=32 vs ~150-token prompt). High max-kv-size (1024) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 848 context tokens (788 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe": {
+        "http_code": 200,
+        "prompt_tokens": 788,
+        "completion_tokens": 13,
+        "content": "ZEBRA-9471-QUARTZ",
+        "error": null
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 93 context tokens (92 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-09-28T01:22:02.232786+00:00",
+      "mlx_vlm_version": "0.7.0",
+      "mlx_version": "0.32.2",
+      "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/Qwen2.5-Coder-7B-Instruct-3bit": {
+      "model_id": "mlx-community/Qwen2.5-Coder-7B-Instruct-3bit",
+      "verdict": "SAFE",
+      "reason": "max-kv-size correctly rejected oversized requests at both moderate scale (bound=256 vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=32 vs ~150-token prompt). High max-kv-size (1024) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 848 context tokens (788 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe": {
+        "http_code": 200,
+        "prompt_tokens": 788,
+        "completion_tokens": 13,
+        "content": "ZEBRA-9471-QUARTZ",
+        "error": null
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 93 context tokens (92 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-09-28T01:26:52.947054+00:00",
+      "mlx_vlm_version": "0.7.0",
+      "mlx_version": "0.32.2",
+      "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit": {
+      "model_id": "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
+      "verdict": "SAFE",
+      "reason": "max-kv-size correctly rejected oversized requests at both moderate scale (bound=256 vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=32 vs ~150-token prompt). High max-kv-size (1024) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 848 context tokens (788 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe": {
+        "http_code": 200,
+        "prompt_tokens": 788,
+        "completion_tokens": 13,
+        "content": "ZEBRA-9471-QUARTZ",
+        "error": null
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 93 context tokens (92 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-09-28T02:21:00.522013+00:00",
+      "mlx_vlm_version": "0.7.0",
+      "mlx_version": "0.32.2",
+      "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/gemma-4-e4b-it-4bit": {
+      "model_id": "mlx-community/gemma-4-e4b-it-4bit",
+      "verdict": "SAFE",
+      "reason": "max-kv-size correctly rejected oversized requests at both moderate scale (bound=256 vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=32 vs ~150-token prompt). High max-kv-size (1024) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 829 context tokens (769 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe": {
+        "http_code": 200,
+        "prompt_tokens": 769,
+        "completion_tokens": 12,
+        "content": "ZEBRA-9471-QUARTZ",
+        "error": null
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 74 context tokens (73 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-09-28T02:27:43.023125+00:00",
+      "mlx_vlm_version": "0.7.0",
+      "mlx_version": "0.32.2",
+      "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/gemma-4-12B-it-4bit": {
+      "model_id": "mlx-community/gemma-4-12B-it-4bit",
+      "verdict": "SAFE",
+      "reason": "max-kv-size correctly rejected oversized requests at both moderate scale (bound=256 vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=32 vs ~150-token prompt). High max-kv-size (1024) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 833 context tokens (773 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe": {
+        "http_code": 200,
+        "prompt_tokens": 773,
+        "completion_tokens": 12,
+        "content": "ZEBRA-9471-QUARTZ",
+        "error": null
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 78 context tokens (77 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-09-28T02:36:29.347130+00:00",
+      "mlx_vlm_version": "0.7.0",
+      "mlx_version": "0.32.2",
+      "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/Qwen3-14B-4bit": {
+      "model_id": "mlx-community/Qwen3-14B-4bit",
+      "verdict": "SAFE",
+      "reason": "max-kv-size correctly rejected oversized requests at both moderate scale (bound=256 vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=32 vs ~150-token prompt). High max-kv-size (1024) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 831 context tokens (771 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe": {
+        "http_code": 200,
+        "prompt_tokens": 771,
+        "completion_tokens": 13,
+        "content": "ZEBRA-9471-QUARTZ",
+        "error": null
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 76 context tokens (75 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-09-28T02:47:10.056929+00:00",
+      "mlx_vlm_version": "0.7.0",
+      "mlx_version": "0.32.2",
+      "mlx_lm_version": "0.31.3"
+    }
+  }
+}

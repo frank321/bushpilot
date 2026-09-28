@@ -1,0 +1,112 @@
+{
+  "models": {
+    "mlx-community/Qwen3.5-0.8B-4bit": {
+      "model_id": "mlx-community/Qwen3.5-0.8B-4bit",
+      "max_kv_size_tested": 16384,
+      "kv_bits_tested": 8,
+      "summary": "All escalation steps (20/45/70/85/92% of max-kv-size=16384) completed with HTTP 200 and correct secret recall, no monitor abort.",
+      "steps": [
+        {
+          "target_tokens": 3276,
+          "http_code": 200,
+          "prompt_tokens": 3586,
+          "completion_tokens": 19,
+          "elapsed_s": 0.8,
+          "recalled": true,
+          "error": null,
+          "content_sample": "ZEBRA-fe12d7b75827-QUARTZ",
+          "target_pct": 20,
+          "pre_wired_gb": 3.71,
+          "post_wired_gb": 4.57
+        },
+        {
+          "target_tokens": 7372,
+          "http_code": 200,
+          "prompt_tokens": 7997,
+          "completion_tokens": 20,
+          "elapsed_s": 0.8,
+          "recalled": true,
+          "error": null,
+          "content_sample": "ZEBRA-07ce25a6807b-QUARTZ",
+          "target_pct": 45,
+          "pre_wired_gb": 4.55,
+          "post_wired_gb": 4.65
+        },
+        {
+          "target_tokens": 11468,
+          "http_code": 200,
+          "prompt_tokens": 12408,
+          "completion_tokens": 21,
+          "elapsed_s": 1.4,
+          "recalled": true,
+          "error": null,
+          "content_sample": "ZEBRA-575513486a87-QUARTZ",
+          "target_pct": 70,
+          "pre_wired_gb": 4.68,
+          "post_wired_gb": 4.65
+        },
+        {
+          "target_tokens": 13926,
+          "http_code": 200,
+          "prompt_tokens": 15054,
+          "completion_tokens": 21,
+          "elapsed_s": 1.8,
+          "recalled": true,
+          "error": null,
+          "content_sample": "ZEBRA-0d81460d5564-QUARTZ",
+          "target_pct": 85,
+          "pre_wired_gb": 4.63,
+          "post_wired_gb": 4.67
+        },
+        {
+          "target_tokens": 15073,
+          "http_code": 200,
+          "prompt_tokens": 16284,
+          "completion_tokens": 19,
+          "elapsed_s": 1.9,
+          "recalled": true,
+          "error": null,
+          "content_sample": "ZEBRA-6ce90e31c5cb-QUARTZ",
+          "target_pct": 92,
+          "pre_wired_gb": 4.67,
+          "post_wired_gb": 4.69
+        }
+      ],
+      "tested_at": "2026-09-28T03:23:14.872620+00:00"
+    },
+    "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit": {
+      "model_id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+      "max_kv_size_tested": 131072,
+      "kv_bits_tested": 8,
+      "summary": "Escalation stopped early after at least one successful step \u2014 see steps for where it broke and whether the monitor's abort fired (check /tmp/verify_long_context_monitor_18018.log).",
+      "steps": [
+        {
+          "target_tokens": 26214,
+          "http_code": 200,
+          "prompt_tokens": 28276,
+          "completion_tokens": 17,
+          "elapsed_s": 59.3,
+          "recalled": true,
+          "error": null,
+          "content_sample": "ZEBRA-37898400-QUARTZ",
+          "target_pct": 20,
+          "pre_wired_gb": 3.62,
+          "post_wired_gb": 21.07
+        },
+        {
+          "target_tokens": 58982,
+          "http_code": -1,
+          "prompt_tokens": null,
+          "completion_tokens": null,
+          "elapsed_s": 107.5,
+          "recalled": false,
+          "error": "Remote end closed connection without response",
+          "target_pct": 45,
+          "pre_wired_gb": 21.06,
+          "post_wired_gb": 37.37
+        }
+      ],
+      "tested_at": "2026-09-28T04:34:49.220721+00:00"
+    }
+  }
+}
