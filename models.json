@@ -1,852 +1,646 @@
 {
-  "_comment": "Candidate local models for start_litellm_proxy.sh's interactive menu, served via mlx_vlm.server (not Ollama \u2014 see LITELLM_PROXY_USAGE.md for why). Every entry here has been through verify_max_kv_size.sh with verdict SAFE before being added; do not add a model to this file without running that script first. 'display' fields are shown to the user when picking a model, in plain language they can act on without reading the underlying research docs.",
-  "_schema_notes": {
-    "size_gb": "Real on-disk size, measured directly (du -sh on the cached HF repo), not estimated from quantization bit-width.",
-    "max_context_architectural": "The model's trained/architectural context ceiling, read from its own config.json (max_position_embeddings). This is NOT the same as a safe operating context on any given machine \u2014 see recommended_max_kv_size_gb_tier (pending) once real-load memory testing is done.",
-    "verification": "Result of verify_max_kv_size.sh \u2014 confirms mlx_vlm.server's --max-kv-size admission gate actually rejects oversized requests for this model rather than silently ignoring them (the failure mode Ollama's MLX runner has, unfixably, per LITELLM_ROUTING_PLAN.md \u00a74.15 and upstream Ollama issue discussion). It does NOT confirm real long-context memory safety \u2014 that needs a separate near-cap-fill test (LITELLM_ROUTING_PLAN.md \u00a74.14 methodology) not yet run for any model in this file.",
-    "tool_calling": "Whether OpenCode/Claude Code's tool calls (webfetch, bash, edit, etc.) actually come back as a structured, parseable tool_calls response instead of silently degrading to plain chat text. Determined by LIVE testing (real /v1/chat/completions request with a tool schema attached, temperature=0), not by static inspection of the chat template or by which mlx_vlm tool_parser gets auto-assigned \u2014 several models (the whole qwen2.5-coder-*-instruct family) get assigned a parser (json_tools) that matches their template's markers, yet still fail live because the model itself doesn't reliably emit the <tool_call> tags its own template instructs it to use. That specific failure was independently reproduced on TWO OTHER serving stacks besides mlx_vlm (vLLM \u2014 see github.com/QwenLM/Qwen3-Coder/issues/180 \u2014 and Ollama/llama.cpp, tested directly on this machine 2026-09-28), confirming it's a property of the model's own fine-tuning, not a bug in any one harness. phi-4-mini-instruct-4bit is the opposite case: Microsoft's own model card documents real function-calling support and benchmarks it on Berkeley Function-Calling Leaderboard, but mlx_vlm's tool_parsers registry (mlx_vlm/tool_parsers/__init__.py's _TEMPLATE_MARKERS) has no entry matching Phi's <|tool|>/<|tool_call|> token format, so mlx_vlm never even tries to parse its output \u2014 a serving-stack gap, not a model capability gap (vLLM has a dedicated --tool-call-parser phi4_mini_json for this exact model, merged via vllm-project/vllm#14886). KNOWN GAP: model_advisor.py does NOT yet read this field \u2014 the interactive picker will still recommend qwen2.5-coder-*-instruct or phi-4-mini-instruct-4bit for coding tasks without warning that tool use (webfetch, bash, edit, etc. from OpenCode/Claude Code) will silently no-op on them. Same pattern as max_context_verified_safe's documented gap above; fixing both in model_advisor.py at the same time would make sense."
-  },
-  "models": [
-    {
-      "id": "qwen3.5-0.8b-4bit",
-      "huggingface": "mlx-community/Qwen3.5-0.8B-4bit",
-      "size_gb": 0.6,
-      "architecture": "qwen3_5",
-      "max_context_architectural": 262144,
-      "display": {
-        "tagline": "Ultra-light sanity-check model",
-        "good_for": "Verifying the local model stack works end to end, and instant replies to trivial one-off questions. Not a real coding assistant \u2014 too small to trust with anything you'd actually ship.",
-        "usage_examples": [
-          "\"Reply with exactly the word: pong\" \u2014 smoke-test that opencode/Claude Code \u2192 LiteLLM \u2192 MLX is wired up correctly before loading a bigger model",
-          "\"What's the syntax for a Python list comprehension?\" \u2014 quick trivia lookup, not real code generation"
-        ],
-        "known_issues": "Too small for real coding work \u2014 expect frequent mistakes on anything beyond a trivial snippet. Use only to test the pipeline itself, never as a daily driver.",
-        "size_label": "0.6 GB",
-        "max_context_label": "262,144 tokens (architectural max)"
-      },
-      "verification": {
-        "verdict": "SAFE",
-        "verified_at": "2026-09-28T00:54:52Z",
-        "mlx_vlm_version": "0.7.0",
-        "notes": "Admission gate verified at 32/256/1024-token bounds. Real long-context memory load not stress-tested, but model is small enough this is low risk."
-      },
-      "tool_calling": {
-        "verdict": "SUPPORTED",
-        "verified_at": "2026-09-28T08:54:00Z",
-        "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
-        "tool_parser": "qwen3_coder",
-        "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call (name + JSON arguments) on the first attempt, despite being the smallest model in this list (0.6GB) \u2014 structural tool-call support is not a function of model size for this family."
-      },
-      "kv_config": {
-        "num_key_value_heads": 2,
-        "head_dim": 256,
-        "num_hidden_layers": 24,
-        "layer_types": [
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention"
-        ],
-        "sliding_window": null
-      }
+    "_comment": "Candidate local models for start_litellm_proxy.sh's interactive menu, served via mlx_vlm.server (not Ollama — see LITELLM_PROXY_USAGE.md for why). Every entry here has been through verify_max_kv_size.sh with verdict SAFE before being added; do not add a model to this file without running that script first. 'display' fields are shown to the user when picking a model, in plain language they can act on without reading the underlying research docs.",
+    "_schema_notes": {
+        "size_gb": "Real on-disk size, measured directly (du -sh on the cached HF repo), not estimated from quantization bit-width.",
+        "max_context_architectural": "The model's trained/architectural context ceiling, read from its own config.json (max_position_embeddings). This is NOT the same as a safe operating context on any given machine — see recommended_max_kv_size_gb_tier (pending) once real-load memory testing is done.",
+        "verification": "Result of verify_max_kv_size.sh — confirms mlx_vlm.server's --max-kv-size admission gate actually rejects oversized requests for this model rather than silently ignoring them (the failure mode Ollama's MLX runner has, unfixably, per LITELLM_ROUTING_PLAN.md §4.15 and upstream Ollama issue discussion). It does NOT confirm real long-context memory safety — that needs a separate near-cap-fill test (LITELLM_ROUTING_PLAN.md §4.14 methodology) not yet run for any model in this file.",
+        "tool_calling": "Whether OpenCode/Claude Code's tool calls (webfetch, bash, edit, etc.) actually come back as a structured, parseable tool_calls response instead of silently degrading to plain chat text. Determined by LIVE testing (real /v1/chat/completions request with a tool schema attached, temperature=0), not by static inspection of the chat template or by which mlx_vlm tool_parser gets auto-assigned — several models (the whole qwen2.5-coder-*-instruct family) get assigned a parser (json_tools) that matches their template's markers, yet still fail live because the model itself doesn't reliably emit the <tool_call> tags its own template instructs it to use. That specific failure was independently reproduced on TWO OTHER serving stacks besides mlx_vlm (vLLM — see github.com/QwenLM/Qwen3-Coder/issues/180 — and Ollama/llama.cpp, tested directly on this machine 2026-09-28), confirming it's a property of the model's own fine-tuning, not a bug in any one harness. phi-4-mini-instruct-4bit is the opposite case: Microsoft's own model card documents real function-calling support and benchmarks it on Berkeley Function-Calling Leaderboard, but mlx_vlm's tool_parsers registry (mlx_vlm/tool_parsers/__init__.py's _TEMPLATE_MARKERS) has no entry matching Phi's <|tool|>/<|tool_call|> token format, so mlx_vlm never even tries to parse its output — a serving-stack gap, not a model capability gap (vLLM has a dedicated --tool-call-parser phi4_mini_json for this exact model, merged via vllm-project/vllm#14886). KNOWN GAP (historical): model_advisor.py did NOT read this field, so the interactive picker would recommend a NOT_SUPPORTED model (e.g. the former qwen2.5-coder-*-instruct or phi-4-mini-instruct-4bit entries, both since removed from this catalog — see PROJECT_STATUS.md items #20-#21) for coding tasks without warning that tool use would silently no-op. Any future NOT_SUPPORTED entry added to this catalog has the same exposure until model_advisor.py is updated to read this field. Same pattern as max_context_verified_safe's documented gap above; fixing both in model_advisor.py at the same time would make sense."
     },
-    {
-      "id": "qwen2.5-coder-3b-instruct-4bit",
-      "huggingface": "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit",
-      "size_gb": 1.6,
-      "architecture": "qwen2",
-      "max_context_architectural": 32768,
-      "display": {
-        "tagline": "Lightweight coding assistant",
-        "good_for": "Simple coding help on a memory-constrained machine \u2014 function-level edits, boilerplate, and short scripts. The conservative fallback on a 16GB Mac if the 7B model feels too tight alongside other running apps.",
-        "usage_examples": [
-          "\"Write a Python function that parses this CSV format and returns a list of dicts\" \u2014 clear-spec utility code",
-          "\"Explain what this 20-line function does\" \u2014 code comprehension on a short, self-contained snippet"
-        ],
-        "known_issues": "32K architectural context ceiling \u2014 will not hold a large repo's AGENTS.md plus several file reads without hitting the limit. Struggles with complex multi-file reasoning; keep tasks scoped to one file/function at a time. \u274c TOOL CALLS DO NOT WORK: confirmed broken on THREE separate serving stacks (mlx_vlm, vLLM, and Ollama/llama.cpp) \u2014 the model ignores its own chat template's <tool_call> instructions and instead wraps attempted calls in <tools>/<response> tags that no parser recognizes, so OpenCode/Claude Code tool use (webfetch, bash, edit, etc.) silently falls back to plain chat text. Do not use for agentic/tool-using work \u2014 see tool_calling below.",
-        "size_label": "1.6 GB",
-        "max_context_label": "32,768 tokens (architectural max)"
-      },
-      "verification": {
-        "verdict": "SAFE",
-        "verified_at": "2026-09-28T01:10:12Z",
-        "mlx_vlm_version": "0.7.0",
-        "notes": "Admission gate verified at 32/256/1024-token bounds. Real long-context memory load not yet stress-tested."
-      },
-      "tool_calling": {
-        "verdict": "NOT_SUPPORTED",
-        "verified_at": "2026-09-28T09:07:00Z",
-        "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0 (repeated 3x, deterministic). Independently re-confirmed via Ollama 0.33.2 (qwen2.5-coder:3b-instruct, Q4_K_M GGUF) through both its OpenAI-compat and native /api/chat endpoints.",
-        "tool_parser": "json_tools (auto-assigned by mlx_vlm \u2014 template matches, model output doesn't)",
-        "notes": "finish_reason=stop every time, tool_calls always null/absent. Model echoes the tool schema back wrapped in <tools></tools> then attempts the call wrapped in <response>{...}</response> \u2014 never uses the <tool_call></tool_call> tags its own chat template explicitly instructs it to use. Same failure independently reported by a third party against vLLM: github.com/QwenLM/Qwen3-Coder/issues/180. This is a property of the model's fine-tuning, confirmed across 3 independent serving stacks \u2014 not fixable by switching harnesses."
-      },
-      "kv_config": {
-        "num_key_value_heads": 2,
-        "head_dim": 128.0,
-        "num_hidden_layers": 36,
-        "layer_types": null,
-        "sliding_window": 32768
-      }
-    },
-    {
-      "id": "phi-4-mini-instruct-4bit",
-      "huggingface": "mlx-community/Phi-4-mini-instruct-4bit",
-      "size_gb": 2.0,
-      "architecture": "phi3",
-      "max_context_architectural": 131072,
-      "display": {
-        "tagline": "Small general-purpose model with a large context window",
-        "good_for": "General assistant tasks and long-document Q&A on a tight-memory machine \u2014 its 128K architectural ceiling is unusually large for a 2GB model. Not coder-specialized, so treat it as an alternative to the Qwen-Coder models rather than a replacement.",
-        "usage_examples": [
-          "\"Summarize the key changes in this 5,000-line log file\" \u2014 long-document analysis that would overflow the 32K-context coder models",
-          "\"Rewrite this paragraph to be more concise\" \u2014 general writing/instruction-following, not code-specific"
-        ],
-        "known_issues": "Not coding-specialized \u2014 likely to underperform the Qwen2.5-Coder models on actual code generation despite the larger context window. Use for long-context or general tasks, not as your primary coding model. \u274c TOOL CALLS DO NOT WORK ON THIS STACK: Microsoft's model card documents real function-calling support for this model (benchmarked on Berkeley Function-Calling Leaderboard), but mlx_vlm has no parser for Phi's <|tool|>/<|tool_call|> token format, so it never even attempts to parse tool calls out of this model's output \u2014 see tool_calling below. Do not use for agentic/tool-using work on this setup.",
-        "size_label": "2.0 GB",
-        "max_context_label": "131,072 tokens (architectural max)"
-      },
-      "verification": {
-        "verdict": "SAFE",
-        "verified_at": "2026-09-28T01:13:21Z",
-        "mlx_vlm_version": "0.7.0",
-        "notes": "Admission gate verified at 32/256/1024-token bounds. Real long-context memory load not yet stress-tested \u2014 worth particular attention given its 128K architectural ceiling is 4x the Qwen-Coder models'."
-      },
-      "tool_calling": {
-        "verdict": "NOT_SUPPORTED",
-        "verified_at": "2026-09-28T08:53:52Z",
-        "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached.",
-        "tool_parser": "none \u2014 mlx_vlm's _infer_tool_parser() returned None for this model's chat template",
-        "notes": "finish_reason=stop, tool_calls=null, prompt_tokens was suspiciously small (26) meaning the tool schema wasn't even rendered into the prompt \u2014 model just answered from its own knowledge ('I can't perform web searches...'). This is a SERVING-STACK GAP, not a model limitation: Phi-4-mini's own added_tokens.json has dedicated <|tool|>/<|/tool|>/<|tool_call|>/<|/tool_call|>/<|tool_response|> tokens and Microsoft explicitly documents + benchmarks function-calling support for this exact model. vLLM has a dedicated --tool-call-parser phi4_mini_json for it (merged vllm-project/vllm#14886), but that parser has no mlx_vlm equivalent, and vLLM itself has no real Apple Silicon GPU acceleration (multiple Metal/MPS PRs abandoned as of 2026-09), so switching stacks just to fix this specific model isn't practical on this machine."
-      },
-      "kv_config": {
-        "num_key_value_heads": 8,
-        "head_dim": 128.0,
-        "num_hidden_layers": 32,
-        "layer_types": null,
-        "sliding_window": 262144
-      }
-    },
-    {
-      "id": "qwen2.5-coder-7b-instruct-3bit",
-      "huggingface": "mlx-community/Qwen2.5-Coder-7B-Instruct-3bit",
-      "size_gb": 3.1,
-      "architecture": "qwen2",
-      "max_context_architectural": 32768,
-      "display": {
-        "tagline": "More capable coder, extra-quantized to save memory",
-        "good_for": "A step up in coding capability from the 3B model, at nearly the same memory footprint as the 4-bit 7B thanks to 3-bit quantization. Consider this over the 4-bit version specifically when memory is the binding constraint.",
-        "usage_examples": [
-          "\"Refactor this function to handle the edge case where the input list is empty\" \u2014 multi-step reasoning within a single file",
-          "\"Write unit tests for this function covering the main cases\" \u2014 test generation for existing code"
-        ],
-        "known_issues": "3-bit quantization trades some accuracy for size \u2014 expect occasional subtle mistakes the 4-bit sibling wouldn't make (wrong variable name, off-by-one, slightly wrong logic branch). Same 32K architectural ceiling as the 4-bit version. Prefer the 4-bit variant when the extra ~0.9GB isn't the deciding factor. \u274c TOOL CALLS DO NOT WORK: same Qwen2.5-Coder-Instruct family failure as the 3B/4bit/14B siblings \u2014 see tool_calling below and qwen2.5-coder-3b-instruct-4bit's notes for the cross-stack confirmation.",
-        "size_label": "3.1 GB",
-        "max_context_label": "32,768 tokens (architectural max)"
-      },
-      "verification": {
-        "verdict": "SAFE",
-        "verified_at": "2026-09-28T01:26:52Z",
-        "mlx_vlm_version": "0.7.0",
-        "notes": "Admission gate verified at 32/256/1024-token bounds, after fixing a real script bug (a stale server process from a prior failed download briefly caused a false reading \u2014 see verify_max_kv_size.sh's wait_for_port_free/served-model check, added specifically because of this incident). Real long-context memory load not yet stress-tested."
-      },
-      "tool_calling": {
-        "verdict": "NOT_SUPPORTED",
-        "verified_at": "2026-09-28T09:07:15Z",
-        "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
-        "tool_parser": "json_tools (auto-assigned by mlx_vlm \u2014 template matches, model output doesn't)",
-        "notes": "finish_reason=stop, tool_calls=null. Model wrapped its attempted call in a ```json code block instead of the <tool_call></tool_call> tags its own template instructs \u2014 a different wrong format than the 3B (<tools>/<response>) and 4bit (```xml/<tools>) siblings, but the same underlying failure: this whole model family doesn't reliably follow its own tool-call output format regardless of quantization."
-      },
-      "kv_config": {
-        "num_key_value_heads": 4,
-        "head_dim": 128.0,
-        "num_hidden_layers": 28,
-        "layer_types": null,
-        "sliding_window": 131072
-      }
-    },
-    {
-      "id": "qwen2.5-coder-7b-instruct-4bit",
-      "huggingface": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
-      "size_gb": 4.0,
-      "architecture": "qwen2",
-      "max_context_architectural": 32768,
-      "display": {
-        "tagline": "Recommended default for 16GB Macs",
-        "good_for": "Real coding capability without the memory pressure of the 9B+ models \u2014 the primary recommendation for a 16GB MacBook Pro. Enough headroom left over for KV cache, the OS, and normal background apps.",
-        "usage_examples": [
-          "\"Implement a REST endpoint that validates this payload and writes it to the database\" \u2014 moderately complex, multi-step feature work",
-          "\"Review this diff and point out any bugs or style issues\" \u2014 code review on a realistic-sized change"
-        ],
-        "known_issues": "32K architectural ceiling means a large repo's AGENTS.md plus a long conversation history will need compaction sooner than a 128K-class model would. Not yet stress-tested at real long-context memory load (only the admission gate is verified). \u274c TOOL CALLS DO NOT WORK: same Qwen2.5-Coder-Instruct family failure as the 3B/3bit/14B siblings \u2014 see tool_calling below.",
-        "size_label": "4.0 GB",
-        "max_context_label": "32,768 tokens (architectural max)"
-      },
-      "verification": {
-        "verdict": "SAFE",
-        "verified_at": "2026-09-28T01:22:02Z",
-        "mlx_vlm_version": "0.7.0",
-        "notes": "Admission gate verified at 32/256/1024-token bounds, after fixing a real script bug (see qwen2.5-coder-7b-instruct-3bit's note \u2014 same incident, same fix applies to this model's result too since both were retested after the fix). Real long-context memory load not yet stress-tested."
-      },
-      "tool_calling": {
-        "verdict": "NOT_SUPPORTED",
-        "verified_at": "2026-09-28T09:07:14Z",
-        "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
-        "tool_parser": "json_tools (auto-assigned by mlx_vlm \u2014 template matches, model output doesn't)",
-        "notes": "finish_reason=stop, tool_calls=null. Model wrapped its attempted call in ```xml fenced <tools></tools> tags instead of the <tool_call></tool_call> tags its own template instructs \u2014 yet another wrong format, distinct from the 3bit sibling's plain ```json block. Confirms this is a per-generation-sampling issue with the model's fine-tuning, not a deterministic template bug that a fixed prompt tweak would solve."
-      },
-      "kv_config": {
-        "num_key_value_heads": 4,
-        "head_dim": 128.0,
-        "num_hidden_layers": 28,
-        "layer_types": null,
-        "sliding_window": 131072
-      }
-    },
-    {
-      "id": "gemma-4-e4b-it-4bit",
-      "huggingface": "mlx-community/gemma-4-e4b-it-4bit",
-      "size_gb": 4.82,
-      "architecture": "gemma4 (elastic/MatFormer \"E4B\" variant)",
-      "max_context_architectural": 131072,
-      "display": {
-        "tagline": "Small multimodal option, 16-24GB Macs",
-        "good_for": "The lightest multimodal (vision-capable) option in this list \u2014 fills the gap between the tiny text-only models and the 12B+ multimodal models. \"E4B\" is Gemma's elastic/MatFormer naming (effective ~4B capacity), not a typo for a plain 4B model.",
-        "usage_examples": [
-          "\"What does this error dialog screenshot say, and how do I fix it?\" \u2014 lightweight vision Q&A without the memory cost of the 12B multimodal model",
-          "\"Summarize this scanned receipt/document image\" \u2014 small-scale multimodal tasks on a 16-24GB Mac"
-        ],
-        "known_issues": "131K architectural ceiling \u2014 smaller than the plain 12B/26B Gemma-4 models (262K), since this elastic variant trades some capacity for its smaller footprint. As an elastic/MatFormer model, its internal cache-building path differs from the plain Gemma-4 models \u2014 verified separately rather than assumed safe by analogy.",
-        "size_label": "4.82 GB",
-        "max_context_label": "131,072 tokens (architectural max); sliding_window=512 internally"
-      },
-      "verification": {
-        "verdict": "SAFE",
-        "verified_at": "2026-09-28T02:27:42Z",
-        "mlx_vlm_version": "0.7.0",
-        "notes": "Admission gate verified at 32/256/1024-token bounds. First elastic/MatFormer-architecture model tested \u2014 passed despite having a different cache-building path than the plain gemma-4-12b/26b models, which was worth checking rather than assuming."
-      },
-      "tool_calling": {
-        "verdict": "SUPPORTED",
-        "verified_at": "2026-09-28T09:40:00Z",
-        "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
-        "tool_parser": "gemma4",
-        "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call on the first attempt."
-      },
-      "kv_config": {
-        "num_key_value_heads": 2,
-        "head_dim": 256,
-        "num_hidden_layers": 42,
-        "layer_types": [
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention"
-        ],
-        "sliding_window": 512
-      }
-    },
-    {
-      "id": "gemma-4-12b-it-4bit",
-      "huggingface": "mlx-community/gemma-4-12B-it-4bit",
-      "size_gb": 6.31,
-      "architecture": "gemma4_unified",
-      "max_context_architectural": 262144,
-      "display": {
-        "tagline": "Lighter version of our trusted 12B multimodal model",
-        "good_for": "Same model as gemma-4-12b-it-8bit already in this list (proven safe), just 4-bit instead of 8-bit \u2014 meaningfully lighter (6.31GB vs 12GB) for a 16-24GB Mac that still wants vision support.",
-        "usage_examples": [
-          "\"What's wrong with this UI based on the screenshot?\" \u2014 visual analysis, same capability as the 8-bit version",
-          "\"Describe the architecture shown in this diagram\" \u2014 vision+text reasoning with more memory headroom left over"
-        ],
-        "known_issues": "Same thermal/efficiency caveat as the 8-bit sibling (Gemma-4's architecture is less MLX-efficient at long context than Qwen3.5's). 4-bit quantization trades some accuracy for the smaller footprint versus the 8-bit version.",
-        "size_label": "6.31 GB",
-        "max_context_label": "262,144 tokens (architectural max); sliding_window=1024 internally"
-      },
-      "verification": {
-        "verdict": "SAFE",
-        "verified_at": "2026-09-28T02:36:29Z",
-        "mlx_vlm_version": "0.7.0",
-        "notes": "Admission gate verified at 32/256/1024-token bounds."
-      },
-      "tool_calling": {
-        "verdict": "SUPPORTED",
-        "verified_at": "2026-09-28T09:40:15Z",
-        "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
-        "tool_parser": "gemma4",
-        "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call on the first attempt."
-      },
-      "kv_config": {
-        "num_key_value_heads": 8,
-        "head_dim": 256,
-        "num_hidden_layers": 48,
-        "layer_types": [
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention"
-        ],
-        "sliding_window": 1024
-      }
-    },
-    {
-      "id": "qwen3-14b-4bit",
-      "huggingface": "mlx-community/Qwen3-14B-4bit",
-      "size_gb": 7.75,
-      "architecture": "qwen3 (plain, not qwen3_5's hybrid linear/full-attention design)",
-      "max_context_architectural": 40960,
-      "display": {
-        "tagline": "General-purpose alternative for 24GB Macs",
-        "good_for": "A capable general-purpose model distinct from both the Qwen2.5-Coder family (coding-specialized) and Qwen3.5 (hybrid attention architecture) already in this list \u2014 genuine architectural diversity, not just a different size of something we already have.",
-        "usage_examples": [
-          "\"Help me think through the tradeoffs of these two approaches\" \u2014 general reasoning, not code-specific",
-          "\"Draft a design doc for this feature\" \u2014 writing/planning tasks alongside coding work"
-        ],
-        "known_issues": "40,960-token architectural ceiling \u2014 smaller than Qwen3.5's 262K and Phi-4-mini's 131K, but larger than the Qwen2.5-Coder models' 32K. Not coding-specialized, so expect the Qwen2.5-Coder-14B model to outperform it on actual code generation despite similar size.",
-        "size_label": "7.75 GB",
-        "max_context_label": "40,960 tokens (architectural max)"
-      },
-      "verification": {
-        "verdict": "SAFE",
-        "verified_at": "2026-09-28T02:47:10Z",
-        "mlx_vlm_version": "0.7.0",
-        "notes": "Admission gate verified at 32/256/1024-token bounds. First plain-qwen3 architecture tested (distinct from qwen2 and qwen3_5, both already covered elsewhere in this list) \u2014 no prior model in this list shared this exact architecture, so this result carries no assumption from analogy."
-      },
-      "tool_calling": {
-        "verdict": "SUPPORTED",
-        "verified_at": "2026-09-28T09:14:00Z",
-        "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
-        "tool_parser": "json_tools",
-        "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call. Important control result: this model uses the SAME json_tools parser as the entire qwen2.5-coder-*-instruct family (all NOT_SUPPORTED), proving the parser itself works fine \u2014 the failure in that family is specific to Qwen2.5-Coder's own fine-tuning, not to json_tools."
-      },
-      "kv_config": {
-        "num_key_value_heads": 8,
-        "head_dim": 128,
-        "num_hidden_layers": 40,
-        "layer_types": null,
-        "sliding_window": null
-      }
-    },
-    {
-      "id": "qwen2.5-coder-14b-instruct-4bit",
-      "huggingface": "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
-      "size_gb": 7.8,
-      "architecture": "qwen2",
-      "max_context_architectural": 32768,
-      "display": {
-        "tagline": "Recommended coding upgrade for 24GB Macs",
-        "good_for": "A real capability step up from the 7B Coder model for a 24GB Mac \u2014 same architecture family and same 32K context ceiling, just more capable at the same coding-specialized task.",
-        "usage_examples": [
-          "\"Implement this feature across several files and keep the existing code style\" \u2014 more demanding multi-file coding tasks than the 7B model handles well",
-          "\"Debug why this test is failing and fix it\" \u2014 more reliable reasoning through non-trivial bugs"
-        ],
-        "known_issues": "Same 32K architectural ceiling as the 3B/7B Coder models in this family \u2014 a large repo's AGENTS.md plus a long conversation will still need compaction sooner than a 128K+ class model. Encountered a real download-reliability issue during verification (see verification notes) \u2014 resolved by the harness, not a property of the model itself. \u274c TOOL CALLS DO NOT WORK: same Qwen2.5-Coder-Instruct family failure as the 3B/3bit/4bit siblings \u2014 see tool_calling below.",
-        "size_label": "7.8 GB",
-        "max_context_label": "32,768 tokens (architectural max)"
-      },
-      "verification": {
-        "verdict": "SAFE",
-        "verified_at": "2026-09-28T02:21:00Z",
-        "mlx_vlm_version": "0.7.0",
-        "notes": "Admission gate verified at 32/256/1024-token bounds, after fixing a real script bug: repeated health-check timeouts during this model's initial download each killed the in-progress transfer with no resume, leaving 5 abandoned .incomplete blob fragments (8GB) without ever completing the real 7.75GB download. Fixed by adding a standalone snapshot_download() pre-download step to verify_max_kv_size.sh, run before the server (and its kill-on-timeout path) ever touches the model \u2014 this fix now applies to every model verified after this one."
-      },
-      "tool_calling": {
-        "verdict": "NOT_SUPPORTED",
-        "verified_at": "2026-09-28T09:07:35Z",
-        "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
-        "tool_parser": "json_tools (auto-assigned by mlx_vlm \u2014 template matches, model output doesn't)",
-        "notes": "finish_reason=stop, tool_calls=null. Model wrapped its attempted call in bare <tools></tools> tags instead of the <tool_call></tool_call> tags its own template instructs \u2014 confirms the whole Qwen2.5-Coder-Instruct family fails regardless of size (3B/7B-3bit/7B-4bit/14B all fail, each with a slightly different wrong wrapper)."
-      },
-      "kv_config": {
-        "num_key_value_heads": 8,
-        "head_dim": 128.0,
-        "num_hidden_layers": 48,
-        "layer_types": null,
-        "sliding_window": 131072
-      }
-    },
-    {
-      "id": "qwen3.5-9b-mlx-8bit",
-      "huggingface": "mlx-community/Qwen3.5-9B-MLX-8bit",
-      "size_gb": 9.7,
-      "architecture": "qwen3_5",
-      "max_context_architectural": 262144,
-      "display": {
-        "tagline": "Best all-around choice on 24GB+ Macs",
-        "good_for": "The strongest general recommendation once you have 24GB+ of RAM \u2014 a real 128K-class context window with the fastest measured MLX throughput of any model in this list (1.7-2.5x faster than its own GGUF counterpart at every context size tested, per prior benchmarking).",
-        "usage_examples": [
-          "\"Work through this repo-wide refactor\" \u2014 tasks that need the model to hold a lot of file context at once",
-          "\"Let's pair-program through implementing this feature over several turns\" \u2014 long multi-turn sessions without hitting context limits quickly"
-        ],
-        "known_issues": "9.7GB of weights alone is too much on a 16GB Mac \u2014 leaves too little headroom for KV cache plus the OS and background apps. Not recommended below 24GB.",
-        "size_label": "9.7 GB",
-        "max_context_label": "262,144 tokens (architectural max)"
-      },
-      "verification": {
-        "verdict": "SAFE",
-        "verified_at": "2026-09-28T00:54:28Z",
-        "mlx_vlm_version": "0.7.0",
-        "notes": "First model verified \u2014 admission gate confirmed at 32/256/1024-token bounds, matching upstream mlx-vlm PR #1995's own reproduction scale exactly (that PR reports this class of model silently ignoring max-kv-size on 97/173 mlx-vlm-supported models; this specific model was not one of them, at least for single-turn HTTP requests)."
-      },
-      "tool_calling": {
-        "verdict": "SUPPORTED",
-        "verified_at": "2026-09-28T08:56:00Z",
-        "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached (multi-turn round-trip tested: initial call + tool result fed back + final answer). Independently re-confirmed via Ollama 0.33.2 (qwen3.5:9b) through its OpenAI-compat endpoint.",
-        "tool_parser": "qwen3_coder",
-        "notes": "Correctly returned finish_reason=tool_calls on both mlx_vlm and Ollama, and correctly produced a coherent final answer after being fed a fabricated tool result in a second request. The most thoroughly-tested working model in this list."
-      },
-      "kv_config": {
-        "num_key_value_heads": 4,
-        "head_dim": 256,
-        "num_hidden_layers": 32,
-        "layer_types": [
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention"
-        ],
-        "sliding_window": null
-      }
-    },
-    {
-      "id": "gemma-4-12b-it-8bit",
-      "huggingface": "mlx-community/gemma-4-12B-it-8bit",
-      "size_gb": 12,
-      "architecture": "gemma4_unified",
-      "max_context_architectural": 262144,
-      "display": {
-        "tagline": "Multimodal (vision-capable) option, 24GB+ Macs",
-        "good_for": "Tasks that need image understanding, not just text \u2014 the smaller of the two multimodal candidates in this list.",
-        "usage_examples": [
-          "\"What's wrong with this UI based on the screenshot?\" \u2014 visual analysis of an image",
-          "\"Describe the architecture shown in this diagram\" \u2014 vision+text reasoning"
-        ],
-        "known_issues": "Prior benchmarking found Gemma-4's architecture is thermally less efficient on MLX than Qwen3.5's hybrid attention \u2014 expect earlier fan/thermal escalation at long context than qwen3.5-9b-mlx-8bit. Not viable on 16GB.",
-        "size_label": "12 GB",
-        "max_context_label": "262,144 tokens (architectural max); sliding_window=1024 internally"
-      },
-      "verification": {
-        "verdict": "SAFE",
-        "verified_at": "2026-09-28T01:01:42Z",
-        "mlx_vlm_version": "0.7.0",
-        "notes": "Admission gate verified at 32/256/1024-token bounds."
-      },
-      "tool_calling": {
-        "verdict": "SUPPORTED",
-        "verified_at": "2026-09-28T09:41:00Z",
-        "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
-        "tool_parser": "gemma4",
-        "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call on the first attempt."
-      },
-      "kv_config": {
-        "num_key_value_heads": 8,
-        "head_dim": 256,
-        "num_hidden_layers": 48,
-        "layer_types": [
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention"
-        ],
-        "sliding_window": 1024
-      }
-    },
-    {
-      "id": "gemma-4-26b-a4b-it-4bit",
-      "huggingface": "mlx-community/gemma-4-26b-a4b-it-4bit",
-      "size_gb": 14,
-      "architecture": "gemma4",
-      "is_moe": true,
-      "active_weight_gb": null,
-      "_active_weight_note": "MoE (num_experts=128 per config.json), but config.json is missing num_experts_per_tok \u2014 cannot compute the active-expert fraction the way qwen3-coder-30b-a3b-instruct-4bit's config allowed. Left null deliberately rather than guessed; model_advisor.py's speed estimator correctly reports 'unknown' for this model rather than a fabricated number. Needs its own live decode-speed benchmark to get a real active_weight_gb.",
-      "max_context_architectural": 262144,
-      "display": {
-        "tagline": "Larger multimodal option, 32GB+ Macs",
-        "good_for": "More demanding vision+text tasks than the 12B model can handle well \u2014 the larger of the two multimodal candidates.",
-        "usage_examples": [
-          "\"Analyze this multi-page scanned document and extract the key data\" \u2014 larger-scale multimodal document analysis",
-          "\"Compare these two screenshots and describe what changed\" \u2014 more demanding vision reasoning"
-        ],
-        "known_issues": "Same thermal caveat as the 12B sibling, at a larger scale. Not viable on 16GB or 24GB Macs \u2014 this is a 32GB+ recommendation only.",
-        "size_label": "14 GB",
-        "max_context_label": "262,144 tokens (architectural max); sliding_window=1024 internally"
-      },
-      "verification": {
-        "verdict": "SAFE",
-        "verified_at": "2026-09-28T01:02:13Z",
-        "mlx_vlm_version": "0.7.0",
-        "notes": "Admission gate verified at 32/256/1024-token bounds."
-      },
-      "tool_calling": {
-        "verdict": "SUPPORTED",
-        "verified_at": "2026-09-28T09:32:00Z",
-        "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
-        "tool_parser": "gemma4",
-        "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call on the first attempt."
-      },
-      "kv_config": {
-        "num_key_value_heads": 8,
-        "head_dim": 256,
-        "num_hidden_layers": 30,
-        "layer_types": [
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "sliding_attention",
-          "full_attention"
-        ],
-        "sliding_window": 1024
-      }
-    },
-    {
-      "id": "qwen3.8-27b-4bit",
-      "huggingface": "mlx-community/Qwen3.8-27B-4bit",
-      "size_gb": 15,
-      "architecture": "qwen3_5",
-      "max_context_architectural": 262144,
-      "display": {
-        "tagline": "Most capable dense text model, 32GB+ Macs",
-        "good_for": "Complex reasoning and demanding coding tasks where the 9B model isn't quite enough \u2014 the largest dense (non-MoE) text model in this list.",
-        "usage_examples": [
-          "\"Design the data model for this feature and explain the tradeoffs\" \u2014 complex reasoning that benefits from a larger parameter count",
-          "\"Implement this algorithm and explain its time complexity\" \u2014 demanding coding + explanation tasks"
-        ],
-        "known_issues": "Not viable below 32GB. Real long-context memory behavior has not been stress-tested \u2014 only the admission gate is verified so far.",
-        "size_label": "15 GB",
-        "max_context_label": "262,144 tokens (architectural max)"
-      },
-      "verification": {
-        "verdict": "SAFE",
-        "verified_at": "2026-09-28T01:02:47Z",
-        "mlx_vlm_version": "0.7.0",
-        "notes": "Admission gate verified at 32/256/1024-token bounds."
-      },
-      "tool_calling": {
-        "verdict": "SUPPORTED",
-        "verified_at": "2026-09-28T09:32:20Z",
-        "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
-        "tool_parser": "qwen3_coder",
-        "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call on the first attempt."
-      },
-      "kv_config": {
-        "num_key_value_heads": 4,
-        "head_dim": 256,
-        "num_hidden_layers": 64,
-        "layer_types": [
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention",
-          "linear_attention",
-          "linear_attention",
-          "linear_attention",
-          "full_attention"
-        ],
-        "sliding_window": null
-      }
-    },
-    {
-      "id": "qwen3-coder-30b-a3b-instruct-4bit",
-      "huggingface": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
-      "size_gb": 16,
-      "architecture": "qwen3_moe",
-      "is_moe": true,
-      "active_weight_gb": 2.58,
-      "_active_weight_note": "Derived from a real live decode-speed benchmark on this machine (103.7 tok/s measured, per HARDWARE_SPEED_ESTIMATION.md \u00a77), working backward through the bandwidth formula \u2014 NOT computed purely from config.json's num_experts_per_tok/num_experts=8/128 ratio (which alone gives ~1.0GB, undercounting always-active attention/embedding layers). This is the one MoE model in this list with a real measurement behind its active-weight figure; do not copy this number to any other MoE model without its own benchmark.",
-      "max_context_architectural": 262144,
-      "max_context_verified_safe": 28276,
-      "_max_context_verified_safe_note": "NOT a formula output \u2014 the highest actual prompt_tokens that completed successfully in verify_long_context_memory.sh's real stress test (see below). model_advisor.py does NOT yet consult this field and will still recommend up to max_context_architectural based on free memory alone \u2014 see PROJECT_STATUS.md's open items for this known gap.",
-      "display": {
-        "tagline": "\u274c CONFIRMED long-context memory-safety failure \u2014 do not use above ~28K tokens",
-        "good_for": "Only short/moderate-context coding tasks (well under ~28K prompt tokens) until root-caused. Do NOT use for large-repo or long-session work despite its architectural 262,144-token ceiling \u2014 real testing found that ceiling is not safely reachable on this server/quantization combination.",
-        "usage_examples": [
-          "\"Implement this one function, given this single file\" \u2014 short, self-contained coding tasks that stay well under ~28K prompt tokens",
-          "NOT RECOMMENDED for large-scale/repo-wide tasks \u2014 see known_issues"
-        ],
-        "known_issues": "CONFIRMED via a real long-context memory stress test (verify_long_context_memory.sh, 2026-09-27), not just the prior unresolved flag: with mlx_vlm.server running this model's actual production flags (--max-kv-size 131072 --kv-bits 8 --kv-group-size 64 --quantized-kv-start 0 --kv-quant-scheme uniform), a 28,276-token prompt completed safely (wired memory settled ~21GB), but a 40,000-token-target prompt and a 58,982-token-target prompt BOTH failed the same way: wired memory grew without bound throughout prefill (not proportional to the token count \u2014 both failures happened at a similar ~113-117s elapsed mark despite the different target sizes, suggesting the growth tracks ELAPSED PREFILL TIME/chunk count more than KV-cache size), crossed 38GB, and had to be forcibly killed by monitor_memory.sh's safety net before the request ever completed. Root cause not identified (plausibly a per-prefill-chunk buffer that mlx_vlm.server isn't releasing for this model/quantization combination \u2014 not confirmed). Ruling out KV quantization as the sole cause: a separate controlled test confirmed this model recalls a fixed secret correctly at ~28K tokens with BOTH quantized and unquantized KV, so the failure is specific to sustained/longer prefill, not to quantization precision. Full data: mlx_long_context_stress_results.json. DO NOT recommend this model for long-context use, and never run it without monitor_memory.sh (--monitor) active as a safety net, until this is root-caused and either fixed or given a hard verified-safe context cap in this file that model_advisor.py actually enforces.",
-        "size_label": "16 GB",
-        "max_context_label": "262,144 tokens (architectural max \u2014 NOT safely reachable, see known_issues)"
-      },
-      "verification": {
-        "verdict": "SAFE",
-        "verified_at": "2026-09-28T01:03:19Z",
-        "mlx_vlm_version": "0.7.0",
-        "notes": "Admission gate verified at 32/256/1024-token bounds \u2014 this only confirms max-kv-size rejects oversized short requests correctly. Real long-context memory safety has since been tested (see long_context_verification below) and found UNSAFE \u2014 the two verdicts measure different things and are not in conflict."
-      },
-      "long_context_verification": {
-        "verdict": "UNSAFE",
-        "verified_at": "2026-09-28T03:38:00Z",
-        "method": "verify_long_context_memory.sh \u2014 escalating near-cap-fill prompts against the SAME production flags start_litellm_proxy.sh uses (max-kv-size 131072, kv-bits 8), with monitor_memory.sh watching the real server PID as the safety net.",
-        "notes": "Safe up to 28,276 actual prompt tokens (20% escalation step). Failed at both a 40,000-token-target follow-up probe and the 58,982-token-target (45%) escalation step \u2014 unbounded wired-memory growth during prefill, monitor-killed before ~38GB on this 48GB machine. See models.json's known_issues and mlx_long_context_stress_results.json for full detail."
-      },
-      "tool_calling": {
-        "verdict": "SUPPORTED",
-        "verified_at": "2026-09-28T09:32:40Z",
-        "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
-        "tool_parser": "qwen3_coder (this model also ships its own dedicated qwen3coder_tool_parser.py alongside its chat_template.jinja \u2014 the only model in this list with a model-specific parser file bundled in its own HF repo)",
-        "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call on the first attempt. Best-supported tool-calling model in this list on paper (purpose-built agentic/coding model with its own parser), but combine with the long_context_verification UNSAFE verdict above \u2014 don't push this model past ~28K prompt tokens regardless of how well tool calling itself works."
-      },
-      "kv_config": {
-        "num_key_value_heads": 4,
-        "head_dim": 128,
-        "num_hidden_layers": 48,
-        "layer_types": null,
-        "sliding_window": null
-      }
-    }
-  ]
+    "models": [
+        {
+            "id": "qwen3.5-0.8b-4bit",
+            "huggingface": "mlx-community/Qwen3.5-0.8B-4bit",
+            "size_gb": 0.6,
+            "architecture": "qwen3_5",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "Ultra-light sanity-check model",
+                "good_for": "Verifying the local model stack works end to end, and instant replies to trivial one-off questions. Not a real coding assistant — too small to trust with anything you'd actually ship.",
+                "usage_examples": [
+                    "\"Reply with exactly the word: pong\" — smoke-test that opencode/Claude Code → LiteLLM → MLX is wired up correctly before loading a bigger model",
+                    "\"What's the syntax for a Python list comprehension?\" — quick trivia lookup, not real code generation"
+                ],
+                "known_issues": "Too small for real coding work — expect frequent mistakes on anything beyond a trivial snippet. Use only to test the pipeline itself, never as a daily driver.",
+                "size_label": "0.6 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-09-28T00:54:52Z",
+                "mlx_vlm_version": "0.7.0",
+                "notes": "Admission gate verified at 32/256/1024-token bounds. Real long-context memory load not stress-tested, but model is small enough this is low risk."
+            },
+            "tool_calling": {
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-09-28T08:54:00Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
+                "tool_parser": "qwen3_coder",
+                "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call (name + JSON arguments) on the first attempt, despite being the smallest model in this list (0.6GB) — structural tool-call support is not a function of model size for this family."
+            },
+            "kv_config": {
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "num_hidden_layers": 24,
+                "layer_types": [
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"
+                ],
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "gemma-4-e4b-it-4bit",
+            "huggingface": "mlx-community/gemma-4-e4b-it-4bit",
+            "size_gb": 4.82,
+            "architecture": "gemma4 (elastic/MatFormer \"E4B\" variant)",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "Small multimodal option, 16-24GB Macs",
+                "good_for": "The lightest multimodal (vision-capable) option in this list — fills the gap between the tiny text-only models and the 12B+ multimodal models. \"E4B\" is Gemma's elastic/MatFormer naming (effective ~4B capacity), not a typo for a plain 4B model.",
+                "usage_examples": [
+                    "\"What does this error dialog screenshot say, and how do I fix it?\" — lightweight vision Q&A without the memory cost of the 12B multimodal model",
+                    "\"Summarize this scanned receipt/document image\" — small-scale multimodal tasks on a 16-24GB Mac"
+                ],
+                "known_issues": "131K architectural ceiling — smaller than the plain 12B/26B Gemma-4 models (262K), since this elastic variant trades some capacity for its smaller footprint. As an elastic/MatFormer model, its internal cache-building path differs from the plain Gemma-4 models — verified separately rather than assumed safe by analogy.",
+                "size_label": "4.82 GB",
+                "max_context_label": "131,072 tokens (architectural max); sliding_window=512 internally"
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-09-28T02:27:42Z",
+                "mlx_vlm_version": "0.7.0",
+                "notes": "Admission gate verified at 32/256/1024-token bounds. First elastic/MatFormer-architecture model tested — passed despite having a different cache-building path than the plain gemma-4-12b/26b models, which was worth checking rather than assuming."
+            },
+            "tool_calling": {
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-09-28T09:40:00Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
+                "tool_parser": "gemma4",
+                "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call on the first attempt."
+            },
+            "kv_config": {
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "num_hidden_layers": 42,
+                "layer_types": [
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 512
+            }
+        },
+        {
+            "id": "gemma-4-12b-it-4bit",
+            "huggingface": "mlx-community/gemma-4-12B-it-4bit",
+            "size_gb": 6.31,
+            "architecture": "gemma4_unified",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "Lighter version of our trusted 12B multimodal model",
+                "good_for": "Same model as gemma-4-12b-it-8bit already in this list (proven safe), just 4-bit instead of 8-bit — meaningfully lighter (6.31GB vs 12GB) for a 16-24GB Mac that still wants vision support.",
+                "usage_examples": [
+                    "\"What's wrong with this UI based on the screenshot?\" — visual analysis, same capability as the 8-bit version",
+                    "\"Describe the architecture shown in this diagram\" — vision+text reasoning with more memory headroom left over"
+                ],
+                "known_issues": "Same thermal/efficiency caveat as the 8-bit sibling (Gemma-4's architecture is less MLX-efficient at long context than Qwen3.5's). 4-bit quantization trades some accuracy for the smaller footprint versus the 8-bit version.",
+                "size_label": "6.31 GB",
+                "max_context_label": "262,144 tokens (architectural max); sliding_window=1024 internally"
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-09-28T02:36:29Z",
+                "mlx_vlm_version": "0.7.0",
+                "notes": "Admission gate verified at 32/256/1024-token bounds."
+            },
+            "tool_calling": {
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-09-28T09:40:15Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
+                "tool_parser": "gemma4",
+                "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call on the first attempt."
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 256,
+                "num_hidden_layers": 48,
+                "layer_types": [
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 1024
+            }
+        },
+        {
+            "id": "qwen3.5-9b-mlx-8bit",
+            "huggingface": "mlx-community/Qwen3.5-9B-MLX-8bit",
+            "size_gb": 9.7,
+            "architecture": "qwen3_5",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "Best all-around choice on 24GB+ Macs",
+                "good_for": "The strongest general recommendation once you have 24GB+ of RAM — a real 128K-class context window with the fastest measured MLX throughput of any model in this list (1.7-2.5x faster than its own GGUF counterpart at every context size tested, per prior benchmarking).",
+                "usage_examples": [
+                    "\"Work through this repo-wide refactor\" — tasks that need the model to hold a lot of file context at once",
+                    "\"Let's pair-program through implementing this feature over several turns\" — long multi-turn sessions without hitting context limits quickly"
+                ],
+                "known_issues": "9.7GB of weights alone is too much on a 16GB Mac — leaves too little headroom for KV cache plus the OS and background apps. Not recommended below 24GB.",
+                "size_label": "9.7 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-09-28T00:54:28Z",
+                "mlx_vlm_version": "0.7.0",
+                "notes": "First model verified — admission gate confirmed at 32/256/1024-token bounds, matching upstream mlx-vlm PR #1995's own reproduction scale exactly (that PR reports this class of model silently ignoring max-kv-size on 97/173 mlx-vlm-supported models; this specific model was not one of them, at least for single-turn HTTP requests)."
+            },
+            "tool_calling": {
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-09-28T08:56:00Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached (multi-turn round-trip tested: initial call + tool result fed back + final answer). Independently re-confirmed via Ollama 0.33.2 (qwen3.5:9b) through its OpenAI-compat endpoint.",
+                "tool_parser": "qwen3_coder",
+                "notes": "Correctly returned finish_reason=tool_calls on both mlx_vlm and Ollama, and correctly produced a coherent final answer after being fed a fabricated tool result in a second request. The most thoroughly-tested working model in this list."
+            },
+            "kv_config": {
+                "num_key_value_heads": 4,
+                "head_dim": 256,
+                "num_hidden_layers": 32,
+                "layer_types": [
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"
+                ],
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "qwen3.5-9b-mlx-4bit",
+            "huggingface": "mlx-community/Qwen3.5-9B-MLX-4bit",
+            "size_gb": 6.3,
+            "architecture": "qwen3_5",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "Best all-around choice on 16GB+ Macs (lighter quant of our 8-bit favorite)",
+                "good_for": "Same real 128K-class context window and family strengths as qwen3.5-9b-mlx-8bit, at 6.3GB instead of 9.7GB — fits meaningfully tighter memory budgets (16-24GB Macs) while keeping the same architecture and measured strong MLX throughput advantage over its GGUF counterpart.",
+                "usage_examples": [
+                    "\"Work through this repo-wide refactor\" — tasks that need the model to hold a lot of file context at once",
+                    "\"Let's pair-program through implementing this feature over several turns\" — long multi-turn sessions without hitting context limits quickly"
+                ],
+                "known_issues": "4-bit quantization trades some accuracy for the smaller footprint versus the 8-bit sibling — expect it to be a notch behind qwen3.5-9b-mlx-8bit in output quality when memory allows using that instead.",
+                "size_label": "6.3 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-09-28T16:24:16Z",
+                "mlx_vlm_version": "0.7.0",
+                "notes": "Admission gate verified at 32/256/1024-token bounds via verify_max_kv_size.sh — correctly rejected oversized requests (HTTP 400) at every scale tested, and correctly recalled a planted secret at the high bound. Real long-context memory load not yet stress-tested (same open gap as most other entries in this file)."
+            },
+            "tool_calling": {
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-09-28T16:25:00Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
+                "tool_parser": "qwen3_coder",
+                "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call (name + JSON arguments) on the first attempt. Same architecture/tool_parser as the 8-bit sibling (qwen3.5-9b-mlx-8bit), which was also multi-turn-verified; this 4-bit build was tested single-turn only."
+            },
+            "kv_config": {
+                "num_key_value_heads": 4,
+                "head_dim": 256,
+                "num_hidden_layers": 32,
+                "layer_types": [
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"
+                ],
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "gemma-4-12b-it-8bit",
+            "huggingface": "mlx-community/gemma-4-12B-it-8bit",
+            "size_gb": 12,
+            "architecture": "gemma4_unified",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "Multimodal (vision-capable) option, 24GB+ Macs",
+                "good_for": "Tasks that need image understanding, not just text — the smaller of the two multimodal candidates in this list.",
+                "usage_examples": [
+                    "\"What's wrong with this UI based on the screenshot?\" — visual analysis of an image",
+                    "\"Describe the architecture shown in this diagram\" — vision+text reasoning"
+                ],
+                "known_issues": "Prior benchmarking found Gemma-4's architecture is thermally less efficient on MLX than Qwen3.5's hybrid attention — expect earlier fan/thermal escalation at long context than qwen3.5-9b-mlx-8bit. Not viable on 16GB.",
+                "size_label": "12 GB",
+                "max_context_label": "262,144 tokens (architectural max); sliding_window=1024 internally"
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-09-28T01:01:42Z",
+                "mlx_vlm_version": "0.7.0",
+                "notes": "Admission gate verified at 32/256/1024-token bounds."
+            },
+            "tool_calling": {
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-09-28T09:41:00Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
+                "tool_parser": "gemma4",
+                "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call on the first attempt."
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 256,
+                "num_hidden_layers": 48,
+                "layer_types": [
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 1024
+            }
+        },
+        {
+            "id": "gemma-4-26b-a4b-it-4bit",
+            "huggingface": "mlx-community/gemma-4-26b-a4b-it-4bit",
+            "size_gb": 14,
+            "architecture": "gemma4",
+            "is_moe": true,
+            "active_weight_gb": null,
+            "_active_weight_note": "MoE (num_experts=128 per config.json), but config.json is missing num_experts_per_tok — cannot compute the active-expert fraction the way qwen3-coder-30b-a3b-instruct-4bit's config allowed. Left null deliberately rather than guessed; model_advisor.py's speed estimator correctly reports 'unknown' for this model rather than a fabricated number. Needs its own live decode-speed benchmark to get a real active_weight_gb.",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "Larger multimodal option, 32GB+ Macs",
+                "good_for": "More demanding vision+text tasks than the 12B model can handle well — the larger of the two multimodal candidates.",
+                "usage_examples": [
+                    "\"Analyze this multi-page scanned document and extract the key data\" — larger-scale multimodal document analysis",
+                    "\"Compare these two screenshots and describe what changed\" — more demanding vision reasoning"
+                ],
+                "known_issues": "Same thermal caveat as the 12B sibling, at a larger scale. Not viable on 16GB or 24GB Macs — this is a 32GB+ recommendation only.",
+                "size_label": "14 GB",
+                "max_context_label": "262,144 tokens (architectural max); sliding_window=1024 internally"
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-09-28T01:02:13Z",
+                "mlx_vlm_version": "0.7.0",
+                "notes": "Admission gate verified at 32/256/1024-token bounds."
+            },
+            "tool_calling": {
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-09-28T09:32:00Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
+                "tool_parser": "gemma4",
+                "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call on the first attempt."
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 256,
+                "num_hidden_layers": 30,
+                "layer_types": [
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 1024
+            }
+        },
+        {
+            "id": "qwen3.8-27b-4bit",
+            "huggingface": "mlx-community/Qwen3.8-27B-4bit",
+            "size_gb": 15,
+            "architecture": "qwen3_5",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "Most capable dense text model, 32GB+ Macs",
+                "good_for": "Complex reasoning and demanding coding tasks where the 9B model isn't quite enough — the largest dense (non-MoE) text model in this list.",
+                "usage_examples": [
+                    "\"Design the data model for this feature and explain the tradeoffs\" — complex reasoning that benefits from a larger parameter count",
+                    "\"Implement this algorithm and explain its time complexity\" — demanding coding + explanation tasks"
+                ],
+                "known_issues": "Not viable below 32GB. Real long-context memory behavior has not been stress-tested — only the admission gate is verified so far.",
+                "size_label": "15 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-09-28T01:02:47Z",
+                "mlx_vlm_version": "0.7.0",
+                "notes": "Admission gate verified at 32/256/1024-token bounds."
+            },
+            "tool_calling": {
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-09-28T09:32:20Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
+                "tool_parser": "qwen3_coder",
+                "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call on the first attempt."
+            },
+            "kv_config": {
+                "num_key_value_heads": 4,
+                "head_dim": 256,
+                "num_hidden_layers": 64,
+                "layer_types": [
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"
+                ],
+                "sliding_window": null
+            }
+        }
+    ]
 }

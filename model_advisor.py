@@ -37,7 +37,8 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_JSON = os.path.join(SCRIPT_DIR, "models.json")
 
-DEFAULT_KV_BITS = 8          # matches start_litellm_proxy.sh's existing KV_BITS default
+MEMORY_CONSTRAINED_KV_BITS = 8   # only used as a FALLBACK now — see recommend_kv_bits_and_context
+UNQUANTIZED_KV_BITS = 16        # what MLX uses when --kv-bits is simply not passed (float16 KV)
 SAFETY_BUFFER_GB = 3.0       # headroom kept free beyond model+KV, for OS/background apps/spikes
 MIN_USABLE_CONTEXT = 12288   # below this, a context window isn't really usable — also used
                               # as the floor for CONVERSATION HEADROOM after tool preload
@@ -268,7 +269,7 @@ def estimate_preload_overhead(tool, cwd):
     }
 
 
-def compute_kv_formula(kv_config, kv_bits=DEFAULT_KV_BITS):
+def compute_kv_formula(kv_config, kv_bits=UNQUANTIZED_KV_BITS):
     """Returns (bytes_per_growing_token, fixed_kv_bytes_total, detail_dict) or None if
     kv_config is missing fields we need. See HARDWARE_SPEED_ESTIMATION.md §9 — this
     generalizes both the Qwen3.5 hybrid linear/full-attention case and the Gemma-4
@@ -320,7 +321,7 @@ def compute_kv_formula(kv_config, kv_bits=DEFAULT_KV_BITS):
     return bytes_per_growing_token, fixed_bytes, detail
 
 
-def recommend_max_context(model_entry, free_wired_gb, kv_bits=DEFAULT_KV_BITS,
+def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BITS,
                            safety_buffer_gb=SAFETY_BUFFER_GB):
     """Returns (recommended_tokens_or_None, reason_string, detail_dict_or_None)."""
     available_gb = free_wired_gb - model_entry["size_gb"] - safety_buffer_gb
@@ -373,27 +374,88 @@ def estimate_speed_tok_s(model_entry, chip_name, gpu_cores):
     return round(SPEED_CORRECTION_FACTOR * bandwidth / active_gb, 1), "estimated"
 
 
+def _apply_preload(ctx, reason, preload_overhead):
+    """Shared by both kv_bits branches of recommend_kv_bits_and_context below — applies
+    the same tool-preload check build_recommendations always did, so both the
+    unquantized and quantized attempts are held to the identical usability bar."""
+    fits = ctx is not None
+    context_after_preload = None
+    if fits and preload_overhead:
+        context_after_preload = ctx - preload_overhead
+        if context_after_preload < MIN_USABLE_CONTEXT:
+            fits = False
+            reason = "insufficient_context_after_tool_preload"
+    return fits, reason, context_after_preload
+
+
+def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0,
+                                   safety_buffer_gb=SAFETY_BUFFER_GB):
+    """Decides BOTH whether to quantize the KV cache AND the resulting context size, in
+    one pass — see HARDWARE_SPEED_ESTIMATION.md §14 for the full reasoning and its
+    measured basis (§10/§12).
+
+    KV-cache quantization (--kv-bits 8) has a real decode-speed cost (up to 8.7% on
+    fast/small models, confirmed live) and confirmed ZERO memory benefit at short
+    context (peak_memory was byte-identical with/without it in every short-context
+    benchmark run for this project) — its only real purpose is letting a BIGGER
+    context fit in the SAME free memory. So: try unquantized first (kv_bits=None in the
+    return value means "omit --kv-bits entirely" downstream); only fall back to
+    kv_bits=8 if unquantized genuinely doesn't fit. This is a binary fits/doesn't-fit
+    decision at whatever context size the model would otherwise get, not a search for
+    the context-maximizing bit-width — see §14's own caveat for why this is grounded in
+    real data but that data's scope (short context only) doesn't fully cover the regime
+    (long context) this decision matters most for.
+
+    Returns dict: kv_bits (None or MEMORY_CONSTRAINED_KV_BITS), recommended_context,
+    context_reason, kv_formula_detail, context_after_preload, fits.
+    """
+    ctx_u, reason_u, detail_u = recommend_max_context(
+        model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BITS,
+        safety_buffer_gb=safety_buffer_gb,
+    )
+    fits_u, reason_u, after_u = _apply_preload(ctx_u, reason_u, preload_overhead)
+    if fits_u:
+        return {
+            "kv_bits": None, "recommended_context": ctx_u, "context_reason": reason_u,
+            "kv_formula_detail": detail_u, "context_after_preload": after_u, "fits": True,
+        }
+
+    ctx_q, reason_q, detail_q = recommend_max_context(
+        model_entry, free_wired_gb, kv_bits=MEMORY_CONSTRAINED_KV_BITS,
+        safety_buffer_gb=safety_buffer_gb,
+    )
+    fits_q, reason_q, after_q = _apply_preload(ctx_q, reason_q, preload_overhead)
+    if fits_q:
+        return {
+            "kv_bits": MEMORY_CONSTRAINED_KV_BITS, "recommended_context": ctx_q,
+            "context_reason": reason_q, "kv_formula_detail": detail_q,
+            "context_after_preload": after_q, "fits": True,
+        }
+
+    # Neither fits — report the quantized attempt's reason, since it's the more
+    # forgiving of the two (smaller bytes-per-token) and so the more informative "even
+    # our best effort doesn't fit" explanation for the user.
+    return {
+        "kv_bits": None, "recommended_context": ctx_q, "context_reason": reason_q,
+        "kv_formula_detail": detail_q, "context_after_preload": after_q, "fits": False,
+    }
+
+
 def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_overhead=0):
     rows = []
     for m in models:
-        ctx, reason, detail = recommend_max_context(m, free_wired_gb)
+        kv_result = recommend_kv_bits_and_context(m, free_wired_gb, preload_overhead)
         speed, speed_reason = estimate_speed_tok_s(m, chip_name, gpu_cores)
-        fits = ctx is not None
-        context_after_preload = None
-        if fits and preload_overhead:
-            context_after_preload = ctx - preload_overhead
-            if context_after_preload < MIN_USABLE_CONTEXT:
-                fits = False
-                reason = "insufficient_context_after_tool_preload"
         rows.append({
             "model": m,
-            "recommended_context": ctx,
-            "context_reason": reason,
-            "kv_formula_detail": detail,
+            "recommended_context": kv_result["recommended_context"],
+            "context_reason": kv_result["context_reason"],
+            "kv_formula_detail": kv_result["kv_formula_detail"],
+            "kv_bits": kv_result["kv_bits"],
             "estimated_tok_s": speed,
             "speed_reason": speed_reason,
-            "context_after_preload": context_after_preload,
-            "fits": fits,
+            "context_after_preload": kv_result["context_after_preload"],
+            "fits": kv_result["fits"],
         })
     return rows
 
@@ -460,6 +522,10 @@ def print_menu(rows, free_wired_gb, chip_name, gpu_cores, total_ram_gb, preload=
         if r["fits"]:
             i += 1
             speed_str = f"~{r['estimated_tok_s']} tok/s (estimated)" if r["estimated_tok_s"] else "speed unknown"
+            if r["kv_bits"]:
+                kv_str = f"  [KV cache quantized to {r['kv_bits']}-bit — needed to fit this context in free memory]"
+            else:
+                kv_str = "  [KV cache unquantized — full decode speed, plenty of free memory for this context]"
             log(f"  {i}) {m['id']}  [{m['display']['tagline']}]")
             log(f"       {m['display']['good_for']}")
             headroom_str = ""
@@ -467,6 +533,7 @@ def print_menu(rows, free_wired_gb, chip_name, gpu_cores, total_ram_gb, preload=
                 headroom_str = f"  (~{r['context_after_preload']:,} left for conversation after preload)"
             log(f"       size={m['size_gb']}GB  max context={m['max_context_architectural']:,} tokens  "
                 f"recommended context={r['recommended_context']:,} tokens  {speed_str}{headroom_str}")
+            log(f"      {kv_str}")
             for ex in m["display"]["usage_examples"]:
                 log(f"       e.g. {ex}")
             if m["display"].get("known_issues"):
@@ -562,12 +629,16 @@ def main():
     m = selected["model"]
 
     # Machine-readable result — the ONLY thing on stdout.
+    # kv_bits is None when this model's recommended context fits free memory
+    # unquantized (the common case now — see HARDWARE_SPEED_ESTIMATION.md §14); the
+    # caller (start_litellm_proxy.sh) must omit --kv-bits entirely in that case rather
+    # than treating None as a literal value.
     print(json.dumps({
         "id": m["id"],
         "huggingface": m["huggingface"],
         "size_gb": m["size_gb"],
         "recommended_context": selected["recommended_context"],
-        "kv_bits": DEFAULT_KV_BITS,
+        "kv_bits": selected["kv_bits"],
         "estimated_tok_s": selected["estimated_tok_s"],
     }))
 

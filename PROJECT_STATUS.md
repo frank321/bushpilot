@@ -2,7 +2,9 @@
 
 **Last updated:** 2026-09-28 (end of this working session — added live tool-calling verification
 for all 14 models, plus KV-cache quantization and weight-quantization-bit-width decode-speed cost
-data across MLX and Ollama)
+data across MLX and Ollama; a same-day follow-up session confirmed Ollama actually ships two
+distinct backends and re-benchmarked mlx_vlm against Ollama's real native MLX engine — not just
+its llama.cpp one, which every prior comparison had actually been testing — see item #19 below)
 **Location:** `~/scripts/` (this project is separate from the `devx-agent-eval` repo, though it
 references research originally done there — `LITELLM_ROUTING_PLAN.md` in that repo is the
 upstream source for several findings reused here)
@@ -223,9 +225,8 @@ of what the prose docs say. Fix the docs opportunistically, not before the next 
     but a bigger model's dense compute per token is proportionally much larger, so the same fixed
     overhead is a smaller fraction of total time for bigger models — the opposite of the naive
     assumption that a bigger KV cache means bigger quantization savings/cost. Only 2 models (both
-    dense, one short context length) measured so far — see new open item below and
-    `HARDWARE_SPEED_ESTIMATION.md` §12's item 6 for what's needed before this becomes an actual
-    dynamic-selection feature.
+    dense, one short context length) measured so far — see item #18 below, where this became a
+    real feature, and `HARDWARE_SPEED_ESTIMATION.md` §17's item 6 for what's still not closed.
 15. **Corrected an engine-comparison mistake, and got a clean isolated bit-width measurement out
     of it.** Following up item #14 with a request to benchmark `qwen3.5-9b-mlx-8bit` against
     Ollama, the first Ollama pull (`qwen3.5:9b`) turned out to be `Q4_K_M` (~4-bit) — NOT matched
@@ -241,6 +242,126 @@ of what the prose docs say. Fix the docs opportunistically, not before the next 
     concern about whether the original 3B comparison might have the same issue: new
     `HARDWARE_SPEED_ESTIMATION.md` §11 (added as a follow-up to §10, which is now item #7 in that
     doc's own "Open items" list, renumbered to §12 to make room).
+16. **Benchmarked `gemma-4-e4b-it-4bit` and `gemma-4-12b-it-4bit` (both dense) — decode speed,
+    KV-quant cost, and a brand-new `--prefill-step-size` sweep, new this session.** Full
+    methodology, tables, and analysis in `HARDWARE_SPEED_ESTIMATION.md` §12 (Open Items renumbered
+    to §13 to make room, same pattern as item #15 above). Headline results: (a) KV-quant cost is
+    noise-level (0.87%/0.16%) on both — extends §10's "cost inversely scales with speed" pattern
+    to 4 data points total, tightening the ~85 tok/s floor where the cost disappears; (b) the 0.87
+    global correction factor from §6 **does not hold for this family** — measured 1.29
+    (e4b, 29% *faster* than naive prediction) and 0.75 (12b, 25% *slower*), blowing the previously
+    tight 0.86-0.97 range to 0.75-1.29, in opposite directions, meaning a single global correction
+    factor is probably the wrong model and a per-architecture-family one is needed instead; (c)
+    `--prefill-step-size` (never previously tested) affects **TTFT, not decode speed** (confirmed
+    independent of each other) — and TTFT is **not monotonic** with chunk size: 2048 (the current
+    hardcoded default) has the lowest TTFT of the three values tested on both models (beating both
+    512 and 4096 on `e4b`; tied with 512, within noise, on `12b`), while 4096 costs a real
+    +176ms/+10.7% (e4b) to +608ms/+7.9% (12b) of extra wait-before-first-token at ~7,200 prompt
+    tokens, for no decode benefit and strictly more memory (6.25→6.71GB e4b, 8.14→10.03GB 12b); (d)
+    decode speed drops ~12% at ~7,200 tokens of context vs near-zero context, on both models
+    almost identically — a previously unquantified effect that none of §6/§8's formula work
+    accounts for. `e4b`'s "too fast" result has an unconfirmed hypothesis (its elastic/MatFormer
+    design may read fewer weight bytes per forward pass than its full on-disk size, MoE-like
+    without being MoE) — flagged, not confirmed.
+17. **Researched and enabled Automatic Prefix Caching (APC) — a real `mlx_vlm` 0.7.0 feature
+    (`mlx_vlm/apc.py`), off by default upstream, that was simply never turned on.** Full
+    methodology and results in `HARDWARE_SPEED_ESTIMATION.md` §13. Simulated the exact
+    growing-conversation pattern OpenCode/Claude Code produce every turn (resend full history +
+    one new message): **turn 2 TTFT dropped ~97.7%** (1.020s → 0.023s) with APC on, vs. a full
+    re-prefill every time with it off. Separately confirmed the disk tier (`APC_DISK_PATH`)
+    survives a full server-process restart — killed the server, started a fresh process pointed
+    at the same disk path, sent turn 2 with no warm-up: TTFT was 0.035s (`prompt_n=1`), i.e. the
+    disk-restored cache worked even with zero live in-memory state. `start_litellm_proxy.sh` now
+    exports `APC_ENABLED=1 APC_NUM_BLOCKS=4096 APC_DISK_PATH=~/.cache/mlx-vlm/caching
+    APC_DISK_MAX_GB=5` unconditionally on every launch. Confirmed the block pool is lazily
+    allocated (lightweight Python objects at startup, real tensor memory only as the cache
+    actually fills) directly from `apc.py`'s source, not assumed — raising `APC_NUM_BLOCKS` isn't
+    a fixed up-front memory cost. Only tested on one model, one synthetic prefix shape, one
+    prefix length — see new open items below.
+18. **Implemented dynamic `--kv-bits` selection as a real feature, closing item #9 below and
+    `HARDWARE_SPEED_ESTIMATION.md` §17's open item #6 — no longer just a documented
+    finding.** Per items #14/#16 above: KV-cache quantization has a real decode-speed cost and
+    confirmed ZERO memory benefit at short context (its real purpose is letting a *bigger*
+    context fit in the *same* memory, not shrinking memory at a fixed context) — so
+    `model_advisor.py` now computes each model's recommended context *twice* per selection
+    (unquantized and at `--kv-bits 8`) and prefers unquantized whenever it already yields a
+    usable context, only falling back to quantization when it doesn't. Verified the crossover
+    live on `gemma-4-12b-it-4bit`: at 10.0GB free, only the quantized attempt fits (16384 tokens);
+    at 10.5GB+, the unquantized attempt fits and is preferred, even when it computes to a
+    *smaller* context (8192) than the quantized fallback got at the lower memory level — i.e. the
+    logic correctly always prefers speed over a bigger context, matching what was asked for, not
+    a speed/context joint optimization. `start_litellm_proxy.sh`'s server-launch flags now omit
+    `--kv-bits`/`--kv-group-size`/`--quantized-kv-start`/`--kv-quant-scheme` entirely (not just
+    pass a "null" value) whenever the decision is unquantized. Full reasoning and one honest
+    caveat (the decode-speed-cost data behind this decision is short-context-only; whether it
+    holds at the long-context regime where quantization's memory benefit is real is unverified)
+    in `HARDWARE_SPEED_ESTIMATION.md` §14.
+19. **Confirmed Ollama ships two genuinely distinct backends (llama.cpp/GGML and a separate
+    native MLX engine) and re-ran the MLX-vs-Ollama benchmark against the *correct* one — full
+    methodology and data in `HARDWARE_SPEED_ESTIMATION.md` §15-§16.** Every prior "MLX vs Ollama"
+    comparison in this project (item #15 above, §6/§10/§11 in `HARDWARE_SPEED_ESTIMATION.md`) was
+    actually MLX vs. Ollama's llama.cpp backend — confirmed via `~/.ollama/logs/server.log`
+    line-by-line (`ggml_metal_init`/`llama_model_loader` for the `-q8_0` tag vs. `"starting mlx
+    runner subprocess"`/`"MLX engine initialized"` for the `-mlx` tag), not inferred from the tag
+    name or `ollama show`/`ollama ps` — neither of which distinguishes the two backends (`ollama
+    ps`'s `PROCESSOR` column reads `100% GPU` identically for both). Ollama bundles both as
+    separate binaries side by side in `Ollama.app/Contents/Resources/`
+    (`llama-server`+`libggml-*.dylib` vs. a separate `mlx_metal_v3`/`mlx_metal_v4` directory with
+    `libmlx.dylib`). Re-ran the benchmark against the real MLX backend this time: a naive
+    precision-mismatched first attempt (mlx_vlm 8-bit vs. Ollama-MLX NVFP4) showed Ollama 41%
+    faster, but this reproduces the exact bit-width confound §11 already warned about — corrected
+    with a precision-matched-class rematch (mlx_vlm's own plain 4-bit build vs. the same
+    Ollama-MLX NVFP4 build), which found **mlx_vlm ~23% faster (53.54 vs 43.43 tok/s)** — the
+    opposite of the marketing-style claim that motivated the request (that Ollama's NVFP4 format
+    should "unwrap drastically faster" than MLX's plain quantization). An exact same-format
+    8-bit-vs-8-bit rematch (`qwen3.5:9b-mxfp8`) was attempted but abandoned after the download
+    exhibited genuinely non-monotonic progress against Ollama's CDN (49%→45%→40%→42% across
+    retries — connection drops, not just slow bandwidth); a parallel attempt to get mlx_vlm
+    running the *exact* NVFP4 format Ollama uses also failed because
+    `mlx-community/Qwen3.5-9B-nvfp4` turned out to be an empty/placeholder HuggingFace repo (no
+    actual weight files behind its manifest). Both dead ends are logged in
+    `HARDWARE_SPEED_ESTIMATION.md` §17 (Open Items) so they aren't retried blindly next time. Net
+    practical conclusion: no reason found to switch off `mlx_vlm.server` — the one Ollama backend
+    that's a genuine architectural peer (its native MLX engine, not llama.cpp) measured slower,
+    not faster, at comparable precision.
+20. **Removed the entire `qwen2.5-coder-*-instruct` family (3B/4bit, 7B/3bit, 7B/4bit, 14B/4bit —
+    4 entries) from `models.json`, dropping the catalog from 14 models to 10.** Not a new finding —
+    this acts on the tool-calling failure item #13 above already confirmed for this exact family:
+    `tool_calling.verdict: NOT_SUPPORTED` on all four, live-tested and independently reproduced on
+    two other serving stacks (vLLM per `github.com/QwenLM/Qwen3-Coder/issues/180`, and
+    Ollama/llama.cpp directly on this machine) — the model ignores its own chat template's
+    `<tool_call>` instructions regardless of quantization, so OpenCode/Claude Code tool use
+    (webfetch, bash, edit, etc.) silently no-ops on every model in this family. Since this stack's
+    whole purpose is serving OpenCode/Claude Code, a model family that can't do tool calls at all
+    has no viable use case here — unlike `phi-4-mini-instruct-4bit`, whose tool-calling gap (at the
+    time of this item) was a `mlx_vlm` parser gap, not a model-fine-tuning failure, and could still
+    be fixed upstream; it was kept at this point but removed for unrelated reasons in item #21
+    below. Every remaining doc/data file that still names `qwen2.5-coder-*`
+    (`HARDWARE_SPEED_ESTIMATION.md`, `mlx_verification_results.json`, and the "14 models"
+    references earlier in this file) is now describing historical verification work performed
+    before this removal — left as-is deliberately (same "fix opportunistically" policy as the
+    staleness caveats above), not rewritten to erase what was actually tested.
+21. **Removed `phi-4-mini-instruct-4bit`, `qwen3-14b-4bit`, and `qwen3-coder-30b-a3b-instruct-4bit`
+    from `models.json` (user request, no new failure found for the first two — see reasons below),
+    and added `qwen3.5-9b-mlx-4bit` in their place, dropping the catalog from 10 models to 8.**
+    - `phi-4-mini-instruct-4bit` and `qwen3-14b-4bit`: removed per explicit user instruction: no
+      additional finding beyond what item #20 and the earlier `tool_calling`/`verification` blocks
+      already documented for each — this was a curation choice, not a newly discovered defect.
+    - `qwen3-coder-30b-a3b-instruct-4bit`: removed for a real, already-documented reason — its own
+      entry (see "What's NOT done yet" #1 below) has a CONFIRMED long-context memory-safety
+      failure above ~28K tokens, making it unsafe to recommend as-is.
+    - `qwen3.5-9b-mlx-4bit` (`mlx-community/Qwen3.5-9B-MLX-4bit`, 6.3GB): added because it was
+      already downloaded on this machine. Same architecture/`kv_config` as its 8-bit sibling
+      `qwen3.5-9b-mlx-8bit` (confirmed by diffing both models' `config.json`: identical
+      `num_key_value_heads`, `head_dim`, `num_hidden_layers`, `layer_types`, `sliding_window`),
+      just a lighter quantization. Given a fresh, real `verify_max_kv_size.sh` run this session
+      (not copied from the 8-bit sibling) — **verdict SAFE**, admission gate correctly rejected
+      oversized requests at 32/256/1024-token bounds — and a fresh live tool-calling probe
+      (`/v1/chat/completions` with a `web_search` tool schema, temperature=0): correctly returned
+      `finish_reason=tool_calls` with a well-formed function call on the first attempt, same
+      `qwen3_coder` tool_parser as the 8-bit sibling. Only tested single-turn (the 8-bit sibling's
+      own tool-calling verification was additionally multi-turn-tested); real long-context memory
+      load also not yet stress-tested, same open gap as most entries in this file.
 
 ---
 
@@ -289,13 +410,14 @@ of what the prose docs say. Fix the docs opportunistically, not before the next 
    deprioritize/exclude `NOT_SUPPORTED` models, when the launch mode is `opencode`/`claude` (a
    non-tool-calling chat mode wouldn't need this filter at all, so this should be conditional on
    mode, not a blanket exclusion).
-9. **Dynamic `--kv-bits` selection is a documented finding, not yet a feature.** Per item #14
-   above, KV quantization costs real decode speed on smaller models at short context for no
-   memory-safety benefit, but `start_litellm_proxy.sh` still passes `--kv-bits 8` unconditionally
-   to every model regardless of size or requested context. Needs the additional calibration data
-   `HARDWARE_SPEED_ESTIMATION.md` §12 item 6 describes (an MoE model, a 14B+ model, and a genuine
-   long-context run to find the actual crossover point) before a real heuristic can be wired into
-   `model_advisor.py`.
+9. **RESOLVED — see "What's actually done" #18.** Dynamic `--kv-bits` selection is now an
+   implemented feature (`model_advisor.py` + `start_litellm_proxy.sh`), not just a documented
+   finding. Kept here as a pointer rather than deleted, since the underlying data gap it was
+   flagging is NOT fully resolved: the decision is grounded in short-context-only speed data —
+   still zero MoE data points, still nothing genuinely 14B+, and still no genuine long-context run
+   to confirm the decode-speed cost holds at the context lengths where quantization's memory
+    benefit actually matters. See `HARDWARE_SPEED_ESTIMATION.md` §17 items 6 and 13 for the
+   remaining gap, now that the feature itself exists.
 10. **The 3B MLX-vs-Ollama comparison predating item #15's bit-width lesson hasn't been
     independently re-confirmed.** Item #15 found that an unmatched quantization level (Q4_K_M vs
     8-bit) can produce a ~47% swing that looks like an engine effect but isn't — the original 3B

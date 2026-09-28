@@ -1,0 +1,486 @@
+[
+  {
+    "label": "gemma-4-e4b-it-4bit__no_kv_quant__short_prompt",
+    "model": "mlx-community/gemma-4-e4b-it-4bit",
+    "args": [
+      "--max-kv-size",
+      "8192",
+      "--prefill-step-size",
+      "2048"
+    ],
+    "runs": [
+      {
+        "predicted_per_second": 82.28825032493562,
+        "prompt_per_second": 857.2936855462775,
+        "prompt_n": 27,
+        "predicted_n": 150,
+        "prompt_ms": 31.49445803137496,
+        "predicted_ms": 1822.8604862503178,
+        "peak_memory": 5.247216698
+      },
+      {
+        "predicted_per_second": 82.68818549664444,
+        "prompt_per_second": 846.9425767684085,
+        "prompt_n": 27,
+        "predicted_n": 150,
+        "prompt_ms": 31.87937499023974,
+        "predicted_ms": 1814.0439181131521,
+        "peak_memory": 5.247216698
+      },
+      {
+        "predicted_per_second": 82.78623462228563,
+        "prompt_per_second": 844.7597517243366,
+        "prompt_n": 27,
+        "predicted_n": 150,
+        "prompt_ms": 31.96175000630319,
+        "predicted_ms": 1811.8954278374772,
+        "peak_memory": 5.247216698
+      }
+    ],
+    "avg_decode_tok_s": 82.58755681462189,
+    "avg_prompt_tok_s": 849.6653380130075,
+    "peak_memory_gb": 5.247216698
+  },
+  {
+    "label": "gemma-4-e4b-it-4bit__kv8_prod__short_prompt",
+    "model": "mlx-community/gemma-4-e4b-it-4bit",
+    "args": [
+      "--max-kv-size",
+      "8192",
+      "--prefill-step-size",
+      "2048",
+      "--kv-bits",
+      "8",
+      "--kv-group-size",
+      "64",
+      "--quantized-kv-start",
+      "0",
+      "--kv-quant-scheme",
+      "uniform"
+    ],
+    "runs": [
+      {
+        "predicted_per_second": 81.97513685197247,
+        "prompt_per_second": 825.2054422337942,
+        "prompt_n": 27,
+        "predicted_n": 150,
+        "prompt_ms": 32.719124981667846,
+        "predicted_ms": 1829.8231117425787,
+        "peak_memory": 5.24440475
+      },
+      {
+        "predicted_per_second": 81.98403192801801,
+        "prompt_per_second": 812.1684980815302,
+        "prompt_n": 27,
+        "predicted_n": 150,
+        "prompt_ms": 33.24433299712837,
+        "predicted_ms": 1829.6245802072776,
+        "peak_memory": 5.24440475
+      },
+      {
+        "predicted_per_second": 81.65341591186858,
+        "prompt_per_second": 788.4966864018422,
+        "prompt_n": 27,
+        "predicted_n": 150,
+        "prompt_ms": 34.242375986650586,
+        "predicted_ms": 1837.0327600488913,
+        "peak_memory": 5.244405486
+      }
+    ],
+    "avg_decode_tok_s": 81.87086156395303,
+    "avg_prompt_tok_s": 808.6235422390555,
+    "peak_memory_gb": 5.244405486
+  },
+  {
+    "label": "gemma-4-e4b-it-4bit__prefill_512__long_prompt",
+    "model": "mlx-community/gemma-4-e4b-it-4bit",
+    "args": [
+      "--max-kv-size",
+      "16384",
+      "--prefill-step-size",
+      "512",
+      "--kv-bits",
+      "8",
+      "--kv-group-size",
+      "64",
+      "--quantized-kv-start",
+      "0",
+      "--kv-quant-scheme",
+      "uniform"
+    ],
+    "runs": [
+      {
+        "predicted_per_second": 72.74166930125341,
+        "prompt_per_second": 4174.100288585045,
+        "prompt_n": 7223,
+        "predicted_n": 17,
+        "prompt_ms": 1730.4327880556232,
+        "predicted_ms": 233.70373766920238,
+        "peak_memory": 6.25280345
+      },
+      {
+        "predicted_per_second": 72.38970079377174,
+        "prompt_per_second": 4221.053239833726,
+        "prompt_n": 7223,
+        "predicted_n": 17,
+        "prompt_ms": 1711.1842920712663,
+        "predicted_ms": 234.84003682278853,
+        "peak_memory": 6.25280345
+      },
+      {
+        "predicted_per_second": 71.74205603274014,
+        "prompt_per_second": 4229.757484562635,
+        "prompt_n": 7223,
+        "predicted_n": 17,
+        "prompt_ms": 1707.6629159855656,
+        "predicted_ms": 236.96003348777592,
+        "peak_memory": 6.25280345
+      }
+    ],
+    "avg_decode_tok_s": 72.29114204258843,
+    "avg_prompt_tok_s": 4208.303670993802,
+    "peak_memory_gb": 6.25280345
+  },
+  {
+    "label": "gemma-4-e4b-it-4bit__prefill_2048__long_prompt",
+    "model": "mlx-community/gemma-4-e4b-it-4bit",
+    "args": [
+      "--max-kv-size",
+      "16384",
+      "--prefill-step-size",
+      "2048",
+      "--kv-bits",
+      "8",
+      "--kv-group-size",
+      "64",
+      "--quantized-kv-start",
+      "0",
+      "--kv-quant-scheme",
+      "uniform"
+    ],
+    "runs": [
+      {
+        "predicted_per_second": 71.93886074851581,
+        "prompt_per_second": 4384.651101697686,
+        "prompt_n": 7223,
+        "predicted_n": 17,
+        "prompt_ms": 1647.3374579800293,
+        "predicted_ms": 236.31177673814818,
+        "peak_memory": 6.485849284
+      },
+      {
+        "predicted_per_second": 71.50671518665067,
+        "prompt_per_second": 4385.999199415907,
+        "prompt_n": 7223,
+        "predicted_n": 17,
+        "prompt_ms": 1646.8311259523034,
+        "predicted_ms": 237.73990954032342,
+        "peak_memory": 6.485849284
+      },
+      {
+        "predicted_per_second": 71.36896432190741,
+        "prompt_per_second": 4386.252226991825,
+        "prompt_n": 7223,
+        "predicted_n": 17,
+        "prompt_ms": 1646.7361260147297,
+        "predicted_ms": 238.19877675850876,
+        "peak_memory": 6.485849284
+      }
+    ],
+    "avg_decode_tok_s": 71.60484675235796,
+    "avg_prompt_tok_s": 4385.63417603514,
+    "peak_memory_gb": 6.485849284
+  },
+  {
+    "label": "gemma-4-e4b-it-4bit__prefill_4096__long_prompt",
+    "model": "mlx-community/gemma-4-e4b-it-4bit",
+    "args": [
+      "--max-kv-size",
+      "16384",
+      "--prefill-step-size",
+      "4096",
+      "--kv-bits",
+      "8",
+      "--kv-group-size",
+      "64",
+      "--quantized-kv-start",
+      "0",
+      "--kv-quant-scheme",
+      "uniform"
+    ],
+    "runs": [
+      {
+        "predicted_per_second": 71.80034109381629,
+        "prompt_per_second": 3959.845369780374,
+        "prompt_n": 7223,
+        "predicted_n": 17,
+        "prompt_ms": 1824.0611249930225,
+        "predicted_ms": 236.76767743745586,
+        "peak_memory": 6.70957283
+      },
+      {
+        "predicted_per_second": 72.20526150557808,
+        "prompt_per_second": 3952.948710917582,
+        "prompt_n": 7223,
+        "predicted_n": 17,
+        "prompt_ms": 1827.243541018106,
+        "predicted_ms": 235.43990625512376,
+        "peak_memory": 6.70957283
+      },
+      {
+        "predicted_per_second": 72.23470852388478,
+        "prompt_per_second": 3973.0544072674857,
+        "prompt_n": 7223,
+        "predicted_n": 17,
+        "prompt_ms": 1817.9967500036582,
+        "predicted_ms": 235.3439274193079,
+        "peak_memory": 6.70957283
+      }
+    ],
+    "avg_decode_tok_s": 72.0801037077597,
+    "avg_prompt_tok_s": 3961.949495988481,
+    "peak_memory_gb": 6.70957283
+  },
+  {
+    "label": "gemma-4-12b-it-4bit__no_kv_quant__short_prompt",
+    "model": "mlx-community/gemma-4-12B-it-4bit",
+    "args": [
+      "--max-kv-size",
+      "8192",
+      "--prefill-step-size",
+      "2048"
+    ],
+    "runs": [
+      {
+        "predicted_per_second": 36.567476803356236,
+        "prompt_per_second": 276.11084268156475,
+        "prompt_n": 31,
+        "predicted_n": 150,
+        "prompt_ms": 112.27375100133942,
+        "predicted_ms": 4102.005746982048,
+        "peak_memory": 6.896511592
+      },
+      {
+        "predicted_per_second": 36.40201283587955,
+        "prompt_per_second": 271.1536282343812,
+        "prompt_n": 31,
+        "predicted_n": 150,
+        "prompt_ms": 114.3263330159243,
+        "predicted_ms": 4120.651258387363,
+        "peak_memory": 6.896511592
+      },
+      {
+        "predicted_per_second": 36.427155338998936,
+        "prompt_per_second": 274.7639301859087,
+        "prompt_n": 31,
+        "predicted_n": 150,
+        "prompt_ms": 112.82412498258056,
+        "predicted_ms": 4117.807130534014,
+        "peak_memory": 6.897003112
+      }
+    ],
+    "avg_decode_tok_s": 36.46554832607824,
+    "avg_prompt_tok_s": 274.0094670339515,
+    "peak_memory_gb": 6.897003112
+  },
+  {
+    "label": "gemma-4-12b-it-4bit__kv8_prod__short_prompt",
+    "model": "mlx-community/gemma-4-12B-it-4bit",
+    "args": [
+      "--max-kv-size",
+      "8192",
+      "--prefill-step-size",
+      "2048",
+      "--kv-bits",
+      "8",
+      "--kv-group-size",
+      "64",
+      "--quantized-kv-start",
+      "0",
+      "--kv-quant-scheme",
+      "uniform"
+    ],
+    "runs": [
+      {
+        "predicted_per_second": 36.48818708723902,
+        "prompt_per_second": 269.00031442561743,
+        "prompt_n": 31,
+        "predicted_n": 150,
+        "prompt_ms": 115.24150098557583,
+        "predicted_ms": 4110.919505026857,
+        "peak_memory": 6.895038392
+      },
+      {
+        "predicted_per_second": 36.46663996819282,
+        "prompt_per_second": 269.4844681650559,
+        "prompt_n": 31,
+        "predicted_n": 150,
+        "prompt_ms": 115.03445898415521,
+        "predicted_ms": 4113.348532544649,
+        "peak_memory": 6.895038392
+      },
+      {
+        "predicted_per_second": 36.27432016126338,
+        "prompt_per_second": 268.8713143569482,
+        "prompt_n": 31,
+        "predicted_n": 150,
+        "prompt_ms": 115.29679197701627,
+        "predicted_ms": 4135.156753680031,
+        "peak_memory": 6.895038392
+      }
+    ],
+    "avg_decode_tok_s": 36.409715738898406,
+    "avg_prompt_tok_s": 269.1186989825405,
+    "peak_memory_gb": 6.895038392
+  },
+  {
+    "label": "gemma-4-12b-it-4bit__prefill_512__long_prompt",
+    "model": "mlx-community/gemma-4-12B-it-4bit",
+    "args": [
+      "--max-kv-size",
+      "16384",
+      "--prefill-step-size",
+      "512",
+      "--kv-bits",
+      "8",
+      "--kv-group-size",
+      "64",
+      "--quantized-kv-start",
+      "0",
+      "--kv-quant-scheme",
+      "uniform"
+    ],
+    "runs": [
+      {
+        "predicted_per_second": 32.29587595390822,
+        "prompt_per_second": 933.496827788244,
+        "prompt_n": 7227,
+        "predicted_n": 17,
+        "prompt_ms": 7741.858124063583,
+        "predicted_ms": 526.3829977629939,
+        "peak_memory": 8.140393519
+      },
+      {
+        "predicted_per_second": 32.25187371789319,
+        "prompt_per_second": 919.7174986257983,
+        "prompt_n": 7227,
+        "predicted_n": 17,
+        "prompt_ms": 7857.847666047746,
+        "predicted_ms": 527.1011584845837,
+        "peak_memory": 8.140393519
+      },
+      {
+        "predicted_per_second": 32.288408132567106,
+        "prompt_per_second": 935.6193977339758,
+        "prompt_n": 7227,
+        "predicted_n": 17,
+        "prompt_ms": 7724.294747953536,
+        "predicted_ms": 526.5047422035423,
+        "peak_memory": 8.140393519
+      }
+    ],
+    "avg_decode_tok_s": 32.27871926812284,
+    "avg_prompt_tok_s": 929.6112413826727,
+    "peak_memory_gb": 8.140393519
+  },
+  {
+    "label": "gemma-4-12b-it-4bit__prefill_2048__long_prompt",
+    "model": "mlx-community/gemma-4-12B-it-4bit",
+    "args": [
+      "--max-kv-size",
+      "16384",
+      "--prefill-step-size",
+      "2048",
+      "--kv-bits",
+      "8",
+      "--kv-group-size",
+      "64",
+      "--quantized-kv-start",
+      "0",
+      "--kv-quant-scheme",
+      "uniform"
+    ],
+    "runs": [
+      {
+        "predicted_per_second": 30.64950860146928,
+        "prompt_per_second": 942.7518444266287,
+        "prompt_n": 7227,
+        "predicted_n": 17,
+        "prompt_ms": 7665.856123989215,
+        "predicted_ms": 554.6581585058448,
+        "peak_memory": 8.966432668
+      },
+      {
+        "predicted_per_second": 31.813269341957806,
+        "prompt_per_second": 936.6000223625492,
+        "prompt_n": 7227,
+        "predicted_n": 17,
+        "prompt_ms": 7716.20737502235,
+        "predicted_ms": 534.3682165221253,
+        "peak_memory": 8.966432668
+      },
+      {
+        "predicted_per_second": 32.19624687873564,
+        "prompt_per_second": 937.6956320543682,
+        "prompt_n": 7227,
+        "predicted_n": 17,
+        "prompt_ms": 7707.191708002938,
+        "predicted_ms": 528.0118538048555,
+        "peak_memory": 8.966432668
+      }
+    ],
+    "avg_decode_tok_s": 31.553008274054246,
+    "avg_prompt_tok_s": 939.0158329478487,
+    "peak_memory_gb": 8.966432668
+  },
+  {
+    "label": "gemma-4-12b-it-4bit__prefill_4096__long_prompt",
+    "model": "mlx-community/gemma-4-12B-it-4bit",
+    "args": [
+      "--max-kv-size",
+      "16384",
+      "--prefill-step-size",
+      "4096",
+      "--kv-bits",
+      "8",
+      "--kv-group-size",
+      "64",
+      "--quantized-kv-start",
+      "0",
+      "--kv-quant-scheme",
+      "uniform"
+    ],
+    "runs": [
+      {
+        "predicted_per_second": 32.33580186951494,
+        "prompt_per_second": 876.2877675945981,
+        "prompt_n": 7227,
+        "predicted_n": 17,
+        "prompt_ms": 8247.290749975946,
+        "predicted_ms": 525.7330580079724,
+        "peak_memory": 10.027968464
+      },
+      {
+        "predicted_per_second": 32.20995790465211,
+        "prompt_per_second": 870.8698378391533,
+        "prompt_n": 7227,
+        "predicted_n": 17,
+        "prompt_ms": 8298.599499015836,
+        "predicted_ms": 527.7870915051608,
+        "peak_memory": 10.027968464
+      },
+      {
+        "predicted_per_second": 32.201595383116775,
+        "prompt_per_second": 863.842834461247,
+        "prompt_n": 7227,
+        "predicted_n": 17,
+        "prompt_ms": 8366.105166001944,
+        "predicted_ms": 527.9241539974464,
+        "peak_memory": 10.027968464
+      }
+    ],
+    "avg_decode_tok_s": 32.24911838576127,
+    "avg_prompt_tok_s": 870.3334799649996,
+    "peak_memory_gb": 10.027968464
+  }
+]

@@ -16,7 +16,18 @@ set -euo pipefail
 # tok/s, and lets the user pick. See HARDWARE_SPEED_ESTIMATION.md and model_advisor.py
 # for the methodology behind both numbers — neither is fabricated, but the context
 # number is an exact calculation while the speed number is a real-but-approximate
-# estimate.
+# estimate. model_advisor.py also now decides, per model, whether the KV cache gets
+# quantized at all (HARDWARE_SPEED_ESTIMATION.md §14): unquantized (full decode speed)
+# whenever the recommended context already fits free memory, only falling back to
+# --kv-bits 8 when it doesn't — confirmed real KV-quant costs real decode speed with
+# zero memory benefit at short context, so it's no longer applied unconditionally.
+#
+# Automatic Prefix Caching (APC, HARDWARE_SPEED_ESTIMATION.md §13) is always enabled on
+# every launch — a real mlx_vlm feature, off by default upstream, that reuses cached KV
+# blocks across requests sharing a prefix (measured ~97.7% TTFT reduction on the
+# growing-conversation pattern OpenCode/Claude Code produce every turn) and persists
+# that cache to disk (~/.cache/mlx-vlm/caching) across this script's own model-switch
+# restarts of mlx_vlm.server.
 #
 # If <mode> is omitted, --interactive also prompts for which tool to launch (Claude
 # Code or OpenCode), greying out whichever of those isn't detected on this system.
@@ -93,11 +104,34 @@ MLX_VENV="$MLX_DIR/venv"
 MLX_PYTHON="$MLX_VENV/bin/python"
 MLX_SERVER_MODULE="mlx_vlm.server"
 MLX_PORT=11435
+# Static fallback only for the non-interactive fixed-model path (model_advisor.py never
+# runs there, so there's no computed decision to use) — see HARDWARE_SPEED_ESTIMATION.md
+# §14. --interactive overwrites this with model_advisor.py's own per-model decision,
+# which is empty/unset (no quantization) whenever the model's recommended context
+# already fits free memory unquantized — only falling back to 8 when it doesn't. Kept
+# as 8 here, not empty, so the older non-interactive invocation keeps its prior
+# always-quantized behavior rather than silently changing on a code path that has no
+# free-memory-driven decision behind it either way.
 KV_BITS=8
 KV_GROUP_SIZE=64
 QUANTIZED_KV_START=0
 PREFILL_STEP_SIZE=2048
 CONTEXT_WINDOW=131072
+
+# Automatic Prefix Caching (APC) — see HARDWARE_SPEED_ESTIMATION.md §13. Real mlx_vlm
+# 0.7.0 feature (mlx_vlm/apc.py), off by default upstream, turned on here after live
+# measurement: ~97.7% TTFT reduction on repeated/growing-prefix requests (exactly the
+# pattern OpenCode/Claude Code produce every turn — same system prompt + growing
+# history, one new message appended), and the disk tier specifically survives THIS
+# script's own model-switch restarts of mlx_vlm.server, which would otherwise cold-lose
+# the in-memory cache every time. APC_NUM_BLOCKS=4096 (double the mlx_vlm default of
+# 2048) is a lazy-allocated ceiling, not an eager memory cost (confirmed in apc.py's own
+# pool implementation) — see §13 for the measured numbers and what's NOT yet verified
+# (only tested on one model, one synthetic prefix, one prefix length).
+APC_ENABLED=1
+APC_NUM_BLOCKS=4096
+APC_DISK_PATH="$HOME/.cache/mlx-vlm/caching"
+APC_DISK_MAX_GB=5
 
 MONITOR_LOG="/tmp/monitor.log"
 MONITOR_PID=""
@@ -403,9 +437,21 @@ run_interactive_selection() {
     MLX_MODEL=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['huggingface'])" "$advisor_output")
     LOCAL_MODEL=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['id'])" "$advisor_output")
     CONTEXT_WINDOW=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['recommended_context'])" "$advisor_output")
-    KV_BITS=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['kv_bits'])" "$advisor_output")
+    # kv_bits is JSON null (Python None) whenever model_advisor.py's own dynamic
+    # decision found the recommended context already fits free memory unquantized —
+    # see HARDWARE_SPEED_ESTIMATION.md §14. Printing that directly would give the
+    # bash string "None", which is not a valid --kv-bits value and would either error
+    # or (worse) get treated as a truthy, non-empty flag value — must become an empty
+    # string here so ensure_mlx_running's `[[ -n "$KV_BITS" ]]` check below correctly
+    # omits the whole KV-quantization flag group instead of trying to pass "None" to it.
+    KV_BITS=$("$MLX_PYTHON" -c "import json,sys; v=json.loads(sys.argv[1])['kv_bits']; print(v if v is not None else '')" "$advisor_output")
 
+    local kv_bits_log="unquantized (full decode speed — recommended context already fits free memory)"
+    if [[ -n "$KV_BITS" ]]; then
+        kv_bits_log="quantized to ${KV_BITS}-bit (memory-constrained — needed to fit this context)"
+    fi
     log_success "Selected $LOCAL_MODEL ($MLX_MODEL) — context set to ${CONTEXT_WINDOW} tokens (computed from your current free memory)"
+    log_success "KV cache: $kv_bits_log"
 }
 
 # Pre-downloads the model via snapshot_download() BEFORE the server ever starts.
@@ -734,7 +780,7 @@ ensure_mlx_running() {
         else
             log_error "  currently loaded: unknown (server is up, but no recorded state -- started outside this script?)"
         fi
-        log_error "  requested:         $MLX_MODEL (context: ${CONTEXT_WINDOW} tokens, kv-bits: $KV_BITS)"
+        log_error "  requested:         $MLX_MODEL (context: ${CONTEXT_WINDOW} tokens, kv-bits: ${KV_BITS:-unquantized})"
 
         if [[ "$INTERACTIVE" == "true" ]]; then
             local reply
@@ -792,11 +838,32 @@ ensure_mlx_running() {
         --port "$MLX_PORT"
         --max-kv-size "$CONTEXT_WINDOW"
         --prefill-step-size "$PREFILL_STEP_SIZE"
-        --kv-bits "$KV_BITS"
-        --kv-group-size "$KV_GROUP_SIZE"
-        --quantized-kv-start "$QUANTIZED_KV_START"
-        --kv-quant-scheme uniform
     )
+    # KV-cache quantization is now OPTIONAL, not unconditional — see
+    # HARDWARE_SPEED_ESTIMATION.md §14. KV_BITS is empty whenever the recommended
+    # context already fits free memory unquantized (the common case; full decode
+    # speed, confirmed zero memory cost at short context in §10/§12's own
+    # measurements), and only set to a real bit-width when model_advisor.py's dynamic
+    # decision found it necessary to fit the context at all. The non-interactive
+    # fixed-model path has no such decision behind it and keeps KV_BITS=8 from its
+    # static default above, so this still quantizes unconditionally on that path,
+    # same as before this change.
+    if [[ -n "$KV_BITS" ]]; then
+        mlx_args+=(
+            --kv-bits "$KV_BITS"
+            --kv-group-size "$KV_GROUP_SIZE"
+            --quantized-kv-start "$QUANTIZED_KV_START"
+            --kv-quant-scheme uniform
+        )
+    fi
+
+    # Automatic Prefix Caching (APC) — see HARDWARE_SPEED_ESTIMATION.md §13. Real
+    # mlx_vlm feature, configured via environment variables read by
+    # mlx_vlm/server/runtime_config.py, not CLI flags — hence exported here rather
+    # than added to mlx_args. mkdir -p: mlx_vlm's own disk-tier code expects the
+    # directory to exist; it does not create it.
+    mkdir -p "$APC_DISK_PATH"
+    export APC_ENABLED APC_NUM_BLOCKS APC_DISK_PATH APC_DISK_MAX_GB
 
     "$MLX_PYTHON" -m "$MLX_SERVER_MODULE" "${mlx_args[@]}" \
         > /tmp/mlx-llm-proxy.log 2>&1 &
