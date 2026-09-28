@@ -353,7 +353,51 @@ see open items below.
 
 ---
 
-## 11. Open items before implementation
+## 11. Weight quantization bit-width matters more than engine choice — a same-engine bit-width
+##     test corrected an earlier confounded engine-comparison reading
+
+Follow-up to §10, prompted by a request to compare `qwen3.5-9b-mlx-8bit` against Ollama/llama.cpp
+for the same model. The first attempt at that comparison (Ollama's `qwen3.5:9b`, which turned out
+on inspection to be `Q4_K_M`, a ~4-bit quant) made Ollama look ~47% *faster* than MLX's 8-bit
+build — the opposite direction from §6's 3B finding (MLX faster there). **That result was not an
+engine effect at all — it was §10's bit-width mechanism in disguise, wearing an engine costume.**
+Confirmed by pulling `qwen3.5:9b-q8_0` (Ollama's own Q8_0/8-bit build of the exact same model) and
+re-running the identical fixed-prompt benchmark (same as §6/§10: `"Write a 200-word short story
+about a robot exploring an old library."`, `max_tokens=150`, `temperature=0.0`, warmed up first),
+which lets bit-width and engine be tested as two genuinely separate variables instead of one
+confounded comparison:
+
+| Config | Engine | Precision | Decode speed (5-run avg) |
+|---|---|---|---|
+| `qwen3.5:9b` | Ollama | Q4_K_M (~4-bit) | 44.20 tok/s |
+| `qwen3.5:9b-q8_0` | Ollama | Q8_0 (8-bit) | 28.48 tok/s |
+| `Qwen3.5-9B-MLX-8bit` | MLX | 8-bit | 30.15 tok/s |
+
+**Bit-width effect, isolated (same engine=Ollama, only precision differs):** Q4_K_M is **55.2%**
+faster decode than Q8_0 on the identical model. This is a clean, independent confirmation of §3's
+memory-bandwidth-bound premise — half the bits per weight means roughly half the bytes that must
+be streamed per decode step — on a totally different axis (quantization level) than §3 was
+originally validated on (chip-to-chip bandwidth differences). It also means bit-width, not engine
+choice, is the dominant lever for decode speed at a given model size — a bigger effect (55.2%)
+than either the engine choice (5.9%, next line) or §10's KV-quantization finding (up to 8.7%).
+
+**Engine effect, isolated (matched 8-bit precision, only engine differs):** MLX is **5.9%** faster
+than Ollama/llama.cpp at the SAME model, SAME 8-bit precision — real, same direction as §6's 3B
+result (MLX faster), but a much smaller margin than that ~15% figure and nowhere near the ~47%
+the unmatched comparison first suggested.
+
+**Lesson for any future cross-engine benchmark in this project:** always confirm both sides are
+running the same quantization level before attributing a speed difference to the engine —
+`ollama show <model>`'s `quantization` field and the model's own naming (`-4bit`/`-8bit` suffixes
+for MLX community builds, `Q4_K_M`/`Q8_0`/etc. for GGUF) are the two places to check before
+trusting any such comparison. This includes double-checking §6's own 3B MLX-vs-Ollama data (both
+were `-4bit`/`Q4_K_M`, i.e. already reasonably matched precision, so that comparison is NOT
+believed to have this same issue — but it predates this lesson being learned, so it's worth an
+explicit re-confirmation rather than just an assumption).
+
+---
+
+## 12. Open items before implementation
 
 1. **`dense_fixed_gb` for MoE active-weight estimation (§7)** is a stopgap number for one specific
    model, not a general solution. Any additional MoE model needs either its own calibration
@@ -380,8 +424,14 @@ see open items below.
    context, it says nothing about where quantization starts being a net win rather than a net
    loss; (c) a decision on what "hardware spec" should feed into this — e.g. total RAM/available
    bandwidth likely changes where that crossover point sits, not just the model's own size.
+7. **§11's engine-comparison correction still leaves the 3B result (§6) unverified against this
+   session's own lesson** — that comparison's Ollama side was `Q4_K_M` and its MLX side was
+   `-4bit`, which are reasonably matched, but neither was independently confirmed via `ollama
+   show`'s `quantization` field the way §11's 9B re-test was. Worth a quick re-check, not a full
+   re-run, given how large an effect a genuine mismatch would produce (§11 found ~47% from
+   mismatch alone, vs. the ~15%/~6% real engine effects at matched precision).
 
-None of these block writing the detection/estimation script, but all six should be called out in
+None of these block writing the detection/estimation script, but all seven should be called out in
 the script's own comments (mirroring how this document treats them), not silently smoothed over —
 consistent with this whole research effort's practice of recording what's actually confirmed versus
 what's still an approximation.

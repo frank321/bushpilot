@@ -1,7 +1,8 @@
 # Project Status — Memory-Aware Local MLX Model Launcher
 
 **Last updated:** 2026-09-28 (end of this working session — added live tool-calling verification
-for all 14 models, plus KV-cache quantization decode-speed cost data for 2 models)
+for all 14 models, plus KV-cache quantization and weight-quantization-bit-width decode-speed cost
+data across MLX and Ollama)
 **Location:** `~/scripts/` (this project is separate from the `devx-agent-eval` repo, though it
 references research originally done there — `LITELLM_ROUTING_PLAN.md` in that repo is the
 upstream source for several findings reused here)
@@ -223,8 +224,23 @@ of what the prose docs say. Fix the docs opportunistically, not before the next 
     overhead is a smaller fraction of total time for bigger models — the opposite of the naive
     assumption that a bigger KV cache means bigger quantization savings/cost. Only 2 models (both
     dense, one short context length) measured so far — see new open item below and
-    `HARDWARE_SPEED_ESTIMATION.md` §11's item 6 for what's needed before this becomes an actual
+    `HARDWARE_SPEED_ESTIMATION.md` §12's item 6 for what's needed before this becomes an actual
     dynamic-selection feature.
+15. **Corrected an engine-comparison mistake, and got a clean isolated bit-width measurement out
+    of it.** Following up item #14 with a request to benchmark `qwen3.5-9b-mlx-8bit` against
+    Ollama, the first Ollama pull (`qwen3.5:9b`) turned out to be `Q4_K_M` (~4-bit) — NOT matched
+    to MLX's 8-bit precision. That mismatched comparison made Ollama look ~47% *faster* than MLX,
+    the opposite of item #14's context and this doc's earlier 3B finding. Pulled
+    `qwen3.5:9b-q8_0` (Ollama's real 8-bit build of the same model, 10GB) to fix this, which let
+    bit-width and engine be tested as two separate variables instead of one confounded number.
+    **Real results: Ollama's own Q4_K_M is 55.2% faster decode than its own Q8_0 (44.20 vs 28.48
+    tok/s, same engine, only precision differs) — bit-width is the dominant lever, bigger than
+    engine choice or KV-quantization. At MATCHED 8-bit precision, MLX is 5.9% faster than Ollama
+    (30.15 vs 28.48 tok/s) — real, same direction as the 3B result, but a much smaller margin than
+    that ~15% figure.** Full writeup, the corrected numbers, and a flagged-but-not-yet-verified
+    concern about whether the original 3B comparison might have the same issue: new
+    `HARDWARE_SPEED_ESTIMATION.md` §11 (added as a follow-up to §10, which is now item #7 in that
+    doc's own "Open items" list, renumbered to §12 to make room).
 
 ---
 
@@ -277,9 +293,16 @@ of what the prose docs say. Fix the docs opportunistically, not before the next 
    above, KV quantization costs real decode speed on smaller models at short context for no
    memory-safety benefit, but `start_litellm_proxy.sh` still passes `--kv-bits 8` unconditionally
    to every model regardless of size or requested context. Needs the additional calibration data
-   `HARDWARE_SPEED_ESTIMATION.md` §11 item 6 describes (an MoE model, a 14B+ model, and a genuine
+   `HARDWARE_SPEED_ESTIMATION.md` §12 item 6 describes (an MoE model, a 14B+ model, and a genuine
    long-context run to find the actual crossover point) before a real heuristic can be wired into
    `model_advisor.py`.
+10. **The 3B MLX-vs-Ollama comparison predating item #15's bit-width lesson hasn't been
+    independently re-confirmed.** Item #15 found that an unmatched quantization level (Q4_K_M vs
+    8-bit) can produce a ~47% swing that looks like an engine effect but isn't — the original 3B
+    comparison (`HARDWARE_SPEED_ESTIMATION.md` §6) used `-4bit`/`Q4_K_M` on both sides, which is
+    reasonably matched, but was never independently confirmed via `ollama show`'s own
+    `quantization` field the way the 9B re-test was. Not currently believed to be an issue, but
+    worth a quick check given how large a mismatch's effect can be.
 
 ---
 
@@ -372,7 +395,20 @@ tok/s, within noise). peak_memory was identical with/without quantization on bot
 is pure per-step compute overhead, not a memory trade-off, at this short context length. Full
 data, mechanism discussion, and open items (need an MoE model, a 14B+ model, and a genuine
 long-context run before this becomes a real dynamic-selection feature) are in
-HARDWARE_SPEED_ESTIMATION.md §10-11.
+HARDWARE_SPEED_ESTIMATION.md §10.
+
+Then, following up on that with a request to benchmark qwen3.5-9b-mlx-8bit against Ollama: the
+first Ollama pull (qwen3.5:9b) turned out to be Q4_K_M, NOT matched to MLX's 8-bit precision --
+made Ollama look ~47% faster than MLX, which was actually 100% a bit-width artifact, not an engine
+result. Pulled qwen3.5:9b-q8_0 to fix this and isolate bit-width from engine as two separate
+variables. Real numbers: Ollama's own Q4_K_M is 55.2% faster decode than its own Q8_0 (same
+engine, only precision differs) -- bit-width is the single biggest lever measured so far, bigger
+than engine choice or KV-quantization. At matched 8-bit precision, MLX is 5.9% faster than Ollama
+-- real, same direction as the 3B result, much smaller margin than that ~15% figure. Full writeup
+in HARDWARE_SPEED_ESTIMATION.md §11 (§10's old "Open items" section is now §12 to make room, with
+a new item #7 flagging that the original 3B MLX-vs-Ollama comparison hasn't been independently
+re-confirmed against this same mismatched-precision risk, though it's not currently believed to
+have the issue).
 
 Next priorities, in the order PROJECT_STATUS.md's "What's NOT done yet" section lists them:
 1. model_advisor.py needs to clamp recommendations to a model's max_context_verified_safe field
@@ -397,10 +433,10 @@ Next priorities, in the order PROJECT_STATUS.md's "What's NOT done yet" section 
 9. Dynamic --kv-bits selection needs more calibration data (an MoE model, a 14B+ model, a genuine
    long-context run to find the real crossover point) before it can become an actual
    model_advisor.py feature rather than just a documented finding.
-8. model_advisor.py should warn on (and arguably deprioritize/exclude, when launch mode is
-   opencode/claude specifically) models with tool_calling.verdict == NOT_SUPPORTED
-   (qwen2.5-coder-3b/7b-3bit/7b-4bit/14b-instruct and phi-4-mini-instruct-4bit) — it doesn't
-   consult that field at all right now.
+10. §11's 3B MLX-vs-Ollama comparison (item #7 in HARDWARE_SPEED_ESTIMATION.md's own Open Items)
+    hasn't been independently re-confirmed to actually be precision-matched the way the 9B
+    re-test caught a real mismatch -- not currently believed to be an issue, but not verified
+    either.
 
 Ask me which of these (or something else) to work on next rather than assuming.
 ```
