@@ -1,11 +1,31 @@
 # Phase Plan: local-model-setup redesign
 
-Tracks the agreed redesign of this project — from "one script that does everything"
-to a supervisor script (owns the model stack) + a separate launcher script (attaches
-a coding tool to it). This doc is the working plan; update it as decisions change
-before/during implementation.
+## What this project is
+
+Lets you run Claude Code or OpenCode against a **local** LLM served on-device by
+Apple's MLX (Apple Silicon only) instead of a cloud API — for cost, privacy, or
+offline use. It's **hardware-aware**: it detects your Mac's chip and free memory,
+and recommends a model + context size that's actually safe to run rather than
+crashing the machine or silently truncating context. `models.json` is the curated
+model catalog (each entry live-verified for correctness and real tool-calling
+support, not just copied from a spec sheet); `model_advisor.py` turns that catalog
+plus live hardware detection into a concrete recommendation.
+
+## What this doc tracks
+
+This doc tracks the agreed redesign of this project — from "one script that does
+everything" to a supervisor script (owns the model stack) + a separate launcher
+script (attaches a coding tool to it) — plus the live end-to-end testing that
+validated dropping LiteLLM/Postgres entirely (MLX now serves both wire formats
+natively, so no translation-layer process is needed), and follow-on refinement
+phases for the hardware-recommendation logic and the model picker's UI. This doc is
+the working plan; update it as decisions change before/during implementation.
 
 ## Decisions locked in so far
+
+*(Note: `start_litellm_proxy`/LiteLLM/Postgres mentions in this section predate the
+later "drop LiteLLM + Postgres entirely" decision below — the supervisor script
+described here is superseded by Phase 2's MLX-only version once implemented.)*
 
 - Everything (venvs, downloaded models, Postgres data, logs, state) moves under a
   single `~/.local-model-setup/` directory instead of scattering
