@@ -403,3 +403,107 @@ measurements this correction is based on.
   which was closer to its measured value in this session's test but only checked
   once) with values grounded in this project's own real measurements, not public
   reports.
+
+**Decision (2026-09-29): MacBook Air bandwidth — documented, no code change.**
+Checked directly: Apple's own specs show the Air ships the same base (non-Pro/Max)
+chip as the base MacBook Pro/Mac mini, at *identical* peak bandwidth per generation
+(e.g. M5 MacBook Air and M5 MacBook Pro are both 153 GB/s) — `CHIP_BANDWIDTH_GB_S`'s
+existing base-tier rows (`"Apple M1"` through `"Apple M5"`) already cover the Air
+correctly; no separate `"MacBook Air"` row is needed, and `get_chip_info()` reading
+`Chip:` couldn't distinguish chassis anyway (that string is identical regardless of
+chassis; `system_profiler`'s separate `Model Name:` field is what actually says
+"MacBook Air" vs "MacBook Pro"/"Mac mini", and nothing currently reads it). What
+*is* real but explicitly deferred: the Air's fanless/passive cooling means it can
+thermal-throttle under a sustained decode run (potentially minutes of continuous
+compute) and fail to hold the same real-world throughput the identical spec-sheet
+bandwidth promises on an actively-cooled chassis — a genuine caveat, but not worth
+adding `Model Name:`-based chassis detection for right now.
+
+**Decision (2026-09-29): minimum speed floor for model availability = 15 tok/s.**
+Confirmed live: `build_recommendations()` currently gates a model's
+availability/greyed-out status purely on memory fit
+(`recommend_kv_bits_and_context`'s `fits`) — `estimated_tok_s` is computed and
+shown but never used to exclude anything, so a model estimated at even 1 tok/s
+would still appear fully selectable today. Add a floor: a model whose
+`estimated_tok_s` is below **15 tok/s** should be greyed out the same way an
+insufficient-memory model already is, with its own `context_reason` (e.g.
+`"estimated_speed_too_slow"`) surfaced in `print_menu`'s existing greyed-out
+explanation branch. Applies only to models with a known estimate — a model with
+`estimated_tok_s is None` (the MoE-without-active-weight-data case) keeps today's
+behavior (shown, speed labeled "unknown") rather than being excluded by a floor it
+can't be measured against.
+
+### Phase 6 — Arrow-key model picker with a live detail pane (`fzf`)
+
+Added 2026-09-29. Today's picker (`model_advisor.py`'s `print_menu` + `input()`
+loop) prints every model's full tagline/good_for/usage_examples/known_issues block
+inline, for every model, before the user even picks one — a wall of text once the
+catalog has more than 2-3 models. Replacing it with a compact list + arrow-key
+navigation + a live-updating detail pane, using `fzf` rather than hand-rolled
+Python TUI code (considered stdlib `curses` as the no-new-dependency alternative;
+`fzf` was chosen because it's the tool actually built for this exact UX — arrow
+keys, fuzzy filter, live preview pane — and it's a small, single, well-known static
+binary, not a heavy dependency like the Postgres one already removed elsewhere in
+this plan).
+
+**Locked design:**
+
+```
+  Local Model Advisor — Apple M5 Pro   RAM: 48GB   Free: 22.4GB
+> qwen3.5-9b-mlx-8bit    9.7GB  131K tok  ~30 tok/s
+  qwen3.5-9b-4bit        5.2GB  131K tok  ~55 tok/s
+  qwen3.5-0.8b-4bit      0.6GB  131K tok  ~200 tok/s ⚠
+  2/3 models shown (1 hidden: too little free memory)
+────────────────────────────────────────────────────────────────
+qwen3.5-9b-mlx-8bit
+Best all-around choice on 24GB+ Macs
+
+The strongest general recommendation once you have 24GB+ of RAM — a
+real 128K-class context window with the fastest measured MLX
+throughput of any model in this list (1.7-2.5x faster than its own
+GGUF counterpart at every context size tested).
+
+e.g. "Work through this repo-wide refactor" — tasks that need the
+model to hold a lot of file context at once
+e.g. "Let's pair-program through implementing this feature over
+several turns" — long multi-turn sessions without hitting context
+limits quickly
+
+[KV cache unquantized — full decode speed, plenty of free memory
+ for this context]
+────────────────────────────────────────────────────────────────
+> Type to filter, ↑↓ to move, enter to select, esc to quit
+```
+
+Preview pane goes on the **bottom** (`fzf --preview-window down:50%:wrap`), chosen
+over a right-side pane specifically for full-width prose wrapping on the long
+`good_for`/`usage_examples` text — traded off against showing fewer model rows
+above the fold at once, which is an acceptable cost since this catalog is small
+(single digits of models).
+
+**Implementation shape:**
+- `model_advisor.py` gets three new modes, none of which change the existing
+  scoring/fit logic (`recommend_kv_bits_and_context`, `build_recommendations`) —
+  this is a presentation-layer change only:
+  - `--list-compact`: tab-delimited rows (`id\tsize\tcontext\tspeed`) for *fitting*
+    models only, for fzf's list — matches today's behavior where only fitting
+    models get a selectable number; not-fitting models are summarized as a plain
+    count/reason line instead (same as today's `not_fitting` line), not fed into
+    fzf at all.
+  - `--detail <id>`: prints one model's existing tagline/good_for/usage_examples/
+    known_issues/kv-note block — refactored out of `print_menu` into a shared
+    function so the detail *text* itself doesn't change, only where it's rendered
+    (fzf's preview pane instead of inline in the main list).
+  - `--resolve <id>`: emits the same final machine-readable JSON selection line the
+    interactive path already prints (`id`, `huggingface`, `size_gb`,
+    `recommended_context`, `kv_bits`, `estimated_tok_s`), parameterized by an
+    already-chosen id instead of an interactive prompt — reuses the exact contract
+    `start_litellm_proxy.sh` already expects (`SELECTION=$(python3
+    model_advisor.py ...)`).
+- `start_litellm_proxy.sh` detects `fzf` via `command -v fzf`. If present: pipes
+  `--list-compact`'s output into
+  `fzf --delimiter='\t' --with-nth=2.. --preview 'python3 model_advisor.py --detail {1}' --preview-window down:50%:wrap`,
+  takes the selected line's first field (the id), and calls `--resolve <id>`. If
+  `fzf` is missing: falls back to today's plain numbered-menu behavior unchanged —
+  same graceful-degradation pattern already used elsewhere for missing Claude
+  Code/OpenCode (grey out / skip, don't hard-require).
