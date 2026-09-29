@@ -339,29 +339,128 @@ validated end-to-end for both target tools. Remaining follow-ups, not blockers:
 - Decide + implement the migration story for existing installs (see Open items).
 - Symlink the proxy script into a writable `$PATH` directory; detect one that
   already exists (`~/.local/bin`, `/opt/homebrew/bin`) rather than assuming.
+- **Move APC's disk cache under the new single home** (panel finding, GLM, low —
+  confirmed `APC_DISK_PATH="$HOME/.cache/mlx-vlm/caching"` in the current script,
+  outside `~/.local-model-setup/`): relocate to
+  `~/.local-model-setup/apc-cache/` so "fully removable by deleting one directory"
+  is actually true, and keep exporting `APC_ENABLED`/`APC_NUM_BLOCKS`/
+  `APC_DISK_PATH`/`APC_DISK_MAX_GB` plus the `mkdir -p` it needs (mlx_vlm doesn't
+  create the dir itself).
 
 ### Phase 2 — `start_litellm_proxy` rewrite (MLX-only supervisor, no LiteLLM/Postgres)
+
+**Panel-reviewed 2026-09-29** (Kimi K3 High + GLM-5.3 High via `devx-consult-panel`,
+against the actual current `start_litellm_proxy.sh`/`model_advisor.py` — see
+findings folded in below). Both consultants independently flagged that "strip and
+rewrite" framing risked silently regressing several already-battle-tested pieces of
+the current script; those are now explicit preserve/fix items, not just removals.
+
 - Strip out all Claude Code / OpenCode / tool-launching logic.
 - **Remove the LiteLLM/Postgres bootstrap entirely** — confirmed unnecessary by the
   live end-to-end test above (`mlx_vlm.server` natively serves both wire formats).
   Drop `bootstrap_litellm()`, the Prisma/Node codegen step, the
   `brew install postgresql@15` dependency, role/db bootstrap, the generated LiteLLM
   YAML config, and master-key management.
+- **Explicitly PORT, don't drop, these existing reliability mechanisms** (confirmed
+  present and load-bearing in the current script — panel finding, both consultants,
+  high severity): `mlx_port_owner_is_expected` (foreign-process/squatter detection —
+  a real incident already happened: a stray `mlx_lm.server` squatted on the port for
+  17h, answering `/health` while hung), `mlx_inference_responds` (a real one-token
+  inference probe — `/health` alone was already proven insufficient once),
+  `wait_for_port_free`/`wait_for_process_gone`, the loaded-model/context/kv-bits
+  state file (relocate from `/tmp/mlx-llm-proxy-loaded.txt` to
+  `~/.local-model-setup/state/`, matching the single-home decision), the
+  "different model already running, confirm?" interactive flow, and
+  `ensure_model_downloaded`'s pre-download step (no resume support if a download is
+  killed mid-transfer, so pre-checking matters).
+- **Fix the `install_packages_if_needed` "already installed" check**, a pre-existing
+  latent bug confirmed in the current code (panel finding, Kimi): it runs
+  `"$python_bin" -c "import $(echo $pkg | cut -d= -f1)"`, which for `pkg="mlx-lm"`
+  literally executes `import mlx-lm` — a Python `SyntaxError`, since hyphens aren't
+  valid in a bare import identifier. The fast path therefore **never succeeds**,
+  and every invocation silently re-runs `pip install --upgrade pip setuptools
+  wheel` plus a full reinstall of both packages, even when already installed. Fix
+  by checking `pip show <dist>` or mapping dist name → import name explicitly
+  (`mlx-lm`→`mlx_lm`, `mlx-vlm`→`mlx_vlm`).
+- **Pin `mlx-vlm`/`mlx-lm` to a minimum verified version** (`mlx-vlm>=0.7.0`, not
+  unbounded) — panel finding (GLM, high): the entire LiteLLM-removal decision rests
+  on this specific installed version's behavior (native `/v1/messages` routes,
+  `/metrics`'s `ServerMetricsStore` fields, `/v1/cache/stats`'s `APCStats` fields),
+  and the current script installs both packages with no version constraint at all.
+  **Also add a startup smoke check**: after the server reports healthy, actually
+  call `/v1/messages`, `/metrics`, and `/v1/cache/stats` once and verify the
+  expected shape before declaring the supervisor ready — catches behavior drift
+  even within the allowed version range, not just "too old."
 - Convert to foreground-only with a live status dashboard.
 - Implement Ctrl-C and `q` both triggering full teardown of just the MLX server
-  (no LiteLLM/Postgres processes left to tear down).
+  (no LiteLLM/Postgres processes left to tear down). **Also trap `HUP`/`TERM`, not
+  just `INT`** — panel finding (GLM, medium): a closed terminal or dead SSH session
+  currently only sends SIGHUP, which the plan's Ctrl-C/`q`-only framing doesn't
+  cover, risking exactly the kind of orphaned-process squatter the port-owner check
+  above exists to catch.
+- **Fold `monitor_memory.sh`'s memory-pressure backstop directly into the
+  supervisor's own poll loop, applying the exact same full-teardown path as
+  Ctrl-C/`q`** (decided 2026-09-29, resolving a panel finding from Kimi, high
+  severity: the current script's `--monitor` mode is described in its own comments
+  as *"a real-time backstop"* against ambient memory pressure during long
+  sessions — something admission checks alone don't cover, and the original phase
+  text only covered *displaying* memory, not *acting* on it). The poll loop already
+  reads `kern.memorystatus_level` for the dashboard's SYSTEM row; when pressure
+  crosses the critical threshold for N consecutive polls, trigger the same teardown
+  Ctrl-C/`q` use, with a visible dashboard banner explaining why. This removes
+  `monitor_memory.sh` as a separate background daemon entirely — one fewer process,
+  consistent with this project's own "don't crash the machine, minimize background
+  daemons" mission.
 - Ship the "easy" stats tier (`/metrics` + `/v1/cache/stats`, already confirmed
   sufficient — see decision above); no "needs work" tier remains to fast-follow.
 
 ### Phase 3 — New `launch_tool` script
-- Reuse/port the tool-detection ("installed vs. greyed out") logic, minus Antigravity.
+- **Tool selection uses `fzf` too** (decided 2026-09-29), consistent with Phase 6's
+  model picker. Unlike the model picker, an unavailable tool is **not** hidden from
+  the list — selecting an uninstalled tool shows a clear message ("Claude Code is
+  not installed — install it first: <link/command>") rather than silently greying
+  it out of the picker. Supersedes the original "detects... greys out whichever
+  isn't installed" wording.
 - Support `launch_tool <toolname>` to skip the interactive picker.
 - Check proxy/model health first; if down, confirm with the user and `exec
   start_litellm_proxy`.
+- **Also validate preload fit at attach-time, not just liveness** (decided
+  2026-09-29, resolving a panel finding — GLM raised it as "supervisor/launcher
+  ordering breaks tool-before-model," Kimi as "`--resolve` drops the `--tool`
+  dimension"; same root cause, different framing). The current script selects the
+  tool *before* the model specifically so `model_advisor.py`'s `--tool` flag can
+  factor that tool's preload into context selection (see the code comment: *"Tool
+  is selected BEFORE the model, not after"*). In the redesign this ordering is
+  gone by design — the supervisor is deliberately tool-agnostic, since its whole
+  point is serving multiple tools/terminals off one shared process, so there's no
+  longer a single "the tool" to optimize context for at select-time. That's fine,
+  but the underlying resource question doesn't disappear — it just moves later:
+  if the already-running proxy's loaded context doesn't leave enough room for
+  *this* tool's real preload (Phase 5 measured Claude Code's at ~39-44K tokens),
+  the user needs to find out at `launch_tool` attach-time, not mid-session via a
+  cryptic `PromptTooLongError`. So `launch_tool`'s existing health check gains one
+  more condition: `loaded_context - this_tool's_preload >= MIN_USABLE_CONTEXT`; if
+  it fails, warn clearly and suggest restarting the proxy with a bigger context (or
+  picking the other tool) instead of proceeding into a broken session.
+- **Reserve output tokens when setting the client-side context cap** (decided
+  2026-09-29, resolving a panel finding — GLM, medium, though the underlying data
+  was already in this doc's own live-test notes: *"PromptTooLongError: Request
+  needs 71307 context tokens (39307 prompt + 32000 max generation), but
+  MAX_KV_SIZE is 32768"*). `recommended_context` is a memory ceiling, not a usable
+  prompt budget — setting `CLAUDE_CODE_MAX_CONTEXT_TOKENS` directly to it will keep
+  reproducing this exact error near the ceiling. Reserve the client's expected
+  max-output-tokens (32K observed for Claude Code) when setting the cap.
 - For Claude Code: export `ANTHROPIC_BASE_URL` (pointed straight at the MLX server,
   no `/v1` suffix) plus all four `ANTHROPIC_MODEL` /
   `ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL` env vars to the real HF repo id (see
-  the Claude Code hardcoded-haiku-model finding above), and pass `--model` explicitly.
+  the Claude Code hardcoded-haiku-model finding above), and pass `--model`
+  explicitly. **Also carry over** (panel finding, both consultants, confirmed
+  present in the current script and omitted from this phase until now):
+  `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` dummy credentials (Claude Code's
+  behavior with no credential configured at all against a keyless server is
+  unconfirmed — keep the dummies unless a startup test proves they're
+  unnecessary), `ANTHROPIC_SMALL_FAST_MODEL`, and `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
+  (set per the output-token-reserve rule above).
 - For OpenCode: port `ensure_opencode_model_registered()` to write directly into a
   new `mlx-direct`-style `@ai-sdk/openai-compatible` provider block (`baseURL`
   pointed at `http://<mlx-host>:<port>/v1`) instead of the old `litellm` provider —
@@ -370,14 +469,38 @@ validated end-to-end for both target tools. Remaining follow-ups, not blockers:
   object lookup and throws otherwise). Prototype version of this provider block is
   already sitting in `~/.config/opencode/opencode.jsonc` (backup at
   `/tmp/mlx-test/opencode.jsonc.bak`) — use it as the template, don't re-derive from
-  scratch.
+  scratch. **Panel findings to close before treating the prototype as done**: the
+  prototype's `baseURL: "{env:MLX_DIRECT_BASE_URL}"` has no confirmed setter —
+  either `launch_tool` must export that env var, or the provider block should just
+  hardcode the URL (the port is already a fixed constant in the supervisor); the
+  current `opencode.jsonc` still has the old `litellm` provider pointing at the
+  now-dead port 4100 (confirmed: `LITELLM_PORT=4100`) and Phase 3 must clean that
+  up, not just add alongside it; confirm the registered model block includes a
+  required `apiKey` field; and register models keyed by the literal HF repo id
+  (what actually goes on the wire), not the friendly `models.json` id the old
+  `litellm` provider used.
 
 ### Phase 4 — Cleanup & docs
 - Update `QUICK_START.md` / `LITELLM_PROXY_USAGE.md` for the new layout and two-script
   model.
 - Remove now-stale `stop_litellm_proxy.sh`.
+- **Remove `monitor_memory.sh`** — its logic is now folded directly into the
+  supervisor's poll loop (see Phase 2), so the standalone script and its
+  `--litellm-pattern` argument (panel finding, GLM: already stale once LiteLLM is
+  gone) become dead weight, not just renamed.
+- **Rename `start_litellm_proxy` itself** (panel finding, GLM, low) — it no longer
+  proxies anything LiteLLM-related; keeping the old name after Phase 2's rewrite is
+  a maintainability/confusion cost worth fixing while the Phase 1 symlink work is
+  already being touched.
 - Re-verify `HARDWARE_SPEED_ESTIMATION.md` / `PROJECT_STATUS.md` references to old
   paths.
+- **Test the headline "multiple terminals/tool sessions share one proxy" scenario
+  concurrently, not just sequentially** (panel finding, GLM, medium): both live
+  tests so far ran Claude Code and OpenCode one at a time. Run them
+  simultaneously against the same server, and check `/metrics`'s in-flight count
+  and APC hit-rate behavior under interleaved requests from both wire formats at
+  once — the actual new capability this redesign enables was never verified under
+  real concurrency.
 
 ### Phase 5 — Recalibrate `model_advisor.py`'s hardware-based recommendation logic
 
@@ -422,7 +545,16 @@ measurements this correction is based on.
 - Replace `TOOL_BASELINE_PRELOAD_TOKENS["claude"]` (and re-verify `["opencode"]`,
   which was closer to its measured value in this session's test but only checked
   once) with values grounded in this project's own real measurements, not public
-  reports.
+  reports. **Watch for double-counting when doing this** (panel finding, GLM,
+  medium): `estimate_preload_overhead` already adds real measured doc/skill/MCP
+  tokens *on top of* the baseline constant. The live-tested ~39,000-44,000-token
+  figure was measured on frank's actual config, which already includes those
+  additive components — if the new baseline constant is set to that full figure
+  without subtracting them back out, preload gets counted twice and the advisor
+  will grey out models that would actually fit. Measure the new baseline in a
+  clean directory (`--strict-mcp-config`, no skills, no CLAUDE.md/AGENTS.md) so it
+  stays a true no-extras baseline, or explicitly decompose the measured figure
+  before using it.
 
 **Decision (2026-09-29): MacBook Air bandwidth — documented, no code change.**
 Checked directly: Apple's own specs show the Air ships the same base (non-Pro/Max)
