@@ -659,3 +659,40 @@ above the fold at once, which is an acceptable cost since this catalog is small
   `fzf` is missing: falls back to today's plain numbered-menu behavior unchanged —
   same graceful-degradation pattern already used elsewhere for missing Claude
   Code/OpenCode (grey out / skip, don't hard-require).
+
+### Phase 7 — GitHub Pages `docs/` site with a no-clone-needed download
+
+Added 2026-09-29. Sequenced **after Phase 4**, since the zip and `index.html` need
+to reference the final script names/trimmed docs Phase 4 produces, not today's
+names.
+
+**Prerequisite, not scriptable from here:** this repo has no GitHub remote
+configured yet (`git remote -v` is empty). GitHub Pages requires an actual GitHub
+repo with Pages enabled in its settings, pointed at the `docs/` folder on `main` —
+a one-time manual step (push the repo, then flip the setting) that has to happen
+before this phase's `index.html` is reachable at a real URL, though the folder and
+its contents can still be built and committed before that.
+
+**Structure:**
+
+```
+docs/
+├── index.html              # GitHub Pages landing page
+├── local-model-setup.zip   # packaged release bundle
+└── build_release.sh        # regenerates the zip — run manually before publishing an update
+```
+
+- **`index.html`**: project tagline and what it does (run Claude Code/OpenCode
+  against a local MLX-served LLM instead of a cloud API, hardware-aware so it
+  won't recommend a model/context that crashes the machine), requirements (Apple
+  Silicon Mac, macOS, Homebrew, Python 3), a short user guide (download → unzip →
+  run the supervisor script → run the launcher script), the zip's download link,
+  and a link back to the GitHub repo itself for anyone who'd rather clone/contribute.
+- **`local-model-setup.zip`**: end-user runtime files only, not this project's
+  internal planning/research docs — the renamed supervisor script and
+  `launch_tool` script (Phase 4's final names), `model_advisor.py`, `models.json`,
+  and a short standalone `README.md` written specifically for zip users (distinct
+  from `PHASE_PLAN.md`/`PROJECT_STATUS.md`, which stay working docs, not shipped).
+- **`build_release.sh`**: a small manual script that zips exactly that file list
+  into `docs/local-model-setup.zip` — no CI/automation, matching this project's
+  existing plain-shell-scripts-only approach elsewhere.
