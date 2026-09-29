@@ -109,7 +109,7 @@ MEM_CAUTION_BELOW_PCT=25
 # which is treated as unambiguous and acts immediately (same as monitor_memory.sh did).
 MEM_ABORT_CONSECUTIVE_POLLS=3
 
-DASHBOARD_POLL_INTERVAL=2
+DASHBOARD_POLL_INTERVAL=5
 
 # Use Python's certifi CA bundle if available, fall back to system default.
 CERT_PATH=$(python3 -c "import certifi; print(certifi.where())" 2>/dev/null) || true
@@ -697,26 +697,59 @@ get_mlx_rss_gb() {
 
 fmt_num() { "$MLX_PYTHON" -c "print(f'{int(sys.argv[1]):,}')" "$1" 2>/dev/null || echo "$1"; }
 
+# mlx_vlm.server (third-party) doesn't tag requests with any client/tool identity in
+# its /metrics response, so we can't learn this from the API. What we CAN see
+# ourselves: every tool talks to $MLX_PORT over a local TCP socket, so lsof on that
+# port surfaces the PIDs holding a connection to it. Exclude the server's own PID
+# (identified by matching $MLX_SERVER_MODULE in its command line, since $MLX_PID
+# isn't set when we attached to an already-running server) and resolve the rest to
+# process names -- that's "what tool is connected", best-effort, not request-level.
+get_connected_clients() {
+    local pids server_pid pid nm names
+    pids="$(lsof -ti "tcp:$MLX_PORT" 2>/dev/null || true)"
+    [[ -z "$pids" ]] && { echo ""; return; }
+
+    server_pid=""
+    for pid in $pids; do
+        if ps -p "$pid" -o command= 2>/dev/null | grep -q "$MLX_SERVER_MODULE"; then
+            server_pid="$pid"
+            break
+        fi
+    done
+
+    names=""
+    for pid in $pids; do
+        [[ "$pid" == "$server_pid" ]] && continue
+        nm="$(ps -p "$pid" -o comm= 2>/dev/null)" || continue
+        [[ -z "$nm" ]] && continue
+        names+="$(basename "$nm")"$'\n'
+    done
+    [[ -z "$names" ]] && { echo ""; return; }
+    printf '%s' "$names" | sort | uniq -c | awk '{count=$1; $1=""; sub(/^ /,""); printf "%s (%s), ", $0, count}' | sed 's/, $//'
+}
+
 render_dashboard() {
     local metrics_json cache_json
     metrics_json="$(curl -fsS --max-time 3 "http://$MLX_HOST:$MLX_PORT/metrics" 2>/dev/null || echo '{}')"
     cache_json="$(curl -fsS --max-time 3 "http://$MLX_HOST:$MLX_PORT/v1/cache/stats" 2>/dev/null || echo '{}')"
 
-    local pct_free pressure pressure_name mlx_rss now_ts elapsed elapsed_fmt
+    local pct_free pressure pressure_name mlx_rss now_ts elapsed elapsed_fmt connected_clients
     pct_free="$(get_percent_free)"
     pressure="$(get_pressure_level)"
     pressure_name="$(pressure_level_name "${pressure:-0}")"
     mlx_rss="$(get_mlx_rss_gb "${MLX_PID:-}")"
+    connected_clients="$(get_connected_clients)"
     now_ts=$(date +%s)
     elapsed=$((now_ts - DASHBOARD_START_TS))
     elapsed_fmt=$(printf "%02d:%02d:%02d" $((elapsed/3600)) $((elapsed%3600/60)) $((elapsed%60)))
 
     clear
     "$MLX_PYTHON" - "$metrics_json" "$cache_json" "$MLX_MODEL" "$MLX_PORT" "$CONTEXT_WINDOW" \
-        "$elapsed_fmt" "${APC_ENABLED}" "${pct_free:-?}" "$pressure_name" "${mlx_rss:-?}" "$TEARDOWN_REASON" <<'PYEOF'
+        "$elapsed_fmt" "${APC_ENABLED}" "${pct_free:-?}" "$pressure_name" "${mlx_rss:-?}" "$TEARDOWN_REASON" \
+        "$SCRIPT_DIR/launch_tool.sh" "${connected_clients:-}" <<'PYEOF'
 import json, sys
 
-metrics_raw, cache_raw, model, port, context, uptime, apc_on, pct_free, pressure, rss, teardown_reason = sys.argv[1:12]
+metrics_raw, cache_raw, model, port, context, uptime, apc_on, pct_free, pressure, rss, teardown_reason, launch_cmd, connected = sys.argv[1:14]
 
 def safe_json(s):
     try:
@@ -771,12 +804,15 @@ rule()
 line(f"SYSTEM          free mem {pct_free}%   pressure: {pressure}   MLX RSS {rss} GB   "
      f"peak {rate(latest.get('peak_memory_gb'))} GB")
 rule()
+line(f"CONNECTED       {connected if connected else 'no tool connected yet'}")
+rule()
 err = summary.get("last_error") or "none"
 line(f"last error: {err}")
 if teardown_reason:
     rule()
     line(f"⚠ {teardown_reason}")
 print("└" + "─" * (W - 2) + "┘")
+print(f"  To connect a tool: open another terminal and run {launch_cmd}")
 print("  Ctrl-C / q : stop everything")
 PYEOF
 }
