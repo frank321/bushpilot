@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Model Setup</title>
+<meta name="description" content="Run Claude Code or OpenCode against a local, on-device MLX-served model instead of a cloud API — hardware-aware, so it won't recommend a model or context size that crashes your Mac.">
+<style>
+  :root {
+    --bg: #ffffff;
+    --bg-alt: #f5f5f7;
+    --text: #1d1d1f;
+    --text-dim: #6e6e73;
+    --border: #e2e2e6;
+    --accent: #0a66c2;
+    --accent-text: #ffffff;
+    --code-bg: #1d1d1f;
+    --code-text: #f5f5f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #121214;
+      --bg-alt: #1b1b1f;
+      --text: #f2f2f4;
+      --text-dim: #9a9aa2;
+      --border: #2c2c31;
+      --accent: #4da3ff;
+      --accent-text: #0b1220;
+      --code-bg: #0b0b0d;
+      --code-text: #e6e6ea;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #121214;
+    --bg-alt: #1b1b1f;
+    --text: #f2f2f4;
+    --text-dim: #9a9aa2;
+    --border: #2c2c31;
+    --accent: #4da3ff;
+    --accent-text: #0b1220;
+    --code-bg: #0b0b0d;
+    --code-text: #e6e6ea;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  .wrap {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 48px 16px 96px;
+  }
+  header.hero {
+    text-align: center;
+    padding: 24px 0 40px;
+  }
+  header.hero h1 {
+    font-size: clamp(28px, 6vw, 40px);
+    margin: 0 0 12px;
+    letter-spacing: -0.02em;
+  }
+  header.hero p.tagline {
+    font-size: clamp(16px, 3.6vw, 19px);
+    color: var(--text-dim);
+    max-width: 560px;
+    margin: 0 auto 28px;
+  }
+  .cta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    justify-content: center;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 22px;
+    border-radius: 10px;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 15px;
+    border: 1px solid var(--border);
+  }
+  .btn.primary {
+    background: var(--accent);
+    color: var(--accent-text);
+    border-color: transparent;
+  }
+  .btn.secondary {
+    background: transparent;
+    color: var(--text);
+  }
+  section {
+    margin: 40px 0;
+  }
+  h2 {
+    font-size: 22px;
+    margin: 0 0 16px;
+    letter-spacing: -0.01em;
+  }
+  .card {
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 20px 22px;
+  }
+  ul.req {
+    margin: 0;
+    padding-left: 1.2em;
+  }
+  ul.req li { margin: 4px 0; }
+  ol.steps {
+    margin: 0;
+    padding-left: 1.4em;
+  }
+  ol.steps li { margin: 10px 0; }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13.5px;
+  }
+  code.inline {
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 6px;
+  }
+  pre {
+    background: var(--code-bg);
+    color: var(--code-text);
+    border-radius: 10px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 10px 0;
+  }
+  .terminal-label {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+  footer {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-top: 56px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+  }
+  footer a { color: var(--text-dim); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <h1>Local Model Setup</h1>
+    <p class="tagline">
+      Run Claude Code or OpenCode against a model served locally on your own Mac by
+      Apple's MLX — instead of a cloud API. Hardware-aware: it detects your chip and
+      free memory and recommends a model + context size that's actually safe to run,
+      instead of crashing your machine or silently truncating context.
+    </p>
+    <div class="cta-row">
+      <a class="btn primary" href="local-model-setup.zip">⬇ Download local-model-setup.zip</a>
+      <a class="btn secondary" href="https://github.com/frank321/bushpilot">View on the repo →</a>
+    </div>
+  </header>
+
+  <section>
+    <h2>Requirements</h2>
+    <div class="card">
+      <ul class="req">
+        <li>A Mac with Apple Silicon (M1 or later)</li>
+        <li>macOS</li>
+        <li><a href="https://brew.sh">Homebrew</a></li>
+        <li>Python 3.10+ somewhere on the machine (the setup script finds or helps you install one)</li>
+        <li>Claude Code and/or OpenCode, for whichever tool you plan to use</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>Get running</h2>
+    <div class="card">
+      <ol class="steps">
+        <li>Download and unzip <code class="inline">local-model-setup.zip</code>, then open a terminal in the resulting folder.</li>
+        <li>
+          <div class="terminal-label">Terminal 1 — start the model server and leave it running</div>
+          <pre>./start_mlx_server.sh</pre>
+          Detects your free memory, shows a picker of models that actually fit (with a
+          computed context size and estimated tok/s for each), downloads the model if
+          needed, and starts serving it with a live status dashboard.
+        </li>
+        <li>
+          <div class="terminal-label">Terminal 2 — attach a coding tool</div>
+          <pre>./launch_tool.sh</pre>
+          Picks Claude Code or OpenCode, checks the server from step 2 is healthy, and
+          launches straight into it. Open more terminals and run this again to attach
+          another tool to the same running model.
+        </li>
+        <li>
+          To stop everything, go back to the Terminal 1 window and press
+          <code class="inline">Ctrl-C</code> or <code class="inline">q</code>.
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <footer>
+    Prefer to clone and read the source, or contribute?
+    <a href="https://github.com/frank321/bushpilot">github.com/frank321/bushpilot</a>
+  </footer>
+
+</div>
+</body>
+</html>

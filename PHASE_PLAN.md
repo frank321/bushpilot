@@ -502,6 +502,44 @@ the current script; those are now explicit preserve/fix items, not just removals
   once — the actual new capability this redesign enables was never verified under
   real concurrency.
 
+**Implemented and live-validated (2026-09-29):**
+
+- `start_litellm_proxy.sh` renamed to `start_mlx_server.sh`; `launch_tool.sh` (Phase 3)
+  and all doc cross-references updated to the new name.
+- `stop_litellm_proxy.sh` and `monitor_memory.sh` deleted.
+  `MONITORING_ARCHITECTURE.md` and `verify_long_context_memory.sh` (which shelled out
+  to `monitor_memory.sh` directly for its stress-test safety net) both got a
+  superseded/historical-status banner rather than a rewrite, pointing at
+  `start_mlx_server.sh`'s `check_memory_backstop` as where that logic actually lives
+  now.
+- `LITELLM_PROXY_USAGE.md` renamed to `MLX_SERVER_USAGE.md` and rewritten for the
+  two-script architecture (no LiteLLM/Postgres, `~/.local-model-setup/` paths, both
+  scripts' real env vars/behavior). `QUICK_START.md` rewritten the same way.
+  `PROJECT_STATUS.md` and `HARDWARE_SPEED_ESTIMATION.md` got stale-path fixes (old
+  `~/scripts/`/`~/pip_env` locations, old script name) — `PROJECT_STATUS.md` also got
+  a banner pointing at this doc as the current tracker, since it predates the whole
+  Phase 1-4 redesign and a full rewrite of its 500+ lines of historical
+  model-verification notes was out of scope here.
+- **Live concurrency test, not simulated:** started `start_mlx_server.sh` with
+  `mlx-community/Qwen3.5-9B-MLX-8bit` (context 131072), then ran
+  `launch_tool.sh claude -p ...` and `launch_tool.sh opencode run ...` against the
+  same running server at the same time (both reading a marker file to confirm real,
+  distinct tool-call results, not cached/mocked output). `/metrics` showed
+  `in_flight` at 2-3 while both were mid-request, both completed successfully with
+  the correct answer (`MANGO-1234`), `requests_failed: 0` throughout, and
+  `/v1/cache/stats` showed real APC hits/disk writes across the interleaved requests.
+  Confirms the core claim: one `mlx_vlm.server` process really does serve both wire
+  formats to two independent clients concurrently, no proxy in the middle.
+- **Teardown validated via SIGTERM** (full `full_teardown` path: stops
+  `mlx_vlm.server`, removes the state file, frees the port) — confirmed clean via a
+  live kill. Ctrl-C's SIGINT path uses the identical `full_teardown` function (same
+  trap pattern, just a different signal) but could not be exercised in this same test
+  because the server had to be started as a backgrounded job for automation, and
+  POSIX/bash's "SIGINT ignored on entry to an async job cannot be re-trapped" rule
+  means that specific test artifact — not the script — silently defeats `kill -INT`
+  in that setup. Real interactive usage (running the script directly in a foreground
+  terminal, as it's designed for) does not hit this at all.
+
 ### Phase 5 — Recalibrate `model_advisor.py`'s hardware-based recommendation logic
 
 Added 2026-09-29 after cross-checking `model_advisor.py`'s two ESTIMATE-based
@@ -585,6 +623,37 @@ explanation branch. Applies only to models with a known estimate — a model wit
 behavior (shown, speed labeled "unknown") rather than being excluded by a floor it
 can't be measured against.
 
+**Implemented and validated (2026-09-29):**
+
+- Added `MIN_SPEED_TOK_S = 15` and wired it into `build_recommendations()`: when a
+  model fits memory-wise but its `estimated_tok_s` is a real number below 15,
+  `fits` flips to `False` and `context_reason` becomes `"estimated_speed_too_slow"`,
+  surfaced in `print_menu` as `"estimated ~N tok/s — below the 15 tok/s usability
+  floor"`. `estimated_tok_s is None` (MoE case) is left untouched, per the decision
+  above. Verified against the real catalog on this M5 Pro (nothing currently falls
+  below the floor here — fastest chip in the table) and against a simulated `Apple
+  M1`/8-core run, where 6 of 8 models correctly flip to greyed-out with the new
+  reason text and the MoE model with `estimated_tok_s: None` correctly stays shown.
+- **Recalibrated `TOOL_BASELINE_PRELOAD_TOKENS` from real measurements**, not public
+  reports: ran a single-turn, no-tool-call request through `launch_tool.sh` for both
+  tools from this repo's own root (no local `CLAUDE.md`/`AGENTS.md`/`.mcp.json`;
+  claude's run used `--strict-mcp-config`), read the server's real total prompt
+  tokens back, and subtracted this machine's measured global-skills contribution
+  (~3,518 tokens, measured via `measure_skills_preload` directly — skills are global
+  here, not per-directory) to avoid double-counting against what
+  `estimate_preload_overhead` adds separately for any given real caller. Result:
+  `claude` 18,000 → **18,900**, `opencode` 7,000 → **6,400**.
+  - **Note on a discrepancy surfaced by this recalibration:** the ~39,000-44,000-token
+    Claude Code figure recorded earlier in this same document (under "Live
+    end-to-end test") could not be reproduced. A same-methodology Read-tool-call
+    request measured today came in at ~24,000 total, consistent with today's bare
+    "say hello" baseline (~22,406) plus a bit of tool-result overhead — not with the
+    earlier ~39-44K claim. Since today's numbers are internally consistent across
+    two independently-run live tests (this session's Phase 4 concurrency test and
+    this Phase 5 measurement) and the earlier figure isn't, today's measurement is
+    what's now encoded in the constant; the earlier figure is superseded, not
+    reconciled — worth re-measuring again in a future session if this drifts.
+
 ### Phase 6 — Arrow-key model picker with a live detail pane (`fzf`)
 
 Added 2026-09-29. Today's picker (`model_advisor.py`'s `print_menu` + `input()`
@@ -660,6 +729,42 @@ above the fold at once, which is an acceptable cost since this catalog is small
   same graceful-degradation pattern already used elsewhere for missing Claude
   Code/OpenCode (grey out / skip, don't hard-require).
 
+**Implemented and live-validated (2026-09-29)**, on `start_mlx_server.sh` (this
+script's Phase 4 name) and `model_advisor.py`, with one correction to this section's
+own fzf invocation:
+
+- Added `model_advisor.py --list-compact` (tab rows for fitting models, compact
+  banner/hidden-count summary to stderr), `--detail <id>`, and `--resolve <id>`,
+  none of which touch `recommend_kv_bits_and_context`/`build_recommendations`.
+  `format_model_body_lines()` is the shared good_for/examples/known_issues/kv-note
+  block used by both the plain menu and `--detail`'s preview text; `emit_selection_json()`
+  is the shared final-JSON emitter used by both the interactive prompt and
+  `--resolve`. Verified all three flags directly, plus the plain-menu fallback's
+  output after the refactor (ordering intentionally shifted slightly: the KV-cache
+  note now prints after usage examples/known_issues instead of right after
+  `good_for`, matching this phase's own mockup — a presentation-only change).
+- **Correction, found live (fzf 0.74.4) while validating, not assumed:** this
+  section's own `--with-nth=2..` breaks "type to filter" by model name — confirmed
+  live that `--with-nth` restricts fuzzy MATCHING to the displayed fields, not just
+  their presentation, so hiding the id column also makes it unsearchable. That
+  directly contradicts this same section's own mockup, which shows the id as the
+  first visible column and promises "Type to filter". Fixed by dropping
+  `--with-nth` entirely (all 4 tab fields display and are searchable, matching the
+  mockup) and extracting the id from the accepted line with `cut -f1` in bash
+  rather than depending on `--accept-nth` (confirmed present in fzf 0.74.4, but not
+  worth a version floor just to avoid one `cut`).
+- Installed fzf via Homebrew on this machine (wasn't present) specifically to
+  validate this phase live rather than trust it unverified. Confirmed:
+  `--list-compact`'s tab rows are well-formed for `--delimiter`; `--filter` (fzf's
+  non-interactive test mode) correctly selects a model by typing its id, something
+  the original `--with-nth=2..` invocation could not do; the `--detail {1}` preview
+  command's substituted form runs correctly once `{1}` is a real id; and
+  `--resolve <id>` returns the exact same JSON shape the interactive path already
+  produced. The full interactive curses UI itself (arrow keys, live preview
+  rendering) still needs a real terminal and wasn't exercised pixel-for-pixel — the
+  three non-interactive python modes and the fzf command construction/piping are
+  what's been verified.
+
 ### Phase 7 — GitHub Pages `docs/` site with a no-clone-needed download
 
 Added 2026-09-29. Sequenced **after Phase 4**, since the zip and `index.html` need
@@ -696,3 +801,28 @@ docs/
 - **`build_release.sh`**: a small manual script that zips exactly that file list
   into `docs/local-model-setup.zip` — no CI/automation, matching this project's
   existing plain-shell-scripts-only approach elsewhere.
+
+**Implemented and live-validated (2026-09-29):**
+
+- **The "not scriptable from here" prerequisite got resolved this session**, not
+  deferred: pushed this repo to a real remote —
+  `https://github.com/frank321/bushpilot` (created public via `gh
+  repo create`, at the user's direction) — and enabled GitHub Pages on it via the
+  API (`POST /repos/frank-yan/local-model-setup/pages`, `source.branch=main`,
+  `source.path=/docs`), rather than leaving it as a manual step. `index.html` and
+  the footer link both point at that real repo URL.
+- Built `docs/index.html` (tagline, requirements, download button, repo link, a
+  3-step get-running guide mirroring `QUICK_START.md`), `docs/release-README.md`
+  (the zip's standalone `README.md` source, distinct from this doc and
+  `PROJECT_STATUS.md`), and `docs/build_release.sh` (zips
+  `start_mlx_server.sh`/`launch_tool.sh`/`model_advisor.py`/`models.json` +
+  `release-README.md` into `docs/local-model-setup.zip`, from a temp dir so the
+  zip's top-level folder is `local-model-setup/`, not loose files).
+- **Validated, not just built:** ran `build_release.sh` for real; unzipped the
+  actual output into an isolated scratch directory (no other repo files present)
+  and confirmed `start_mlx_server.sh`/`launch_tool.sh` both pass `bash -n`,
+  `model_advisor.py` imports and its `--list-compact` runs correctly there — the
+  bundle is genuinely self-contained, not just assumed to be from the file list.
+  Also lint-checked `index.html` (`tidy -utf8`, after ruling out the installed
+  `tidy`'s HTML5-element/encoding false positives) and served `docs/` locally to
+  confirm the zip's relative download link actually resolves next to the page.
