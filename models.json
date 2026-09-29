@@ -20,7 +20,7 @@
                     "\"Reply with exactly the word: pong\" — smoke-test that opencode/Claude Code → LiteLLM → MLX is wired up correctly before loading a bigger model",
                     "\"What's the syntax for a Python list comprehension?\" — quick trivia lookup, not real code generation"
                 ],
-                "known_issues": "Too small for real coding work — expect frequent mistakes on anything beyond a trivial snippet. Use only to test the pipeline itself, never as a daily driver.",
+                "known_issues": "Too small for real coding work — expect frequent mistakes on anything beyond a trivial snippet. Use only to test the pipeline itself, never as a daily driver. Observed (2026-09-29, live Claude Code test via mlx_vlm.server) getting stuck in an infinite tool-call loop on a simple single-file-read task — repeatedly re-issuing tool calls without ever converging to a final answer, instead of the single clean tool_use call the earlier structural test below showed. This is a common failure mode for small models in real multi-turn agentic loops (as opposed to a single isolated tool-call request) and is why this model is scoped to sanity-checking only, not real tool-calling usage.",
                 "size_label": "0.6 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
