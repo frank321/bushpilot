@@ -358,3 +358,48 @@ validated end-to-end for both target tools. Remaining follow-ups, not blockers:
 - Remove now-stale `stop_litellm_proxy.sh`.
 - Re-verify `HARDWARE_SPEED_ESTIMATION.md` / `PROJECT_STATUS.md` references to old
   paths.
+
+### Phase 5 — Recalibrate `model_advisor.py`'s hardware-based recommendation logic
+
+Added 2026-09-29 after cross-checking `model_advisor.py`'s two ESTIMATE-based
+components against real numbers gathered during the live end-to-end test above.
+The context-size math itself (`recommend_max_context`/`compute_kv_formula`) is an
+*exact* calculation from each model's real `kv_config`, not an estimate — not in
+scope here.
+
+**Correction (2026-09-29, same day):** this section originally claimed the speed
+estimate was off by 6-8x on this machine, based on a "~150-231 tok/s" figure. That
+figure was a mistake — it was actually the 0.8B model's tool-call-loop metrics
+(captured earlier while debugging that loop), mislabeled as the 9B-8bit model's
+speed when a dashboard-mockup placeholder number got treated as real data. Six
+separate, deliberate live benchmarks against the actual 9B-8bit model on this M5
+Pro — varying APC hit/miss, streaming, generation length, prompt size (up to 32K
+tokens), real tool-calling, and both wire endpoints (`/v1/chat/completions` and
+`/v1/messages`) — all landed at **26.5-32.2 tok/s decode**, matching the physics
+formula's **~27.5 tok/s** prediction to within ~15%. **The chip bandwidth table and
+`SPEED_CORRECTION_FACTOR` are fine; there is no speed-estimate bug to fix.** (Also
+independently confirmed while investigating this: this machine's M5 Pro variant —
+20-core GPU — really is 307 GB/s per Apple's own published spec, and Apple's own
+MLX/M5 research explicitly states decode stays memory-bandwidth-bound on M5, with
+Neural Accelerators only speeding up prefill — so nothing about the M5 generation
+changes the formula's underlying premise either.)
+
+The one still-real, still-unfixed finding from the live test:
+
+- **Claude Code's preload baseline (`TOOL_BASELINE_PRELOAD_TOKENS["claude"]` = 18,000)
+  is likely more than 2x too low.** Both this session's and the earlier session's
+  live tests measured Claude Code's real prompt-token preload at **~39,000-44,000
+  tokens** for a trivial single-file-read request — not 18,000. This constant was
+  sourced from public HN/issue-tracker reports, never measured on this project's
+  actual usage.
+
+**Why this is cheap to fix, and why it waits for Phase 2-4 first:** real Claude
+Code/OpenCode preload numbers are cheap to keep collecting from real `launch_tool`
+sessions (Phase 3) rather than one-off measurements, so recalibrating after Phase 3
+exists means it's grounded in a real, growing dataset rather than the two
+measurements this correction is based on.
+
+- Replace `TOOL_BASELINE_PRELOAD_TOKENS["claude"]` (and re-verify `["opencode"]`,
+  which was closer to its measured value in this session's test but only checked
+  once) with values grounded in this project's own real measurements, not public
+  reports.
