@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# STATUS: historical research artifact (PHASE_PLAN.md Phase 4). Its findings are
+# archived in mlx_long_context_stress_results.json and folded into the real supervisor
+# (see start_mlx_server.sh's check_memory_backstop). It shells out to monitor_memory.sh
+# below, which Phase 4 removed as a standalone script (its logic now lives directly in
+# start_mlx_server.sh's own poll loop) -- this script is kept for its methodology and
+# is not expected to run as-is until that call is ported to the new backstop.
+#
 # verify_long_context_memory.sh — real long-context memory stress test for a single
 # mlx_vlm.server-backed model, addressing PROJECT_STATUS.md's open item #1: every "SAFE"
 # verdict in models.json / mlx_verification_results.json so far only confirms the

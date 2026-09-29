@@ -57,19 +57,36 @@ MIN_USABLE_CONTEXT = 12288   # below this, a context window isn't really usable 
 # are labeled and sourced as such — not fabricated, but not exact either.
 #
 # TOOL_BASELINE_PRELOAD_TOKENS: system prompt + built-in tool schemas with NO MCP
-# servers or skills configured yet. Drawn from public reports as of 2026-09, NOT
-# measured on this machine: a Sep 2026 HN thread comparing Claude Code (~33k tokens
-# before the first user token) vs OpenCode (~7k) in one config; separate token
-# breakdowns putting Claude Code's system prompt at ~2.5-3.6k and built-in tool defs at
-# ~14-17k (~17-20k combined). Anthropic's own claude-code issue tracker (#45188,
-# #46339) shows this figure has swung by tens of thousands of tokens between patch
-# releases in the same year — treat these as a rough floor, not a stable spec.
+# servers or skills configured yet. Recalibrated 2026-09-29 (PHASE_PLAN.md Phase 5)
+# against REAL measurements via launch_tool.sh, replacing the previous public-report
+# -sourced figures (Claude 18,000 / OpenCode 7,000, from a Sep 2026 HN thread — never
+# measured on this project's own usage).
+#
+# Methodology: ran a single-turn, no-tool-call `-p "Say hello."` (claude) /
+# `run "Say hello."` (opencode) request through launch_tool.sh from this repo's own
+# root (no CLAUDE.md/AGENTS.md/.mcp.json present there, and claude's run used
+# --strict-mcp-config), reading the server's own reported total prompt tokens
+# (input_tokens, or input+cache.read for a request that hit APC) as ground truth for
+# the local model's tokenizer. That total still includes this machine's real ~32
+# globally-installed skills (measured separately via measure_skills_preload as
+# ~3,518 tokens, since skills are global here, not per-directory) — subtracted back
+# out below so estimate_preload_overhead's own skill-token addition (applied for
+# whatever skills a real caller's cwd actually has) isn't double-counted on top of
+# the baseline, per this phase's own double-counting warning.
+#   claude:   22,406 measured total - ~3 (user msg) - 3,518 (skills) ≈ 18,885
+#   opencode:  9,906 measured total - ~3 (user msg) - 3,518 (skills) ≈  6,385
+# Note: this contradicts an earlier, unreproduced same-day claim in this doc's history
+# of ~39,000-44,000 tokens for Claude Code (measured via a Read-tool-call request, not
+# a bare "say hello"). A same-methodology Read-tool-call re-test this session measured
+# ~24,000 total, consistent with the ~22,406 bare figure here, not the ~39-44K one —
+# that earlier figure could not be reproduced and is treated as superseded.
 TOOL_BASELINE_PRELOAD_TOKENS = {
-    "claude": 18000,
-    "opencode": 7000,   # bare-install figure (~0 skills/MCP) — real OpenCode sessions
-                         # with skills configured run far higher; see
-                         # measure_skills_preload's docstring for why that growth isn't
-                         # modeled for OpenCode specifically.
+    "claude": 18900,
+    "opencode": 6400,   # bare-install figure (~0 MCP; global skills subtracted back
+                         # out, see above) — real OpenCode sessions with skills
+                         # configured run higher; see measure_skills_preload's
+                         # docstring for why that growth isn't modeled for OpenCode
+                         # specifically.
 }
 
 # Rough, clearly-approximate per-server token cost — public reports range from ~800
@@ -95,6 +112,13 @@ CHIP_BANDWIDTH_GB_S = {
 # that cluster deliberately, so the estimate errs toward underselling speed rather than
 # overpromising it.
 SPEED_CORRECTION_FACTOR = 0.87
+
+# Decided 2026-09-29 (PHASE_PLAN.md Phase 5): build_recommendations() previously gated
+# a model's availability purely on memory fit -- estimated_tok_s was computed and shown
+# but never used to exclude anything, so a model estimated at even 1 tok/s would still
+# appear fully selectable. Below this, a model is greyed out the same way an
+# insufficient-memory model already is.
+MIN_SPEED_TOK_S = 15
 
 
 def log(msg):
@@ -446,16 +470,29 @@ def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_o
     for m in models:
         kv_result = recommend_kv_bits_and_context(m, free_wired_gb, preload_overhead)
         speed, speed_reason = estimate_speed_tok_s(m, chip_name, gpu_cores)
+
+        fits = kv_result["fits"]
+        context_reason = kv_result["context_reason"]
+        # Speed floor (decided 2026-09-29): estimated_tok_s was computed and shown but
+        # never used to exclude anything, so a model estimated at even 1 tok/s still
+        # appeared fully selectable. Only applies when there's a real estimate to judge
+        # against -- a model with estimated_tok_s is None (the MoE-without-active-
+        # weight-data case) keeps today's "shown, speed unknown" behavior rather than
+        # being excluded by a floor it can't be measured against.
+        if fits and speed is not None and speed < MIN_SPEED_TOK_S:
+            fits = False
+            context_reason = "estimated_speed_too_slow"
+
         rows.append({
             "model": m,
             "recommended_context": kv_result["recommended_context"],
-            "context_reason": kv_result["context_reason"],
+            "context_reason": context_reason,
             "kv_formula_detail": kv_result["kv_formula_detail"],
             "kv_bits": kv_result["kv_bits"],
             "estimated_tok_s": speed,
             "speed_reason": speed_reason,
             "context_after_preload": kv_result["context_after_preload"],
-            "fits": kv_result["fits"],
+            "fits": fits,
         })
     return rows
 
@@ -468,7 +505,7 @@ def print_preload_banner(preload):
     tool_label = {"claude": "Claude Code", "opencode": "OpenCode"}.get(preload["tool"], preload["tool"])
     log(f"  Estimated preload overhead for {tool_label} in {preload['cwd']}:")
     log(f"    baseline (system prompt + built-in tools): ~{preload['baseline_tokens']:,} tokens")
-    log("      (public reports, NOT measured on this machine — varies a lot by version)")
+    log("      (measured live on this machine 2026-09-29, see TOOL_BASELINE_PRELOAD_TOKENS — still varies by tool version)")
     if preload["doc_files"]:
         for path, tokens in preload["doc_files"]:
             log(f"    {os.path.basename(path)}: {tokens:,} tokens (measured: {path})")
@@ -490,6 +527,94 @@ def print_preload_banner(preload):
         f"~{preload['total'] + MIN_USABLE_CONTEXT:,} tokens total.")
     log("=" * 68)
     log("")
+
+
+def describe_unavailable_reason(r, preload):
+    """Human-readable reason a model is greyed out -- shared by the plain numbered
+    menu (print_menu) and --list-compact's hidden-model summary line."""
+    context_reason = r["context_reason"]
+    if context_reason == "insufficient_memory_for_model_weights":
+        return "not enough free memory to load this model"
+    elif context_reason == "insufficient_memory_for_fixed_kv_cost":
+        return "not enough free memory left for this model's context cache"
+    elif context_reason == "computed_context_too_small_to_be_useful":
+        return f"would only fit under {MIN_USABLE_CONTEXT:,} tokens of context — not usable"
+    elif context_reason == "architecture_fields_missing_from_config":
+        return "can't compute (model not downloaded yet / config unavailable)"
+    elif context_reason == "insufficient_context_after_tool_preload":
+        return (
+            f"{r['recommended_context']:,} tokens of context, but tool preload leaves only "
+            f"~{r['recommended_context'] - (preload['total'] if preload else 0):,} for the conversation — below the "
+            f"{MIN_USABLE_CONTEXT:,}-token floor"
+        )
+    elif context_reason == "estimated_speed_too_slow":
+        return f"estimated ~{r['estimated_tok_s']} tok/s — below the {MIN_SPEED_TOK_S} tok/s usability floor"
+    else:
+        return context_reason
+
+
+def format_model_body_lines(m, r=None):
+    """The descriptive block shared between the plain numbered menu (print_menu) and
+    --detail's fzf preview pane (Phase 6): good_for, usage examples, known_issues, and
+    the KV-cache note. The text itself doesn't change between the two renderers, only
+    where/how it's displayed -- indentation and surrounding chrome are each caller's
+    own job."""
+    lines = [m["display"]["good_for"], ""]
+    for ex in m["display"]["usage_examples"]:
+        lines.append(f"e.g. {ex}")
+    if m["display"].get("known_issues"):
+        lines.append(f"⚠ {m['display']['known_issues']}")
+    if r is not None:
+        lines.append("")
+        if r["kv_bits"]:
+            lines.append(f"[KV cache quantized to {r['kv_bits']}-bit — needed to fit this context in free memory]")
+        else:
+            lines.append("[KV cache unquantized — full decode speed, plenty of free memory for this context]")
+    return lines
+
+
+def format_context_k(tokens):
+    """Decimal-K notation matching Phase 6's locked mockup (131072 -> '131K'), not
+    binary-K -- a colloquial round number, not a precise one."""
+    return f"{round(tokens / 1000)}K"
+
+
+def format_model_compact_row(r):
+    """One tab-delimited row for --list-compact: id\\tsize\\tcontext\\tspeed. Column 1
+    (id) is hidden from fzf's display via --with-nth=2.. and used only internally (the
+    preview command, and the final --resolve call once selected)."""
+    # No known_issues marker here -- every model in this catalog carries some caveat
+    # note (severity varies widely), so it wouldn't discriminate anything in this
+    # compact view. Full known_issues text is always in the --detail preview pane.
+    m = r["model"]
+    size_str = f"{m['size_gb']:g}GB"
+    ctx_str = f"{format_context_k(r['recommended_context'])} tok"
+    speed_str = f"~{r['estimated_tok_s']} tok/s" if r["estimated_tok_s"] is not None else "speed unknown"
+    return f"{m['id']}\t{size_str}\t{ctx_str}\t{speed_str}"
+
+
+def print_list_compact(rows, chip_name, gpu_cores, total_ram_gb, free_wired_gb, preload=None):
+    """--list-compact: the fzf-facing presentation mode. Fitting models' compact rows
+    go to stdout (fzf's list input); everything else (header banner, hidden-model
+    summary) goes to stderr, so it's visible in the terminal right above where fzf
+    paints -- same pattern print_menu already uses for its own banner."""
+    log(f"  Local Model Advisor — {chip_name or 'unknown chip'}   "
+        f"RAM: {total_ram_gb or '?'}GB   Free: {free_wired_gb:.1f}GB")
+    if preload:
+        print_preload_banner(preload)
+
+    fitting = [r for r in rows if r["fits"]]
+    not_fitting = [r for r in rows if not r["fits"]]
+
+    for r in fitting:
+        print(format_model_compact_row(r))
+
+    if not_fitting:
+        reasons = {describe_unavailable_reason(r, preload) for r in not_fitting}
+        reason_txt = reasons.pop() if len(reasons) == 1 else "various reasons"
+        log(f"  {len(fitting)}/{len(rows)} models shown ({len(not_fitting)} hidden: {reason_txt})")
+
+    return fitting
 
 
 def print_menu(rows, free_wired_gb, chip_name, gpu_cores, total_ram_gb, preload=None):
@@ -522,40 +647,16 @@ def print_menu(rows, free_wired_gb, chip_name, gpu_cores, total_ram_gb, preload=
         if r["fits"]:
             i += 1
             speed_str = f"~{r['estimated_tok_s']} tok/s (estimated)" if r["estimated_tok_s"] else "speed unknown"
-            if r["kv_bits"]:
-                kv_str = f"  [KV cache quantized to {r['kv_bits']}-bit — needed to fit this context in free memory]"
-            else:
-                kv_str = "  [KV cache unquantized — full decode speed, plenty of free memory for this context]"
-            log(f"  {i}) {m['id']}  [{m['display']['tagline']}]")
-            log(f"       {m['display']['good_for']}")
             headroom_str = ""
             if r["context_after_preload"] is not None:
                 headroom_str = f"  (~{r['context_after_preload']:,} left for conversation after preload)"
+            log(f"  {i}) {m['id']}  [{m['display']['tagline']}]")
             log(f"       size={m['size_gb']}GB  max context={m['max_context_architectural']:,} tokens  "
                 f"recommended context={r['recommended_context']:,} tokens  {speed_str}{headroom_str}")
-            log(f"      {kv_str}")
-            for ex in m["display"]["usage_examples"]:
-                log(f"       e.g. {ex}")
-            if m["display"].get("known_issues"):
-                log(f"       ⚠ {m['display']['known_issues']}")
+            for line in format_model_body_lines(m, r):
+                log(f"       {line}" if line else "")
         else:
-            context_reason = r["context_reason"]
-            if context_reason == "insufficient_memory_for_model_weights":
-                reason = "not enough free memory to load this model"
-            elif context_reason == "insufficient_memory_for_fixed_kv_cost":
-                reason = "not enough free memory left for this model's context cache"
-            elif context_reason == "computed_context_too_small_to_be_useful":
-                reason = f"would only fit under {MIN_USABLE_CONTEXT:,} tokens of context — not usable"
-            elif context_reason == "architecture_fields_missing_from_config":
-                reason = "can't compute (model not downloaded yet / config unavailable)"
-            elif context_reason == "insufficient_context_after_tool_preload":
-                reason = (
-                    f"{r['recommended_context']:,} tokens of context, but tool preload leaves only "
-                    f"~{r['recommended_context'] - (preload['total'] if preload else 0):,} for the conversation — below the "
-                    f"{MIN_USABLE_CONTEXT:,}-token floor"
-                )
-            else:
-                reason = context_reason
+            reason = describe_unavailable_reason(r, preload)
             log(f"{DIM}  —) {m['id']}  [{m['display']['tagline']}]")
             log(f"       {m['display']['good_for']}")
             log(f"       size={m['size_gb']}GB  max context={m['max_context_architectural']:,} tokens  "
@@ -569,13 +670,37 @@ def print_menu(rows, free_wired_gb, chip_name, gpu_cores, total_ram_gb, preload=
     return fitting
 
 
+def _flag_value(argv, flag):
+    if flag in argv:
+        idx = argv.index(flag)
+        if idx + 1 < len(argv):
+            return argv[idx + 1]
+    return None
+
+
+def emit_selection_json(m, selected):
+    # Machine-readable result — the ONLY thing on stdout.
+    # kv_bits is None when this model's recommended context fits free memory
+    # unquantized (the common case now — see HARDWARE_SPEED_ESTIMATION.md §14); the
+    # caller (start_mlx_server.sh) must omit --kv-bits entirely in that case rather
+    # than treating None as a literal value.
+    print(json.dumps({
+        "id": m["id"],
+        "huggingface": m["huggingface"],
+        "size_gb": m["size_gb"],
+        "recommended_context": selected["recommended_context"],
+        "kv_bits": selected["kv_bits"],
+        "estimated_tok_s": selected["estimated_tok_s"],
+    }))
+
+
 def main():
-    list_json = "--list-json" in sys.argv
-    tool = None
-    if "--tool" in sys.argv:
-        idx = sys.argv.index("--tool")
-        if idx + 1 < len(sys.argv):
-            tool = sys.argv[idx + 1]
+    argv = sys.argv[1:]
+    list_json = "--list-json" in argv
+    list_compact = "--list-compact" in argv
+    detail_id = _flag_value(argv, "--detail")
+    resolve_id = _flag_value(argv, "--resolve")
+    tool = _flag_value(argv, "--tool")
 
     with open(MODELS_JSON) as f:
         catalog = json.load(f)
@@ -594,11 +719,44 @@ def main():
         preload_overhead=(preload["total"] if preload else 0),
     )
 
+    # Phase 6: three non-interactive presentation modes for the fzf-based picker.
+    # None of these touch recommend_kv_bits_and_context/build_recommendations --
+    # purely how the same computed rows get rendered or looked up by id.
+    if detail_id is not None:
+        row = next((r for r in rows if r["model"]["id"] == detail_id), None)
+        if row is None:
+            log(f"ERROR: unknown model id '{detail_id}'")
+            sys.exit(2)
+        print(row["model"]["id"])
+        print(row["model"]["display"]["tagline"])
+        print("")
+        for line in format_model_body_lines(row["model"], row):
+            print(line)
+        return
+
+    if resolve_id is not None:
+        row = next((r for r in rows if r["model"]["id"] == resolve_id), None)
+        if row is None:
+            log(f"ERROR: unknown model id '{resolve_id}'")
+            sys.exit(2)
+        if not row["fits"]:
+            log(f"ERROR: '{resolve_id}' does not currently fit free memory.")
+            sys.exit(3)
+        emit_selection_json(row["model"], row)
+        return
+
+    if list_compact:
+        print_list_compact(rows, chip_name, gpu_cores, total_ram_gb, free_wired_gb, preload)
+        return
+
     if list_json:
         print(json.dumps({
             "current_wired_gb": current_wired_gb, "free_wired_gb": free_wired_gb,
             "chip": chip_name, "gpu_cores": gpu_cores,
             "total_ram_gb": total_ram_gb, "preload_overhead": preload,
+            # Exposed so callers (launch_tool.sh's attach-time preload-fit check) don't
+            # have to hardcode a second copy of this constant.
+            "min_usable_context": MIN_USABLE_CONTEXT,
             "recommendations": rows,
         }, indent=2))
         return
@@ -626,21 +784,7 @@ def main():
         log("Invalid choice, try again.")
 
     selected = fitting[int(choice) - 1]
-    m = selected["model"]
-
-    # Machine-readable result — the ONLY thing on stdout.
-    # kv_bits is None when this model's recommended context fits free memory
-    # unquantized (the common case now — see HARDWARE_SPEED_ESTIMATION.md §14); the
-    # caller (start_litellm_proxy.sh) must omit --kv-bits entirely in that case rather
-    # than treating None as a literal value.
-    print(json.dumps({
-        "id": m["id"],
-        "huggingface": m["huggingface"],
-        "size_gb": m["size_gb"],
-        "recommended_context": selected["recommended_context"],
-        "kv_bits": selected["kv_bits"],
-        "estimated_tok_s": selected["estimated_tok_s"],
-    }))
+    emit_selection_json(selected["model"], selected)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,17 @@
 # Project Status — Memory-Aware Local MLX Model Launcher
 
+**Superseded as the current tracker (2026-09-29): see `PHASE_PLAN.md` instead.** This
+file predates the Phase 1-4 redesign (single `~/.local-model-setup/` home, LiteLLM +
+Postgres dropped entirely, `start_litellm_proxy.sh` split into `start_mlx_server.sh` +
+`launch_tool.sh`). Its `~/scripts/` location references below are stale — the project
+now lives in this git repo — and `start_litellm_proxy.sh`/`monitor_memory.sh` no
+longer exist under those names. Kept below as a historical record of the
+model-verification work (14-model catalog, tool-calling verdicts, speed benchmarks),
+which is still accurate; for anything about the launcher scripts themselves, current
+paths, or the two-script architecture, read `PHASE_PLAN.md` and `MLX_SERVER_USAGE.md`.
+
+---
+
 **Last updated:** 2026-09-28 (end of this working session — added live tool-calling verification
 for all 14 models, plus KV-cache quantization and weight-quantization-bit-width decode-speed cost
 data across MLX and Ollama; a same-day follow-up session confirmed Ollama actually ships two

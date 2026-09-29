@@ -1,7 +1,22 @@
 # Memory Monitoring Architecture
 
-**Status: current.** This doc originally described `monitor_memory.sh` as a design to be
-implemented. It has since been built (`monitor_memory.sh`), wired into
+**Status: superseded (2026-09-29, PHASE_PLAN.md Phase 4).** `monitor_memory.sh` — the
+standalone script this doc describes — has been removed. Its logic (the percent-free
+thresholds, the consecutive-poll debounce, the CRITICAL-pressure-level override) is now
+folded directly into `start_mlx_server.sh`'s own dashboard poll loop
+(`check_memory_backstop`), triggering the exact same full-teardown path as Ctrl-C/`q`
+instead of a separate background daemon. This doc is kept for the threshold-design
+research below, which is still accurate and still the source of truth for those
+numbers — just read `start_mlx_server.sh` for where the logic actually lives now, not
+a separate script invoked with `--monitor`.
+
+---
+
+*(Original doc, describing the now-removed standalone script, preserved below for the
+threshold-design research.)*
+
+**Status when written: current.** This doc originally described `monitor_memory.sh` as a
+design to be implemented. It has since been built (`monitor_memory.sh`), wired into
 `start_litellm_proxy.sh` via `--monitor`, and used as the safety net for
 `verify_long_context_memory.sh`'s real stress tests. This revision replaces the original
 wired-memory-GB threshold design with the percent-free design actually implemented, after that

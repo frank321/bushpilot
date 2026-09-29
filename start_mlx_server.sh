@@ -1,25 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# start_litellm_proxy.sh — MLX-only model-serving supervisor.
+# start_mlx_server.sh — MLX-only model-serving supervisor.
 #
-# NOTE ON THE NAME: this script no longer starts or manages LiteLLM (or Postgres) at
-# all — see PHASE_PLAN.md's "drop LiteLLM + Postgres entirely" decision. `mlx_vlm.server`
-# natively serves both the OpenAI (/v1/chat/completions) and Anthropic (/v1/messages)
-# wire formats, so there is no translation-layer proxy process needed anymore. The
-# rename to something more accurate is tracked as its own later cleanup step
-# (PHASE_PLAN.md Phase 4) and deliberately out of scope here so this diff stays
-# reviewable as "behavior change" separate from "file rename".
+# Renamed from start_litellm_proxy.sh (PHASE_PLAN.md Phase 4) — this script no longer
+# starts or manages LiteLLM (or Postgres) at all, see PHASE_PLAN.md's "drop LiteLLM +
+# Postgres entirely" decision. `mlx_vlm.server` natively serves both the OpenAI
+# (/v1/chat/completions) and Anthropic (/v1/messages) wire formats, so there is no
+# translation-layer proxy process needed anymore.
 #
-# This script's ONLY job now: bring up mlx_vlm.server safely (memory-aware, won't
-# crash the machine), show a live status dashboard in the foreground, and tear
-# everything down cleanly on Ctrl-C / `q` / a closed terminal / a memory emergency.
-# Picking a coding tool (Claude Code / OpenCode) and pointing it at this server is a
-# separate script's job (PHASE_PLAN.md Phase 3's `launch_tool`, not yet implemented) —
-# multiple tools/terminals are meant to attach to the one shared server this starts.
+# This script's ONLY job: bring up mlx_vlm.server safely (memory-aware, won't crash
+# the machine), show a live status dashboard in the foreground, and tear everything
+# down cleanly on Ctrl-C / `q` / a closed terminal / a memory emergency. Picking a
+# coding tool (Claude Code / OpenCode) and pointing it at this server is
+# launch_tool.sh's job (PHASE_PLAN.md Phase 3) — multiple tools/terminals are meant to
+# attach to the one shared server this starts.
 #
 # Usage:
-#   start_litellm_proxy.sh [--interactive] [model_id] [huggingface_id] [context]
+#   start_mlx_server.sh [--interactive] [model_id] [huggingface_id] [context]
 #
 #   --interactive (default when no model_id is given): runs model_advisor.py, which
 #     detects free wired memory + chip, shows every models.json entry (greying out
@@ -27,7 +25,7 @@ set -euo pipefail
 #     estimated tok/s, and lets you pick.
 #
 #   Fixed-model form (for scripting/restarts without the interactive picker):
-#     start_litellm_proxy.sh qwen3.5-9b-mlx-8bit mlx-community/Qwen3.5-9B-MLX-8bit 131072
+#     start_mlx_server.sh qwen3.5-9b-mlx-8bit mlx-community/Qwen3.5-9B-MLX-8bit 131072
 #
 # Automatic Prefix Caching (APC) is always enabled — see HARDWARE_SPEED_ESTIMATION.md
 # §13. KV-cache quantization is applied only when the interactively-recommended
@@ -390,6 +388,40 @@ bootstrap_mlx() {
     log_success "MLX bootstrap complete"
 }
 
+# Phase 6: arrow-key model picker with a live detail pane, using fzf rather than
+# hand-rolled TUI code -- see PHASE_PLAN.md for why fzf over stdlib curses. Prints
+# model_advisor.py's own --resolve output (the same JSON contract the plain-menu path
+# already produces) on success, or returns non-zero on cancel/failure.
+#
+# NOTE: deliberately NOT using --with-nth to hide the id column. Confirmed live
+# (fzf 0.74.4) that --with-nth restricts fuzzy MATCHING to only the displayed fields,
+# not just their presentation -- hiding the id column would make "type to filter" not
+# match on model name at all, the opposite of the locked design's own mockup (which
+# shows the id as the first visible column and explicitly promises "Type to filter").
+# Showing all 4 tab fields (id/size/context/speed) keeps both display and search
+# matching the mockup; `cut -f1` below extracts the id from the accepted line without
+# depending on a newer fzf feature (--accept-nth) that may not exist on an older
+# install.
+run_fzf_model_picker() {
+    local selection selected_id
+    local preview_cmd="\"$MLX_PYTHON\" \"$SCRIPT_DIR/model_advisor.py\" --detail {1}"
+
+    selection="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact | fzf \
+        --delimiter=$'\t' \
+        --preview "$preview_cmd" --preview-window down:50%:wrap \
+        --prompt="Model> " --height=~80% --layout=reverse)"
+    if [[ -z "$selection" ]]; then
+        log_error "Model selection cancelled or no model available."
+        return 1
+    fi
+
+    selected_id="$(printf '%s' "$selection" | cut -f1)"
+    if ! "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --resolve "$selected_id"; then
+        log_error "Could not resolve '$selected_id' -- free memory may have changed since the list was shown. Try again."
+        return 1
+    fi
+}
+
 # Interactive model selection (Phase 2: no --tool factored in here anymore -- the
 # supervisor is deliberately tool-agnostic now; a tool-aware preload check moves to
 # Phase 3's launch_tool at attach-time instead).
@@ -397,7 +429,9 @@ run_interactive_selection() {
     log_info "Detecting hardware and free memory for model recommendations..."
 
     local advisor_output
-    if ! advisor_output=$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py"); then
+    if is_command_available fzf; then
+        advisor_output="$(run_fzf_model_picker)" || exit 1
+    elif ! advisor_output=$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py"); then
         log_error "Model selection cancelled or failed."
         exit 1
     fi

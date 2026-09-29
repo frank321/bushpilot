@@ -1,13 +1,16 @@
 # Hardware Detection & Token-Speed Estimation — Research Notes
 
-**Status:** Research complete, validated against live measurements on this machine. Not yet
-implemented in `start_litellm_proxy.sh`. This document exists so the formula below is traceable
-back to its sources and isn't reinvented or drifted from silently later.
+**Status:** Research complete, validated against live measurements on this machine.
+Implemented in `model_advisor.py`, called by `start_mlx_server.sh` (renamed from
+`start_mlx_server.sh` — see PHASE_PLAN.md Phase 4). This document exists so the
+formula below is traceable back to its sources and isn't reinvented or drifted from
+silently later.
 
-**Owner:** local scripts (`~/scripts/`)
-**Related:** `LITELLM_PROXY_USAGE.md` (interactive menu design), `models.json` (per-model metadata
-this feeds into), `verify_max_kv_size.sh` / `mlx_verification_results.json` (separate
-verification — confirms `--max-kv-size` is *enforced*, not how *fast* a model runs).
+**Owner:** this repo (`local-model-setup`)
+**Related:** `MLX_SERVER_USAGE.md` (renamed from `LITELLM_PROXY_USAGE.md` — interactive
+menu design), `models.json` (per-model metadata this feeds into),
+`verify_max_kv_size.sh` / `mlx_verification_results.json` (separate verification —
+confirms `--max-kv-size` is *enforced*, not how *fast* a model runs).
 
 ---
 
@@ -304,7 +307,7 @@ fields it depends on have been confirmed to exist and contain the expected value
 ## 10. `--kv-bits` quantization is a real decode-speed cost at short context, and the cost is NOT
 ##     the same across model sizes — confirmed on 2 models, not assumed universal
 
-**Motivating question:** `start_litellm_proxy.sh` launches every model with
+**Motivating question:** `start_mlx_server.sh` launches every model with
 `--kv-bits 8 --kv-group-size 64 --quantized-kv-start 0` unconditionally (see its `mlx_args`
 construction). Does this cost anything when the KV cache barely grows — e.g. a short interactive
 coding exchange — and if so, does that cost scale the same way across model sizes? This matters
@@ -418,7 +421,7 @@ than the chunk size gets processed during prefill — a 27-31-token prompt never
 smallest candidate value (512) and would show zero effect regardless of the flag, so this reused a
 ~7,200-token filler prompt (`--max-kv-size 16384` to fit it), `max_tokens=50`, same
 warmup/measured/averaging discipline, comparing `--prefill-step-size` 512 / 2048 (the value
-`start_litellm_proxy.sh` actually launches with) / 4096, at production `--kv-bits 8 --kv-group-size
+`start_mlx_server.sh` actually launches with) / 4096, at production `--kv-bits 8 --kv-group-size
 64 --quantized-kv-start 0 --kv-quant-scheme uniform` throughout (KV-quant itself held constant so
 prefill-step-size is the only variable).
 
@@ -525,7 +528,7 @@ each model.)
 - **Memory cost of larger `--prefill-step-size` is real and consistent across both models:**
   6.253→6.486→6.710 GB for e4b, 8.140→8.966→10.028 GB for 12b, scaling up monotonically with chunk
   size even though it buys no corresponding TTFT win past 2048. This is a real, measured tradeoff
-  the current hardcoded `PREFILL_STEP_SIZE=2048` in `start_litellm_proxy.sh` is already on the
+  the current hardcoded `PREFILL_STEP_SIZE=2048` in `start_mlx_server.sh` is already on the
   right side of for this model family, apparently by luck rather than by having been tuned against
   this data (the value predates this benchmark).
 - **Scale sanity check:** `gemma-4-12b-it-4bit`'s TTFT at ~7,200 prompt tokens is already ~7.7-8.3
@@ -575,7 +578,7 @@ defaults to `"0"`) and configured purely via environment variables read by
   Raising it is not a fixed up-front memory cost.
 - `APC_DISK_PATH` — adds a disk tier so cached blocks survive **process restarts** (the in-memory
   pool alone is lost every time `mlx_vlm.server` restarts — which happens on every model switch via
-  `start_litellm_proxy.sh`).
+  `start_mlx_server.sh`).
 - `APC_DISK_MAX_GB` — caps the disk tier's size.
 - One unconfirmed risk flagged directly in `apc.py`'s own comments, not independently verified
   here: Apple Metal has a per-process tensor-count ceiling separate from byte memory
@@ -601,7 +604,7 @@ larger/disk-backed config, which made no measurable difference at this prefix si
 even the default 32,768-token ceiling, so the larger pool and disk tier had nothing to do yet).
 
 **Where the disk tier specifically earns its keep** — tested separately by killing the server
-entirely (simulating a `start_litellm_proxy.sh` model-switch restart) and starting a **fresh
+entirely (simulating a `start_mlx_server.sh` model-switch restart) and starting a **fresh
 process** with the same `APC_DISK_PATH`, sending turn 2 with no warm-up sent to that process at all:
 
 | | TTFT | `prompt_n` |
@@ -615,7 +618,7 @@ likely because the disk-restore path found an exact full-prompt match (an `APCEx
 per the source) rather than the block-granularity partial match the in-memory case needed for a
 prompt that had grown since the block boundary.
 
-**Conclusion: enabled.** `start_litellm_proxy.sh` now launches `mlx_vlm.server` with `APC_ENABLED=1`,
+**Conclusion: enabled.** `start_mlx_server.sh` now launches `mlx_vlm.server` with `APC_ENABLED=1`,
 `APC_NUM_BLOCKS=4096`, `APC_DISK_PATH=~/.cache/mlx-vlm/caching`, `APC_DISK_MAX_GB=5` unconditionally
 — the measured downside (an ~11.6% TTFT hit on the very first cold request of a session) is small
 and one-time, and the upside (~97.7% TTFT reduction on every subsequent turn, and surviving the
@@ -631,7 +634,7 @@ noted above also hasn't been approached, let alone tested past.
 
 ## 14. Dynamic `--kv-bits` selection — implemented as a feature, closing §17's open item #6
 
-Per §10/§12: KV-cache quantization (`--kv-bits 8`, the flag `start_litellm_proxy.sh` previously
+Per §10/§12: KV-cache quantization (`--kv-bits 8`, the flag `start_mlx_server.sh` previously
 passed to every model unconditionally) has a **real decode-speed cost** (up to 8.7% on fast/small
 models) and — confirmed directly via `peak_memory` being byte-identical with/without it in every
 short-context run in this document — **buys no memory benefit at short context**, because the KV
