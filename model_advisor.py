@@ -367,7 +367,8 @@ def compute_kv_formula(kv_config, kv_bits=UNQUANTIZED_KV_BITS):
 
 
 def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BITS,
-                           safety_buffer_gb=SAFETY_BUFFER_GB, concurrency=1):
+                           safety_buffer_gb=SAFETY_BUFFER_GB, concurrency=1,
+                           max_context_tokens=None):
     """Returns (recommended_tokens_or_None, reason_string, detail_dict_or_None).
 
     concurrency>1 sizes context for N identically-sized concurrent slots instead of
@@ -377,7 +378,15 @@ def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BIT
     concurrency request (config.json's "concurrency"); the default auto-detected
     bonus-concurrency path (see compute_bonus_concurrency) instead calls this with
     concurrency=1 (unchanged, context-maximizing behavior) and separately checks
-    whether tier-rounding leftover fits extra same-size slots for free."""
+    whether tier-rounding leftover fits extra same-size slots for free.
+
+    max_context_tokens (from config.json's "max_context_tokens" via the
+    --max-context-tokens flag) is an OPTIONAL upper bound applied BEFORE tier
+    rounding -- deliberately a cap, not an override: the memory-fit math still runs
+    unchanged and can only ever shrink the result further, so a cap can never
+    produce a context the host can't actually afford (unlike the launcher's
+    fixed-model CLI form, whose 3rd positional arg bypasses this check entirely).
+    None (the default) means no cap and today's behavior exactly."""
     available_gb = free_wired_gb - effective_size_gb(model_entry) - safety_buffer_gb
     if available_gb <= 0:
         return None, "insufficient_memory_for_model_weights", None
@@ -399,6 +408,8 @@ def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BIT
     else:
         max_ctx = int(usable_bytes / bytes_per_growing_token)
         max_ctx = min(max_ctx, model_entry["max_context_architectural"])
+    if max_context_tokens is not None:
+        max_ctx = min(max_ctx, max_context_tokens)
 
     if max_ctx < MIN_USABLE_CONTEXT:
         return None, "computed_context_too_small_to_be_useful", detail
@@ -470,7 +481,8 @@ def _apply_preload(ctx, reason, preload_overhead):
 
 
 def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0,
-                                   safety_buffer_gb=SAFETY_BUFFER_GB, concurrency=1):
+                                   safety_buffer_gb=SAFETY_BUFFER_GB, concurrency=1,
+                                   max_context_tokens=None):
     """Decides BOTH whether to quantize the KV cache AND the resulting context size, in
     one pass — see HARDWARE_SPEED_ESTIMATION.md §14 for the full reasoning and its
     measured basis (§10/§12).
@@ -493,6 +505,7 @@ def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0
     ctx_u, reason_u, detail_u = recommend_max_context(
         model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BITS,
         safety_buffer_gb=safety_buffer_gb, concurrency=concurrency,
+        max_context_tokens=max_context_tokens,
     )
     fits_u, reason_u, after_u = _apply_preload(ctx_u, reason_u, preload_overhead)
     if fits_u:
@@ -504,6 +517,7 @@ def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0
     ctx_q, reason_q, detail_q = recommend_max_context(
         model_entry, free_wired_gb, kv_bits=MEMORY_CONSTRAINED_KV_BITS,
         safety_buffer_gb=safety_buffer_gb, concurrency=concurrency,
+        max_context_tokens=max_context_tokens,
     )
     fits_q, reason_q, after_q = _apply_preload(ctx_q, reason_q, preload_overhead)
     if fits_q:
@@ -558,16 +572,20 @@ def compute_bonus_concurrency(model_entry, free_wired_gb, kv_bits_used, recommen
 
 
 def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_overhead=0,
-                           requested_concurrency=None):
+                           requested_concurrency=None, max_context_tokens=None):
     """requested_concurrency: None means auto (maximize context for 1 slot, then add
     free bonus slots from tier-rounding leftover -- see compute_bonus_concurrency).
     An explicit int forces that many slots, shrinking context as needed to guarantee
-    all of them fit (see recommend_max_context's concurrency param)."""
+    all of them fit (see recommend_max_context's concurrency param).
+    max_context_tokens: optional upper bound on every model's recommended context
+    (config.json's "max_context_tokens") -- a cap layered on top of the memory-fit
+    math, never a bypass of it (see recommend_max_context's own docstring)."""
     rows = []
     for m in models:
         sizing_concurrency = requested_concurrency if requested_concurrency else 1
         kv_result = recommend_kv_bits_and_context(m, free_wired_gb, preload_overhead,
-                                                    concurrency=sizing_concurrency)
+                                                    concurrency=sizing_concurrency,
+                                                    max_context_tokens=max_context_tokens)
         speed, speed_reason = estimate_speed_tok_s(m, chip_name, gpu_cores)
 
         fits = kv_result["fits"]
@@ -822,6 +840,21 @@ def main():
         except ValueError:
             requested_concurrency = None
 
+    # Same convenience-override philosophy as --concurrency: an optional upper bound
+    # on every model's recommended context (config.json's "max_context_tokens",
+    # forwarded by start_mlx_server.sh's ADVISOR_FLAGS). A cap, never a bypass --
+    # the memory-fit math still runs underneath it. Invalid values fall back to no
+    # cap rather than erroring.
+    max_context_flag = _flag_value(argv, "--max-context-tokens")
+    max_context_tokens = None
+    if max_context_flag:
+        try:
+            max_context_tokens = int(max_context_flag)
+            if max_context_tokens < 1:
+                max_context_tokens = None
+        except ValueError:
+            max_context_tokens = None
+
     with open(MODELS_JSON) as f:
         catalog = json.load(f)
     models = catalog["models"]
@@ -838,6 +871,7 @@ def main():
         models, free_wired_gb, chip_name, gpu_cores,
         preload_overhead=(preload["total"] if preload else 0),
         requested_concurrency=requested_concurrency,
+        max_context_tokens=max_context_tokens,
     )
 
     # Phase 6: three non-interactive presentation modes for the fzf-based picker.

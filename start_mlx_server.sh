@@ -81,7 +81,9 @@ MLX_PYTHON="$LMS_VENV/bin/python"
 MLX_SERVER_MODULE="mlx_vlm.server"
 
 # Config file (optional): $LMS_HOME/config.json can override host/port/preferred_model/
-# concurrency below the built-in defaults. Precedence: MLX_HOST/MLX_PORT env var (if
+# concurrency/max_context_tokens below the built-in defaults, plus the mlx-dspark
+# prefix-cache tuning keys (CONFIG_DSPARK_PC_*, documented at their use site).
+# Precedence: MLX_HOST/MLX_PORT env var (if
 # exported by the caller) > config.json > hardcoded default here. 38472 is deliberately
 # NOT 8000/3000/5000/8080 (common dev-server ports) or 11434 (Ollama's default, one off
 # from this project's old 11435) -- picked to avoid colliding with other local software.
@@ -92,11 +94,24 @@ MLX_SERVER_MODULE="mlx_vlm.server"
 # compute_bonus_concurrency), which is strictly better than a hardcoded 1 whenever
 # there's slack. Set an explicit integer to force that many slots instead, trading
 # context size for guaranteed concurrency.
+#
+# "max_context_tokens" is an optional persistent UPPER BOUND on the interactive
+# picker's computed context -- the memory-fit-safe alternative to the fixed-model
+# CLI form's 3rd positional arg (which bypasses that check entirely). The advisor's
+# own free-memory math still runs underneath the cap, which can only shrink the
+# result, never grow it past what the host can afford; like all computed contexts
+# it rounds down to the nearest clean tier. Invalid values are ignored (the advisor
+# falls back to no cap) rather than erroring the launch.
 LMS_CONFIG_FILE="$LMS_HOME/config.json"
 CONFIG_HOST=""
 CONFIG_PORT=""
 CONFIG_PREFERRED_MODEL=""
 CONFIG_CONCURRENCY=""
+CONFIG_MAX_CONTEXT=""
+CONFIG_DSPARK_PC_SLOTS=""
+CONFIG_DSPARK_PC_RUNGS=""
+CONFIG_DSPARK_PC_DIR=""
+CONFIG_DSPARK_PC_MAX_RAM_MB=""
 if [[ -f "$LMS_CONFIG_FILE" ]]; then
     eval "$(python3 - "$LMS_CONFIG_FILE" <<'PYEOF'
 import json, shlex, sys
@@ -106,7 +121,12 @@ try:
 except Exception:
     cfg = {}
 for var, key in (("CONFIG_HOST", "host"), ("CONFIG_PORT", "port"),
-                 ("CONFIG_PREFERRED_MODEL", "preferred_model"), ("CONFIG_CONCURRENCY", "concurrency")):
+                 ("CONFIG_PREFERRED_MODEL", "preferred_model"), ("CONFIG_CONCURRENCY", "concurrency"),
+                 ("CONFIG_MAX_CONTEXT", "max_context_tokens"),
+                 ("CONFIG_DSPARK_PC_SLOTS", "dspark_prefix_cache_slots"),
+                 ("CONFIG_DSPARK_PC_RUNGS", "dspark_prefix_cache_rungs"),
+                 ("CONFIG_DSPARK_PC_DIR", "dspark_prefix_cache_dir"),
+                 ("CONFIG_DSPARK_PC_MAX_RAM_MB", "dspark_prefix_cache_max_ram_mb")):
     val = cfg.get(key)
     if val is not None:
         print(f"{var}={shlex.quote(str(val))}")
@@ -118,11 +138,23 @@ MLX_PORT="${MLX_PORT:-${CONFIG_PORT:-38472}}"
 # Resolved to an actual integer once model selection completes (interactive path) or
 # right below (fixed-model path) -- 1 is the safe fallback if nothing ever sets it.
 CONCURRENCY=1
-CONCURRENCY_FLAG=()
+# Every model_advisor.py invocation in this script (fzf picker, detail preview,
+# --resolve, preferred_model) gets these flags, so config.json's advisor-affecting
+# keys apply uniformly across every path that consults the advisor.
+#
+# NOTE on expanding this array: this script runs `set -u` and macOS's /bin/bash is
+# 3.2.57, where "${ADVISOR_FLAGS[@]}" on an EMPTY array is an "unbound variable"
+# error (fixed upstream only in bash 4.4). This bit for real before the fix: any
+# interactive launch whose config.json set preferred_model but NOT concurrency
+# crashed with 'CONCURRENCY_FLAG[@]: unbound variable' (reproduced against the
+# pre-fix script). Every call site therefore uses the empty-safe idiom
+# ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} -- copy that form for any new use.
+ADVISOR_FLAGS=()
 if [[ -n "$CONFIG_CONCURRENCY" ]]; then
-    CONCURRENCY_FLAG=(--concurrency "$CONFIG_CONCURRENCY")
+    ADVISOR_FLAGS+=(--concurrency "$CONFIG_CONCURRENCY")
     [[ "$INTERACTIVE" == "false" ]] && CONCURRENCY="$CONFIG_CONCURRENCY"
 fi
+[[ -n "$CONFIG_MAX_CONTEXT" ]] && ADVISOR_FLAGS+=(--max-context-tokens "$CONFIG_MAX_CONTEXT")
 
 # Panel finding (GLM, high): the LiteLLM-removal decision rests on this specific
 # installed mlx-vlm version's behavior (native /v1/messages routes, /metrics's
@@ -545,9 +577,14 @@ ensure_backend_installed() {
 # install.
 run_fzf_model_picker() {
     local selection selected_id
-    local preview_cmd="\"$MLX_PYTHON\" \"$SCRIPT_DIR/model_advisor.py\" --detail {1} ${CONCURRENCY_FLAG[*]}"
+    # preview_cmd is a double-quoted STRING re-parsed by fzf, so the empty-safe
+    # array idiom can't be used inline here -- build it conditionally instead
+    # (the ${#arr[@]} length expansion is safe on empty arrays under set -u even
+    # on bash 3.2).
+    local preview_cmd="\"$MLX_PYTHON\" \"$SCRIPT_DIR/model_advisor.py\" --detail {1}"
+    [[ ${#ADVISOR_FLAGS[@]} -gt 0 ]] && preview_cmd+=" ${ADVISOR_FLAGS[*]}"
 
-    selection="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact "${CONCURRENCY_FLAG[@]}" | fzf \
+    selection="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} | fzf \
         --delimiter=$'\t' \
         --preview "$preview_cmd" --preview-window down:50%:wrap \
         --prompt="Model> " --height=~80% --layout=reverse)"
@@ -557,7 +594,7 @@ run_fzf_model_picker() {
     fi
 
     selected_id="$(printf '%s' "$selection" | cut -f1)"
-    if ! "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --resolve "$selected_id" "${CONCURRENCY_FLAG[@]}"; then
+    if ! "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --resolve "$selected_id" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"}; then
         log_error "Could not resolve '$selected_id' -- free memory may have changed since the list was shown. Try again."
         return 1
     fi
@@ -570,11 +607,11 @@ run_interactive_selection() {
     log_info "Detecting hardware and free memory for model recommendations..."
 
     local advisor_output
-    if [[ -n "$CONFIG_PREFERRED_MODEL" ]] && advisor_output=$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --resolve "$CONFIG_PREFERRED_MODEL" "${CONCURRENCY_FLAG[@]}" 2>/dev/null); then
+    if [[ -n "$CONFIG_PREFERRED_MODEL" ]] && advisor_output=$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --resolve "$CONFIG_PREFERRED_MODEL" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} 2>/dev/null); then
         log_success "Using preferred_model from config.json: $CONFIG_PREFERRED_MODEL"
     elif is_command_available fzf; then
         advisor_output="$(run_fzf_model_picker)" || exit 1
-    elif ! advisor_output=$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" "${CONCURRENCY_FLAG[@]}"); then
+    elif ! advisor_output=$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"}); then
         log_error "Model selection cancelled or failed."
         exit 1
     fi
@@ -589,7 +626,9 @@ run_interactive_selection() {
     if [[ -n "$KV_BITS" ]]; then
         kv_bits_log="quantized to ${KV_BITS}-bit (memory-constrained — needed to fit this context)"
     fi
-    log_success "Selected $LOCAL_MODEL ($MLX_MODEL) — context set to ${CONTEXT_WINDOW} tokens (computed from your current free memory)"
+    local ctx_source_log="computed from your current free memory"
+    [[ -n "$CONFIG_MAX_CONTEXT" ]] && ctx_source_log+=" and capped by config.json's max_context_tokens (rounds down to the nearest tier)"
+    log_success "Selected $LOCAL_MODEL ($MLX_MODEL) — context set to ${CONTEXT_WINDOW} tokens ($ctx_source_log)"
     log_success "KV cache: $kv_bits_log"
     if [[ "$CONCURRENCY" -gt 1 ]]; then
         log_success "Concurrency: $CONCURRENCY slots (free bonus from tier-rounding leftover, or your config.json override)"
@@ -819,6 +858,20 @@ ensure_mlx_running() {
             --mode "${MLX_DSPARK_MODE:-dflash}"
         )
         [[ -n "$MLX_DRAFTER" ]] && mlx_args+=(--drafter "$MLX_DRAFTER")
+        # Prefix-cache tuning from config.json (all optional; unset = mlx-dspark's
+        # own defaults, which are fine -- this is a power-user tier, e.g. the L2 SSD
+        # spill via dspark_prefix_cache_dir). Flag names/semantics confirmed against
+        # `mlx-dspark serve --help`, including max-ram-mb's requires-dir rule, which
+        # is enforced here rather than leaving the user to decode mlx-dspark's own
+        # startup-error wording for it.
+        if [[ -n "$CONFIG_DSPARK_PC_MAX_RAM_MB" && -z "$CONFIG_DSPARK_PC_DIR" ]]; then
+            log_error "config.json: dspark_prefix_cache_max_ram_mb requires dspark_prefix_cache_dir (per mlx-dspark's own --prefix-cache-max-ram-mb contract) — set both or neither."
+            exit 1
+        fi
+        [[ -n "$CONFIG_DSPARK_PC_SLOTS" ]] && mlx_args+=(--prefix-cache-slots "$CONFIG_DSPARK_PC_SLOTS")
+        [[ -n "$CONFIG_DSPARK_PC_RUNGS" ]] && mlx_args+=(--prefix-cache-rungs "$CONFIG_DSPARK_PC_RUNGS")
+        [[ -n "$CONFIG_DSPARK_PC_DIR" ]] && mlx_args+=(--prefix-cache-dir "$CONFIG_DSPARK_PC_DIR")
+        [[ -n "$CONFIG_DSPARK_PC_MAX_RAM_MB" ]] && mlx_args+=(--prefix-cache-max-ram-mb "$CONFIG_DSPARK_PC_MAX_RAM_MB")
         if [[ -n "$KV_BITS" ]]; then
             # --kv-bits disables --max-batch on mlx-dspark's own side (confirmed in
             # `mlx-dspark serve --help`) -- omit --max-batch entirely in this branch

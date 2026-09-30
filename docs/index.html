@@ -966,14 +966,23 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
   "port": 9000,
   "host": "127.0.0.1",
   "preferred_model": "qwen3.5-9b-mlx-4bit",
-  "concurrency": 2
+  "concurrency": 2,
+  "max_context_tokens": 65536,
+  "dspark_prefix_cache_slots": 4,
+  "dspark_prefix_cache_dir": "/path/to/ssd/spill"
 }</pre>
     <p>
       <code class="inline">preferred_model</code> is optional — set it to a model id from <code class="inline">models.json</code>
       to skip the interactive picker on every launch, as long as that model still fits your currently-free memory
       (it falls back to the normal picker if it doesn't). <code class="inline">concurrency</code> is also optional —
-      omit it for auto mode (see above); set it to force a specific number of concurrent slots instead. Both scripts
-      read the same file, so you only set any of this once.
+      omit it for auto mode (see above); set it to force a specific number of concurrent slots instead.
+      <code class="inline">max_context_tokens</code> is an optional persistent upper bound on the picker's computed
+      context — unlike the scripted fixed-model form's context argument (which bypasses the memory-safety check
+      entirely), the free-memory fit math still runs underneath this cap, which can only shrink the result and
+      rounds down to the nearest clean tier. The <code class="inline">dspark_prefix_cache_*</code> keys optionally
+      tune the mlx-dspark backend's prefix cache (conversation LRU slots, checkpoint rungs, and an L2 SSD spill
+      directory plus RAM threshold — setting a threshold requires setting the directory); unset means mlx-dspark's
+      own defaults. Both scripts read the same file, so you only set any of this once.
     </p>
   </section>
 

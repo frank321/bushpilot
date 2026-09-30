@@ -896,6 +896,13 @@ just written and assumed correct:
   nested inside a function body — it silently fed the heredoc's Python source text back as shell
   code instead of running it. Fixed via the two-step capture-then-`eval` form. Wouldn't have
   surfaced from `bash -n` alone; only found by actually running the script.
+- **A second bash 3.2 bug, found by the config.json follow-up's live testing**: `set -u` +
+  `"${arr[@]}"` on an EMPTY array is an "unbound variable" error on bash < 4.4 — which meant any
+  interactive launch whose config.json set `preferred_model` but not `concurrency` crashed with
+  `CONCURRENCY_FLAG[@]: unbound variable` (reproduced against the committed pre-fix script).
+  Fixed by renaming the array to `ADVISOR_FLAGS` and using the empty-safe idiom
+  `${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"}` at every call site, plus a conditional append
+  inside the fzf preview string where the idiom can't be used inline.
 - **Tool-calling verified live** through all three paths — `mlx-dspark` with both the `gemma4` and
   `qwen3_coder` tool-parser families, and `mlx_vlm`+MTP — via real `/v1/chat/completions` requests
   with a `web_search` tool schema attached. All three correctly returned `finish_reason: tool_calls`
@@ -912,7 +919,9 @@ just written and assumed correct:
   committer, a documented benchmark/shipped-defaults discrepancy in its own launch post, no
   fallback path, only covers one model already covered by `mlx-dspark`) to justify a third backend.
 
-**Remaining work** (see `NEXT_SESSION_HANDOFF.md` for the actionable version): `config.json` doesn't
-yet expose a context-window override or `mlx-dspark`'s `--prefix-cache-*` tuning flags. (The 4-bit
-multimodal+drafter combos and the `mlx-dspark` minimum-version pin (`MLX_DSPARK_MIN_VERSION`)
-originally listed here were completed in the same-day follow-up above.)
+**Remaining work**: none from the original Phase 8 list — the 4-bit multimodal+drafter
+combos, the `mlx-dspark` minimum-version pin (`MLX_DSPARK_MIN_VERSION`), and the
+`config.json` extensions (`max_context_tokens` cap; `dspark_prefix_cache_*` tuning
+keys) were all completed in same-day follow-up sessions. The only still-open
+publishing step is rebuilding the release zip via `docs/build_release.sh` and pushing
+to the remote (the zip's file list picks up all of this automatically on rebuild).

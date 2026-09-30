@@ -161,17 +161,37 @@ backend → complete no-op — 6/6 checks pass); and a live end-to-end launcher 
 with an `mlx_dspark`-backed model (`qwen3.5-9b-mlx-4bit-dflash`), which logged the
 floor check, found 0.20.1, and passed the startup smoke check cleanly.
 
-### 3. `config.json` extensions
-Currently `$LMS_HOME/config.json` only supports `host`/`port`/`preferred_model`/
-`concurrency`. Two things flagged mid-session but never actioned:
-- A persistent context-window override (today the ONLY way to override
-  `model_advisor.py`'s computed context is the fixed-model CLI form's 3rd positional
-  arg, which also disables the memory-fit safety check entirely — a config.json option
-  could let you cap/override context while keeping the interactive picker).
-- `mlx-dspark`'s `--prefix-cache-slots`/`--prefix-cache-rungs`/`--prefix-cache-dir`/
-  `--prefix-cache-max-ram-mb` tuning flags aren't exposed anywhere; they're just left
-  at `mlx-dspark`'s own defaults (which are fine, but a power user might want the SSD
-  spill tier via `--prefix-cache-dir`, e.g.).
+### 3. ~~`config.json` extensions~~ — DONE (2026-09-29 local / 2026-09-30 UTC, follow-up session)
+Both extensions implemented and live-tested end-to-end:
+- **`max_context_tokens`**: a persistent UPPER BOUND on the interactive picker's
+  computed context — deliberately a cap, not an override. Threaded as
+  `model_advisor.py --max-context-tokens` through a new shared `ADVISOR_FLAGS`
+  array (which replaced `CONCURRENCY_FLAG` and now carries both advisor-affecting
+  config keys uniformly across every advisor call site: fzf picker, detail
+  preview, `--resolve`, and `preferred_model`). The advisor's free-memory fit
+  math still runs underneath the cap (applied in `recommend_max_context` before
+  tier rounding), so it can only shrink the result, never grow it past what the
+  host can afford — the memory-fit-safe alternative to the fixed-model CLI
+  form's 3rd positional arg. Invalid values fall back to no cap; a cap below the
+  usability floor greys the model out with the existing reason string. Verified
+  live: cap 65536 → picker selects 65536 with the log line saying so; cap 10000
+  → model doesn't fit (exit 3); garbage → no cap.
+- **`dspark_prefix_cache_slots` / `_rungs` / `_dir` / `_max_ram_mb`**: forwarded to
+  mlx-dspark's own `--prefix-cache-*` flags (names confirmed against its `--help`)
+  only when set — unset means its own defaults, unchanged. The
+  max-ram-mb-requires-dir rule from mlx-dspark's own docs is enforced in the
+  launcher with a clear error message. Verified live: all three set flags appear on
+  the running `mlx-dspark serve` process's command line, server healthy, smoke
+  check passed; the requires-dir violation exits 1 before spawning.
+- **Bonus — a real pre-existing bug found and fixed by the testing**: the committed
+  script crashed with `CONCURRENCY_FLAG[@]: unbound variable` on ANY interactive
+  launch whose config.json set `preferred_model` but NOT `concurrency` — macOS
+  bash 3.2 + `set -u` treats `"${arr[@]}"` on an empty array as an unbound
+  variable (fixed upstream only in bash 4.4). Reproduced against the pre-fix
+  committed script, then fixed at every call site with the empty-safe idiom
+  `${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"}` (and a conditional append inside
+  the fzf `preview_cmd` string, where the idiom can't be used inline). The
+  previously-crashing `preferred_model`-only config now launches cleanly.
 
 ### 4. ~~Update project docs~~ — DONE (2026-09-29, same session)
 `PROJECT_STATUS.md` (staleness note added), `PHASE_PLAN.md` (new Phase 8),
