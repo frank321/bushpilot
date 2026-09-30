@@ -118,7 +118,11 @@ SPEED_CORRECTION_FACTOR = 0.87
 # but never used to exclude anything, so a model estimated at even 1 tok/s would still
 # appear fully selectable. Below this, a model is greyed out the same way an
 # insufficient-memory model already is.
-MIN_SPEED_TOK_S = 15
+# Lowered 15 -> 10 (2026-09-29): real-world use of gemma-4-12B-it-8bit at ~17 tok/s
+# (estimator's own 0.87 correction factor means the raw estimate for a model actually
+# delivering 17 tok/s can land close to 15) felt "pretty fast" in practice, so 15 was
+# excluding models that are actually fine to use.
+MIN_SPEED_TOK_S = 10
 
 
 def log(msg):
