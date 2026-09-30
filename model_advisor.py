@@ -122,7 +122,10 @@ SPEED_CORRECTION_FACTOR = 0.87
 # (estimator's own 0.87 correction factor means the raw estimate for a model actually
 # delivering 17 tok/s can land close to 15) felt "pretty fast" in practice, so 15 was
 # excluding models that are actually fine to use.
-MIN_SPEED_TOK_S = 10
+# Lowered 10 -> 7 (2026-09-29): mlx-community/Qwen3.8-27B-4bit running at ~8 tok/s on
+# real hardware still works ok in practice. Mainly intended to let 16GB-RAM users reach
+# usably-good models that would otherwise be filtered out.
+MIN_SPEED_TOK_S = 7
 
 
 def log(msg):
