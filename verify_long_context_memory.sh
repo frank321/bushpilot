@@ -4,7 +4,10 @@
 # (see start_mlx_server.sh's check_memory_backstop). It shells out to monitor_memory.sh
 # below, which Phase 4 removed as a standalone script (its logic now lives directly in
 # start_mlx_server.sh's own poll loop) -- this script is kept for its methodology and
-# is not expected to run as-is until that call is ported to the new backstop.
+# is not expected to run as-is until that call is ported to the new backstop. Its
+# MLX_VENV/HF_HOME values also predate the Phase 1 migration (completed 2026-09-30):
+# the venv and model cache now live under ~/.local-model-setup/ (venv/, models/) --
+# update those two lines as well if porting this back to a runnable state.
 #
 # verify_long_context_memory.sh — real long-context memory stress test for a single
 # mlx_vlm.server-backed model, addressing PROJECT_STATUS.md's open item #1: every "SAFE"

@@ -188,6 +188,16 @@ completed request):
   lands. `~/pip_env/litellm` gets deleted outright at that point too (dead weight,
   nothing to migrate). No code needed for this — it's a one-off `mv`/`rm` on frank's
   machine, deliberately not written into any script.
+  **EXECUTED (2026-09-30):** removed the interim `~/.local-model-setup/models`
+  symlink (which pointed back out at the still-visible `~/MLX_Models`) and
+  `mv`'d the 147 GB cache to `~/.local-model-setup/models` for real (same volume —
+  instant rename); `~/.zshrc`'s `HF_HOME`/`SSL_CERT_FILE` exports updated to the
+  hidden path; `~/pip_env/litellm` and `~/pip_env/mlx_lm` deleted (1.5 GB freed;
+  `headroom_enabled_env` deliberately kept — unknown purpose, not in plan);
+  `/tmp/mlx-llm-proxy-*` was already absent. Verified end-to-end after the move:
+  TLS to huggingface.co via the relocated CA bundle, both cache checks, full
+  launcher run, smoke check, and a real inference request all pass. Home directory
+  now shows no MLX-related folders.
 
 ## Live end-to-end test (2026-09-29) — complete, both tools confirmed
 
@@ -634,6 +644,13 @@ can't be measured against.
   below the floor here — fastest chip in the table) and against a simulated `Apple
   M1`/8-core run, where 6 of 8 models correctly flip to greyed-out with the new
   reason text and the MoE model with `estimated_tok_s: None` correctly stays shown.
+- **Floor lowered twice after this decision, from real-world use — current value is
+  7, not 15.** 15 → 10 (`3e7cd93`: gemma-4-12B-it-8bit at ~17 tok/s felt pretty
+  fast, so 15 was excluding models that are actually fine to use), then 10 → 7
+  (`2954789`: Qwen3.8-27B-4bit at ~8 tok/s still works OK in practice; mainly meant
+  to let 16GB-RAM users reach usably-good models previously filtered out). The
+  grey-out reason string renders the constant's current value, so no other code
+  carries a stale floor number.
 - **Recalibrated `TOOL_BASELINE_PRELOAD_TOKENS` from real measurements**, not public
   reports: ran a single-turn, no-tool-call request through `launch_tool.sh` for both
   tools from this repo's own root (no local `CLAUDE.md`/`AGENTS.md`/`.mcp.json`;

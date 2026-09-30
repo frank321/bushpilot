@@ -1,5 +1,14 @@
 # Implementation Notes: Interactive Memory-Aware LiteLLM Proxy
 
+**Status: superseded (2026-09-29, PHASE_PLAN.md Phases 2-4).** This is the design
+doc for the pre-redesign architecture — the LiteLLM-fronted proxy it describes was
+dropped entirely (MLX serves both wire formats natively), the supervisor it planned
+became `start_mlx_server.sh`, and its paths (`~/pip_env/*`, `~/MLX_Models`) predate
+the Phase 1 migration of everything into `~/.local-model-setup/` (completed
+2026-09-30). Kept for the memory-detection and tiering design research below, which
+informed the current implementation — read `start_mlx_server.sh` and
+`model_advisor.py` for where that logic actually lives now, not this doc.
+
 ## Summary of Changes Needed
 
 ### 1. Memory Detection Functions
