@@ -10,6 +10,16 @@ model-verification work (14-model catalog, tool-calling verdicts, speed benchmar
 which is still accurate; for anything about the launcher scripts themselves, current
 paths, or the two-script architecture, read `PHASE_PLAN.md` and `MLX_SERVER_USAGE.md`.
 
+**Also stale as of 2026-09-29: the "14-model catalog" description above.** A same-day
+follow-up session added a second serving backend (`mlx-dspark`, for speculative
+decoding — real measured 1.5x-3.1x decode speedups on several models) and 11 new
+drafter-backed `models.json` entries (9 in that session, plus the two 4-bit
+multimodal variants in a follow-up the same evening), bringing the catalog to 19.
+See `PHASE_PLAN.md` Phase 8 for the decision record and
+`HARDWARE_SPEED_ESTIMATION.md` §18 for the full measured-speedup methodology and
+per-model numbers — neither existed when this file's "14 models" figures below were
+written.
+
 ---
 
 **Last updated:** 2026-09-28 (end of this working session — added live tool-calling verification

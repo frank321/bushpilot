@@ -300,6 +300,20 @@ def estimate_preload_overhead(tool, cwd):
     }
 
 
+def effective_size_gb(model_entry):
+    """model_entry["size_gb"] is the target weights only (see _schema_notes.size_gb in
+    models.json) -- a "serving" block's drafter is a SEPARATE real download that sits in
+    memory alongside the target for the whole session, so any memory-fit check has to
+    account for both. Kept as a small helper rather than inlined at each call site so the
+    two things this affects (recommend_max_context's admission check, compute_bonus_
+    concurrency's leftover-memory check) can't drift out of sync with each other. Does
+    NOT affect estimate_speed_tok_s's active_gb -- that's about per-token bandwidth cost
+    of the TARGET's own forward pass, which the drafter's real-but-comparatively-tiny
+    forward pass doesn't change; the drafter's speed impact is already captured in
+    serving.measured_speedup instead."""
+    return model_entry["size_gb"] + model_entry.get("serving", {}).get("drafter_size_gb", 0)
+
+
 def compute_kv_formula(kv_config, kv_bits=UNQUANTIZED_KV_BITS):
     """Returns (bytes_per_growing_token, fixed_kv_bytes_total, detail_dict) or None if
     kv_config is missing fields we need. See HARDWARE_SPEED_ESTIMATION.md §9 — this
@@ -364,7 +378,7 @@ def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BIT
     bonus-concurrency path (see compute_bonus_concurrency) instead calls this with
     concurrency=1 (unchanged, context-maximizing behavior) and separately checks
     whether tier-rounding leftover fits extra same-size slots for free."""
-    available_gb = free_wired_gb - model_entry["size_gb"] - safety_buffer_gb
+    available_gb = free_wired_gb - effective_size_gb(model_entry) - safety_buffer_gb
     if available_gb <= 0:
         return None, "insufficient_memory_for_model_weights", None
 
@@ -402,7 +416,20 @@ def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BIT
 def estimate_speed_tok_s(model_entry, chip_name, gpu_cores):
     """Returns (estimate_or_None, reason_string). Deliberately returns None rather than
     a guess when we don't have real active-weight data — see gemma-4-26b-a4b-it-4bit's
-    entry below, whose MoE routing config is missing num_experts_per_tok."""
+    entry below, whose MoE routing config is missing num_experts_per_tok.
+
+    A "serving" block's measured_speedup (see models.json's _schema_notes.serving) is
+    applied AFTER the base bandwidth estimate below, as a multiplier -- not as a flat
+    replacement tok/s number. That's deliberate: the multiplier was measured on one
+    specific machine (serving.measured_on), but the physics estimate it's layered onto
+    already scales per-chip via CHIP_BANDWIDTH_GB_S, so a slower/older Mac than the one
+    the drafter was measured on still gets a proportionally scaled-down estimate instead
+    of inheriting a number that was never measured on hardware anything like it. The
+    underlying accept-rate/speedup ratio could still shift on a very different GPU
+    generation than the reference machine -- that residual uncertainty is why the reason
+    string keeps calling this an estimate even when a real multiplier backs it, and why
+    it's a multiplier on the physics estimate rather than a number treated as ground
+    truth on its own."""
     bandwidth = CHIP_BANDWIDTH_GB_S.get(chip_name)
     if bandwidth is None:
         return None, f"no bandwidth data for chip '{chip_name}'"
@@ -413,7 +440,19 @@ def estimate_speed_tok_s(model_entry, chip_name, gpu_cores):
             return None, "MoE model with unknown active-parameter fraction — no reliable estimate without a live benchmark"
         active_gb = model_entry["size_gb"]  # dense model: full weight size is the active weight
 
-    return round(SPEED_CORRECTION_FACTOR * bandwidth / active_gb, 1), "estimated"
+    base = SPEED_CORRECTION_FACTOR * bandwidth / active_gb
+
+    serving = model_entry.get("serving") or {}
+    speedup = serving.get("measured_speedup")
+    if speedup:
+        measured_on = serving.get("measured_on", "reference hardware")
+        return round(base * speedup, 1), (
+            f"estimated ({speedup}x speculative-decoding multiplier measured on "
+            f"{measured_on}, applied to this chip's own bandwidth estimate — "
+            "workload- and chip-generation-dependent, treat as directional)"
+        )
+
+    return round(base, 1), "estimated"
 
 
 def _apply_preload(ctx, reason, preload_overhead):
@@ -509,7 +548,7 @@ def compute_bonus_concurrency(model_entry, free_wired_gb, kv_bits_used, recommen
     if per_slot_bytes <= 0:
         return 1
 
-    available_bytes = (free_wired_gb - model_entry["size_gb"] - safety_buffer_gb) * 1024**3
+    available_bytes = (free_wired_gb - effective_size_gb(model_entry) - safety_buffer_gb) * 1024**3
     remaining = available_bytes - per_slot_bytes
     concurrency = 1
     while remaining >= per_slot_bytes and concurrency < AUTO_MAX_CONCURRENCY:

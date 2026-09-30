@@ -129,6 +129,12 @@ fi
 # ServerMetricsStore fields, /v1/cache/stats's APCStats fields). Pin a minimum verified
 # version rather than installing unbounded.
 MLX_VLM_MIN_VERSION="0.7.0"
+# Same principle for the second backend: every mlx-dspark behavior this script relies
+# on (flag set via its own --help, /metrics shape, dflash mode, prefix-cache defaults)
+# was verified against this exact version on the reference machine. Checked only when
+# a resolved model actually needs the mlx_dspark backend (ensure_backend_installed),
+# unlike mlx-vlm which the unconditional bootstrap always installs.
+MLX_DSPARK_MIN_VERSION="0.20.1"
 
 KV_GROUP_SIZE=64
 QUANTIZED_KV_START=0
@@ -430,6 +436,99 @@ bootstrap_mlx() {
     log_success "MLX bootstrap complete"
 }
 
+# ---------------------------------------------------------------------------
+# Serving backend resolution (models.json's optional "serving" block -- see its
+# _schema_notes.serving for the full field reference). Reads models.json DIRECTLY by
+# $LOCAL_MODEL id here, rather than threading this through model_advisor.py's own
+# --resolve JSON, so this is a SINGLE code path that works identically whether
+# LOCAL_MODEL came from the interactive picker or the fixed-model CLI form -- those
+# two paths can't drift out of sync on which backend a given model id uses. Sets
+# defaults (plain mlx_vlm, no drafter) when a model has no "serving" block at all,
+# which is every model in this catalog before this feature existed and is the correct
+# behavior for any future model added without one.
+# ---------------------------------------------------------------------------
+MLX_BACKEND="mlx_vlm"
+MLX_DSPARK_MODE=""
+MLX_DRAFTER=""
+MLX_DRAFT_MODEL=""
+MLX_DRAFT_KIND=""
+MLX_DRAFT_BLOCK_SIZE=""
+MLX_PROC_PATTERN="$MLX_SERVER_MODULE"
+
+resolve_serving_config() {
+    [[ -z "$LOCAL_MODEL" ]] && return 0
+
+    # Two-step (capture into a local var, THEN eval it) rather than the single-step
+    # `eval "$(cmd <<'EOF' ... EOF)"` form the top-of-file config.json parsing uses --
+    # confirmed live that form breaks with a "syntax error near unexpected token `('"
+    # on macOS's shipped /bin/bash (3.2.57, pre-GPLv3, arm64-apple-darwin) SPECIFICALLY
+    # when it's nested inside a function body; bash prints the substituted PYTHON
+    # SOURCE TEXT itself back as the "output" rather than running it, i.e. the heredoc
+    # never actually reaches python's stdin in that nesting. The top-of-file usage
+    # works because it runs at the script's top level, not inside a function -- this
+    # is the first use of that pattern inside one. Two-step form is unaffected on the
+    # same bash.
+    local resolved
+    resolved="$("$MLX_PYTHON" - "$SCRIPT_DIR/models.json" "$LOCAL_MODEL" <<'PYEOF'
+import json, shlex, sys
+models_path, model_id = sys.argv[1], sys.argv[2]
+with open(models_path) as f:
+    data = json.load(f)
+entry = next((m for m in data["models"] if m["id"] == model_id), None)
+serving = (entry or {}).get("serving") or {}
+for var, key in (
+    ("MLX_BACKEND", "backend"), ("MLX_DSPARK_MODE", "mode"),
+    ("MLX_DRAFTER", "drafter"), ("MLX_DRAFT_MODEL", "draft_model"),
+    ("MLX_DRAFT_KIND", "draft_kind"),
+):
+    print(f"{var}={shlex.quote(str(serving.get(key, '') or ''))}")
+block_size = serving.get("draft_block_size", "")
+print(f"MLX_DRAFT_BLOCK_SIZE={shlex.quote(str(block_size) if block_size != '' else '')}")
+PYEOF
+)"
+    eval "$resolved"
+    [[ -z "$MLX_BACKEND" ]] && MLX_BACKEND="mlx_vlm"
+
+    if [[ "$MLX_BACKEND" == "mlx_dspark" ]]; then
+        # Deliberately more specific than just "mlx-dspark" -- that string alone would
+        # also match `mlx-dspark generate`/`mlx-dspark doctor` invocations (e.g. a
+        # manual debugging session in another terminal), which this script has no
+        # business killing or mistaking for its own managed server.
+        MLX_PROC_PATTERN="mlx-dspark serve"
+    else
+        MLX_PROC_PATTERN="$MLX_SERVER_MODULE"
+    fi
+}
+
+# Only pip-installs mlx-dspark when a resolved model actually needs it -- most models
+# in this catalog don't, so this stays a no-op for them (bootstrap_mlx's own
+# install_packages_if_needed already guarantees mlx-lm/mlx-vlm unconditionally,
+# since those are needed for model_advisor.py's own picker regardless of which
+# backend the eventually-selected model turns out to use).
+ensure_backend_installed() {
+    [[ "$MLX_BACKEND" != "mlx_dspark" ]] && return 0
+
+    log_info "Checking if mlx-dspark >= ${MLX_DSPARK_MIN_VERSION} is installed in the MLX venv..."
+    if "$MLX_PYTHON" -c "import mlx_dspark" 2>/dev/null; then
+        local have
+        have="$(installed_version mlx_dspark)"
+        if ! version_at_least "$have" "$MLX_DSPARK_MIN_VERSION"; then
+            # Same upgrade-if-older pattern install_packages_if_needed uses for
+            # mlx-vlm (see MLX_VLM_MIN_VERSION there) -- helpers are shared.
+            log_info "mlx-dspark $have is older than required minimum $MLX_DSPARK_MIN_VERSION -- upgrading..."
+            "$LMS_VENV/bin/pip" install --upgrade "mlx-dspark>=${MLX_DSPARK_MIN_VERSION}" > /dev/null
+            log_success "mlx-dspark upgraded to $(installed_version mlx_dspark)"
+        else
+            log_info "mlx-dspark already installed (version $have)"
+        fi
+        return 0
+    fi
+
+    log_info "Installing mlx-dspark>=${MLX_DSPARK_MIN_VERSION} (required by $LOCAL_MODEL's serving.backend)..."
+    "$LMS_VENV/bin/pip" install "mlx-dspark>=${MLX_DSPARK_MIN_VERSION}" > /dev/null
+    log_success "mlx-dspark installed"
+}
+
 # Phase 6: arrow-key model picker with a live detail pane, using fzf rather than
 # hand-rolled TUI code -- see PHASE_PLAN.md for why fzf over stdlib curses. Prints
 # model_advisor.py's own --resolve output (the same JSON contract the plain-menu path
@@ -497,37 +596,52 @@ run_interactive_selection() {
     fi
 }
 
-# Pre-downloads the model via snapshot_download() BEFORE the server ever starts.
-# mlx_vlm.server's own lazy on-demand download has no resume support when the process
-# is killed mid-transfer; snapshot_download() run standalone does.
-ensure_model_downloaded() {
-    log_info "Checking whether $MLX_MODEL is already cached..."
+# Pre-downloads a repo via snapshot_download() BEFORE the server ever starts.
+# mlx_vlm.server's/mlx-dspark's own lazy on-demand download has no resume support
+# when the process is killed mid-transfer; snapshot_download() run standalone does.
+# Shared by the target model and (when the resolved serving config has one) the
+# drafter -- same download semantics apply to both, they're just two separate repos.
+ensure_repo_downloaded() {
+    local repo="$1" label="$2"
+    log_info "Checking whether $label ($repo) is already cached..."
     local already_cached
     already_cached=$("$MLX_PYTHON" -c "
 import os, glob
-pattern = os.path.expanduser('$HF_HOME/hub/models--${MLX_MODEL//\//--}/snapshots/*/config.json')
+pattern = os.path.expanduser('$HF_HOME/hub/models--${repo//\//--}/snapshots/*/config.json')
 print('yes' if glob.glob(pattern) else 'no')
 ")
     if [[ "$already_cached" == "yes" ]]; then
-        log_success "$MLX_MODEL already cached — no download needed"
+        log_success "$repo already cached — no download needed"
         return 0
     fi
 
-    log_info "Model not cached locally. Downloading $MLX_MODEL now (this can take several minutes for larger models)..."
+    log_info "$label not cached locally. Downloading $repo now (this can take several minutes for larger models)..."
     if ! "$MLX_PYTHON" -c "
 from huggingface_hub import snapshot_download
-snapshot_download('$MLX_MODEL')
+snapshot_download('$repo')
 "; then
-        log_error "Download failed for $MLX_MODEL."
+        log_error "Download failed for $repo."
         exit 1
     fi
-    log_success "Download complete: $MLX_MODEL"
+    log_success "Download complete: $repo"
+}
+
+ensure_model_downloaded() {
+    ensure_repo_downloaded "$MLX_MODEL" "target model"
+    # MLX_DRAFTER (mlx_dspark backend) and MLX_DRAFT_MODEL (mlx_vlm backend) are
+    # mutually exclusive per resolve_serving_config -- at most one is ever set.
+    local drafter_repo="${MLX_DRAFTER:-$MLX_DRAFT_MODEL}"
+    if [[ -n "$drafter_repo" ]]; then
+        ensure_repo_downloaded "$drafter_repo" "drafter"
+    fi
 }
 
 # Returns 0 only if the process actually LISTENING on $MLX_PORT is our expected
-# mlx_vlm.server process. /health alone is not sufficient -- confirmed live, a
-# foreign, unmanaged server (e.g. a stray mlx_lm.server) can hold the port while
-# answering /health and hang forever on real inference.
+# server process (mlx_vlm.server, or `mlx-dspark serve` for an mlx_dspark-backed
+# model -- see MLX_PROC_PATTERN in resolve_serving_config). /health alone is not
+# sufficient -- confirmed live, a foreign, unmanaged server (e.g. a stray
+# mlx_lm.server) can hold the port while answering /health and hang forever on real
+# inference.
 mlx_port_owner_is_expected() {
     local pids
     pids="$(lsof -ti "tcp:$MLX_PORT" 2>/dev/null || true)"
@@ -535,7 +649,7 @@ mlx_port_owner_is_expected() {
 
     local pid
     for pid in $pids; do
-        if ps -p "$pid" -o command= 2>/dev/null | grep -q "$MLX_SERVER_MODULE"; then
+        if ps -p "$pid" -o command= 2>/dev/null | grep -q "$MLX_PROC_PATTERN"; then
             return 0
         fi
     done
@@ -556,12 +670,17 @@ mlx_inference_responds() {
 }
 
 # Startup smoke check (panel finding, GLM): after the server reports healthy, actually
-# call /v1/messages, /metrics, and /v1/cache/stats once and verify the expected shape
-# before declaring the supervisor ready -- catches behavior drift even within the
-# allowed mlx-vlm version range, not just "too old".
+# call a few endpoints once and verify the expected shape before declaring the
+# supervisor ready -- catches behavior drift even within the allowed version range,
+# not just "too old". /v1/messages is checked identically on both backends (both
+# speak Anthropic's Messages API with a "content" field -- confirmed live against a
+# real mlx-dspark serve instance, not assumed from its docs). /metrics and
+# /v1/cache/stats are mlx_vlm-specific (its own APC feature); mlx-dspark's /metrics
+# has a different shape (no "summary" field, confirmed live) and it has no
+# /v1/cache/stats endpoint at all (its own prefix caching is a different feature,
+# always on by default, with no equivalent stats route), so those two checks only
+# run on the mlx_vlm backend.
 run_startup_smoke_check() {
-    log_info "Running startup smoke check against /v1/messages, /metrics, /v1/cache/stats..."
-
     local messages_resp
     messages_resp="$(curl -fsS --max-time 30 "http://$MLX_HOST:$MLX_PORT/v1/messages" \
         -H "Content-Type: application/json" \
@@ -572,6 +691,20 @@ run_startup_smoke_check() {
         return 1
     fi
 
+    if [[ "$MLX_BACKEND" == "mlx_dspark" ]]; then
+        log_info "Running startup smoke check against /v1/messages, /metrics..."
+        local metrics_resp
+        metrics_resp="$(curl -fsS --max-time 10 "http://$MLX_HOST:$MLX_PORT/metrics" 2>/dev/null)" \
+            || { log_error "Smoke check: /metrics did not respond"; return 1; }
+        if ! grep -q '"requests"' <<<"$metrics_resp"; then
+            log_error "Smoke check: /metrics response missing expected 'requests' field"
+            return 1
+        fi
+        log_success "Smoke check passed — mlx-dspark's /v1/messages and /metrics behave as expected"
+        return 0
+    fi
+
+    log_info "Running startup smoke check against /v1/messages, /metrics, /v1/cache/stats..."
     local metrics_resp
     metrics_resp="$(curl -fsS --max-time 10 "http://$MLX_HOST:$MLX_PORT/metrics" 2>/dev/null)" \
         || { log_error "Smoke check: /metrics did not respond"; return 1; }
@@ -610,11 +743,11 @@ ensure_mlx_running() {
                 log_error "MLX server owns port $MLX_PORT and answers /health, but did NOT return a completion within the inference probe timeout:"
                 log_error "  probed model: $probe_model -- the process is hung, not healthy"
                 log_info "Restarting the hung MLX server..."
-                wait_for_process_gone "$MLX_SERVER_MODULE" "MLX-VLM" 30
+                wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 30
                 rm -f "$MLX_STATE_FILE"
             fi
         else
-            log_error "Port $MLX_PORT is answering /health, but it is NOT this script's mlx_vlm.server process:"
+            log_error "Port $MLX_PORT is answering /health, but it is NOT this script's managed server process ($MLX_PROC_PATTERN):"
             local owner_pids
             owner_pids="$(lsof -ti "tcp:$MLX_PORT" 2>/dev/null || true)"
             if [[ -n "$owner_pids" ]]; then
@@ -647,7 +780,7 @@ ensure_mlx_running() {
             printf "Stop the running one and start %s instead? [y/N]: " "$MLX_MODEL" >&2
             read -r reply
             if [[ "$reply" =~ ^[Yy]$ ]]; then
-                wait_for_process_gone "$MLX_SERVER_MODULE" "MLX-VLM" 30
+                wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 30
                 rm -f "$MLX_STATE_FILE"
             else
                 log_error "Not stopping the running model. Stop it manually first (Ctrl-C / q in its dashboard)."
@@ -661,39 +794,80 @@ ensure_mlx_running() {
 
     if [[ "$server_up" != "true" ]]; then
         log_info "Starting MLX server with model $MLX_MODEL..."
-        wait_for_process_gone "$MLX_SERVER_MODULE" "MLX-VLM" 30
+        wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 30
         rm -f "$MLX_STATE_FILE"
     fi
 
     wait_for_port_free "$MLX_PORT" 15
 
-    local mlx_args=(
-        --model "$MLX_MODEL"
-        --host "$MLX_HOST"
-        --port "$MLX_PORT"
-        --max-kv-size "$CONTEXT_WINDOW"
-        --prefill-step-size "$PREFILL_STEP_SIZE"
-        # Server's own default is UNBOUNDED concurrent sequences -- since
-        # recommend_max_context already sizes CONTEXT_WINDOW's memory footprint for
-        # exactly $CONCURRENCY slots (see model_advisor.py), leaving this unset would
-        # let an (N+1)th concurrent request allocate a KV cache with zero memory
-        # headroom reserved for it -- the exact crash this project exists to prevent.
-        --max-num-seqs "$CONCURRENCY"
-    )
-    if [[ -n "$KV_BITS" ]]; then
-        mlx_args+=(
-            --kv-bits "$KV_BITS"
-            --kv-group-size "$KV_GROUP_SIZE"
-            --quantized-kv-start "$QUANTIZED_KV_START"
-            --kv-quant-scheme uniform
+    local mlx_args=()
+    local -a launch_cmd=()
+
+    if [[ "$MLX_BACKEND" == "mlx_dspark" ]]; then
+        # mlx-dspark's own flag set -- deliberately different names/semantics than
+        # mlx_vlm's below (--context-window not --max-kv-size, --kv-bits {0,4,8} not
+        # a separate --kv-group-size/--quantized-kv-start/--kv-quant-scheme trio,
+        # --max-batch not --max-num-seqs). No --prefill-step-size equivalent exists
+        # (mlx-dspark auto-calibrates its own prefill path per machine+model+quant --
+        # that self-tuning is the whole reason this backend is used at all for the
+        # models that have one, see models.json's serving.measured_speedup notes).
+        mlx_args=(
+            --model "$MLX_MODEL"
+            --host "$MLX_HOST"
+            --port "$MLX_PORT"
+            --context-window "$CONTEXT_WINDOW"
+            --mode "${MLX_DSPARK_MODE:-dflash}"
         )
+        [[ -n "$MLX_DRAFTER" ]] && mlx_args+=(--drafter "$MLX_DRAFTER")
+        if [[ -n "$KV_BITS" ]]; then
+            # --kv-bits disables --max-batch on mlx-dspark's own side (confirmed in
+            # `mlx-dspark serve --help`) -- omit --max-batch entirely in this branch
+            # rather than passing a combination it would reject.
+            mlx_args+=(--kv-bits "$KV_BITS")
+        else
+            mlx_args+=(--kv-bits 0)
+            [[ "$CONCURRENCY" -gt 1 ]] && mlx_args+=(--max-batch "$CONCURRENCY")
+        fi
+        launch_cmd=("$LMS_VENV/bin/mlx-dspark" serve "${mlx_args[@]}")
+    else
+        mlx_args=(
+            --model "$MLX_MODEL"
+            --host "$MLX_HOST"
+            --port "$MLX_PORT"
+            --max-kv-size "$CONTEXT_WINDOW"
+            --prefill-step-size "$PREFILL_STEP_SIZE"
+            # Server's own default is UNBOUNDED concurrent sequences -- since
+            # recommend_max_context already sizes CONTEXT_WINDOW's memory footprint for
+            # exactly $CONCURRENCY slots (see model_advisor.py), leaving this unset would
+            # let an (N+1)th concurrent request allocate a KV cache with zero memory
+            # headroom reserved for it -- the exact crash this project exists to prevent.
+            --max-num-seqs "$CONCURRENCY"
+        )
+        if [[ -n "$KV_BITS" ]]; then
+            mlx_args+=(
+                --kv-bits "$KV_BITS"
+                --kv-group-size "$KV_GROUP_SIZE"
+                --quantized-kv-start "$QUANTIZED_KV_START"
+                --kv-quant-scheme uniform
+            )
+        fi
+        # --draft-model/--draft-kind/--draft-block-size are additive to the same
+        # mlx_vlm.server process -- this is the multimodal-capable "keep vision, some
+        # speedup" tier (see models.json's serving.multimodal_capable), not a
+        # different server or a different admission/health contract.
+        if [[ -n "$MLX_DRAFT_MODEL" ]]; then
+            mlx_args+=(--draft-model "$MLX_DRAFT_MODEL")
+            [[ -n "$MLX_DRAFT_KIND" ]] && mlx_args+=(--draft-kind "$MLX_DRAFT_KIND")
+            [[ -n "$MLX_DRAFT_BLOCK_SIZE" ]] && mlx_args+=(--draft-block-size "$MLX_DRAFT_BLOCK_SIZE")
+        fi
+
+        mkdir -p "$APC_DISK_PATH"
+        export APC_ENABLED APC_NUM_BLOCKS APC_DISK_PATH APC_DISK_MAX_GB
+
+        launch_cmd=("$MLX_PYTHON" -m "$MLX_SERVER_MODULE" "${mlx_args[@]}")
     fi
 
-    mkdir -p "$APC_DISK_PATH"
-    export APC_ENABLED APC_NUM_BLOCKS APC_DISK_PATH APC_DISK_MAX_GB
-
-    "$MLX_PYTHON" -m "$MLX_SERVER_MODULE" "${mlx_args[@]}" \
-        > "$MLX_LOG_FILE" 2>&1 &
+    "${launch_cmd[@]}" > "$MLX_LOG_FILE" 2>&1 &
     MLX_PID=$!
 
     if ! wait_for_url "http://$MLX_HOST:$MLX_PORT/health" 600; then
@@ -704,7 +878,7 @@ ensure_mlx_running() {
 
     if ! run_startup_smoke_check; then
         log_error "Startup smoke check failed — tearing down. Check $MLX_LOG_FILE"
-        wait_for_process_gone "$MLX_SERVER_MODULE" "MLX-VLM" 30
+        wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 30
         exit 1
     fi
 
@@ -724,7 +898,7 @@ full_teardown() {
     local reason="${1:-}"
     [[ -n "$reason" ]] && echo -e "\n[!] Stopping: $reason"
     stty sane 2>/dev/null || true
-    wait_for_process_gone "$MLX_SERVER_MODULE" "MLX-VLM" 20 || true
+    wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 20 || true
     rm -f "$MLX_STATE_FILE"
     exit 0
 }
@@ -782,10 +956,15 @@ get_connected_clients() {
     printf '%s' "$names" | sort | uniq -c | awk '{count=$1; $1=""; sub(/^ /,""); printf "%s (%s), ", $0, count}' | sed 's/, $//'
 }
 
+# mlx-dspark's own /metrics already includes everything mlx_vlm needs a SEPARATE
+# /v1/cache/stats call for (its prefix-cache stats are nested right in /metrics), and
+# it has no /v1/cache/stats endpoint at all -- so the dspark branch below only ever
+# fetches /metrics, skipping a call that would otherwise fail every single poll.
 render_dashboard() {
-    local metrics_json cache_json
+    local metrics_json cache_json=""
     metrics_json="$(curl -fsS --max-time 3 "http://$MLX_HOST:$MLX_PORT/metrics" 2>/dev/null || echo '{}')"
-    cache_json="$(curl -fsS --max-time 3 "http://$MLX_HOST:$MLX_PORT/v1/cache/stats" 2>/dev/null || echo '{}')"
+    [[ "$MLX_BACKEND" != "mlx_dspark" ]] && \
+        cache_json="$(curl -fsS --max-time 3 "http://$MLX_HOST:$MLX_PORT/v1/cache/stats" 2>/dev/null || echo '{}')"
 
     local pct_free pressure pressure_name mlx_rss now_ts elapsed elapsed_fmt connected_clients
     pct_free="$(get_percent_free)"
@@ -798,6 +977,105 @@ render_dashboard() {
     elapsed_fmt=$(printf "%02d:%02d:%02d" $((elapsed/3600)) $((elapsed%3600/60)) $((elapsed%60)))
 
     clear
+
+    if [[ "$MLX_BACKEND" == "mlx_dspark" ]]; then
+        # mlx-dspark's /metrics shape is genuinely different from mlx_vlm's, not just a
+        # field-renaming exercise -- confirmed live: no separate "latest request" vs.
+        # "lifetime summary" split (only running means), no requests_failed/in_flight
+        # counters, but real speculative-decoding stats (mean_accept_len, draft
+        # acceptance rate, PER-POSITION acceptance showing where in the draft block
+        # accuracy decays) mlx_vlm has no equivalent of, a real memory.peak_bytes/
+        # active_bytes/cache_bytes breakdown, and real system.swap_used_bytes -- none of
+        # which mlx_vlm's own dashboard can get from its API either. Deliberately
+        # OMITTED: "auto_cap" (metrics field only populates when --max-draft auto is
+        # passed; this script never passes it, so it's always null here -- not worth a
+        # permanent "—"), and mlx-dspark's own "verdict.headline" (live-tested and found
+        # it can say "No decode measured yet" even while mean_decode_tokens_per_sec and
+        # mean_accept_len are already populated in the same response, so it isn't
+        # trustworthy as a live-updating signal).
+        "$MLX_PYTHON" - "$metrics_json" "$MLX_MODEL" "$MLX_PORT" "$CONTEXT_WINDOW" \
+            "$elapsed_fmt" "${pct_free:-?}" "$pressure_name" "${mlx_rss:-?}" "$TEARDOWN_REASON" \
+            "$SCRIPT_DIR/launch_tool.sh" "${connected_clients:-}" "$MLX_HOST" "$CONCURRENCY" \
+            "$MLX_DRAFTER" "${MLX_DSPARK_MODE:-dflash}" <<'PYEOF-DSPARK'
+import json, sys
+
+metrics_raw, model, port, context, uptime, pct_free, pressure, rss, teardown_reason, launch_cmd, connected, host, concurrency, drafter, mode = sys.argv[1:16]
+
+def safe_json(s):
+    try:
+        return json.loads(s)
+    except Exception:
+        return {}
+
+metrics = safe_json(metrics_raw)
+rounds = metrics.get("rounds", {})
+prefix_cache = metrics.get("prefix_cache", {})
+mem = metrics.get("memory", {})
+system = metrics.get("system", {})
+guard = metrics.get("memory_guard", {})
+
+def num(v, default="—"):
+    return f"{v:,}" if isinstance(v, (int, float)) else default
+
+def rate(v, default="—"):
+    return f"{v:.1f}" if isinstance(v, (int, float)) else default
+
+def pct(v, default="—"):
+    return f"{v*100:.0f}%" if isinstance(v, (int, float)) else default
+
+def gb(v):
+    return f"{v/1e9:.1f}" if isinstance(v, (int, float)) else "—"
+
+def pos_accept(vals):
+    if not isinstance(vals, list) or not vals:
+        return "—"
+    return "/".join(f"{v*100:.0f}%" for v in vals)
+
+W = 90
+def line(s=""):
+    s = s[:W - 4]
+    print("│ " + s.ljust(W - 4) + " │")
+def rule(ch="─"):
+    print("├" + ch * (W - 2) + "┤")
+
+print("┌" + "─" * (W - 2) + "┐")
+line(f"local-model-setup  {model}  up {uptime}   [mlx-dspark]")
+line(f"API endpoint  http://{host}:{port}/v1   (OpenAI-compatible -- point any tool here)")
+line(f"context {context}   concurrency {concurrency}")
+rule()
+line(f"REQUESTS        completed {num(metrics.get('requests'), 0)}   (failed/in-flight not reported by mlx-dspark)")
+line(f"LIFETIME        prompt {num(metrics.get('prompt_tokens'), 0)} tok   generated {num(metrics.get('completion_tokens'), 0)} tok")
+line(f"                overall {rate(metrics.get('mean_tokens_per_sec'))} tok/s   decode {rate(metrics.get('mean_decode_tokens_per_sec'))} tok/s")
+rule()
+line(f"SPECULATION     mode {mode or '—'}   drafter {drafter or '—'}")
+line(f"                accept_len {rate(metrics.get('mean_accept_len'))}   draft_acceptance {pct(rounds.get('draft_acceptance'))}   "
+     f"rounds {num(rounds.get('rounds'), 0)}   lookup_rounds {num(rounds.get('lookup_rounds'), 0)}")
+line(f"                position accept: {pos_accept(rounds.get('position_acceptance'))}")
+rule()
+line(f"PREFIX CACHE    mode {prefix_cache.get('mode', '—')}   l2 {'on' if prefix_cache.get('l2') else 'off'}")
+line(f"                cached_tokens {num(prefix_cache.get('cached_tokens'), 0)}   hits {num(prefix_cache.get('hits'), 0)}   "
+     f"partial_hits {num(prefix_cache.get('partial_hits'), 0)}   reused {num(prefix_cache.get('reused_tokens'), 0)}")
+rule()
+line(f"MEMORY          active {gb(mem.get('active_bytes'))} GB   cache {gb(mem.get('cache_bytes'))} GB   peak {gb(mem.get('peak_bytes'))} GB")
+line(f"SYSTEM          free mem {pct_free}%   pressure: {pressure}   MLX RSS {rss} GB   swap {gb(system.get('swap_used_bytes'))} GB")
+rule()
+line(f"CONNECTED       {connected if connected else 'no tool connected yet'}")
+sheds = guard.get("sheds")
+if isinstance(sheds, (int, float)) and sheds > 0:
+    rule()
+    line(f"⚠ memory guard has shed cache {int(sheds)} time(s) — last: {guard.get('last_shed') or 'unknown'}")
+rule()
+line("last error: none")
+if teardown_reason:
+    rule()
+    line(f"⚠ {teardown_reason}")
+print("└" + "─" * (W - 2) + "┘")
+print(f"  To connect a tool: open another terminal and run {launch_cmd}")
+print("  Ctrl-C / q : stop everything")
+PYEOF-DSPARK
+        return
+    fi
+
     "$MLX_PYTHON" - "$metrics_json" "$cache_json" "$MLX_MODEL" "$MLX_PORT" "$CONTEXT_WINDOW" \
         "$elapsed_fmt" "${APC_ENABLED}" "${pct_free:-?}" "$pressure_name" "${mlx_rss:-?}" "$TEARDOWN_REASON" \
         "$SCRIPT_DIR/launch_tool.sh" "${connected_clients:-}" "$MLX_HOST" "$CONCURRENCY" <<'PYEOF'
@@ -931,7 +1209,20 @@ main() {
         run_interactive_selection
     fi
 
+    # Runs AFTER model selection (not folded into bootstrap_mlx above) because the
+    # interactive path doesn't know which model id it's serving until
+    # run_interactive_selection returns -- bootstrap_mlx's own unconditional mlx-lm/
+    # mlx-vlm install still has to happen before that, since model_advisor.py's picker
+    # itself needs them regardless of which backend gets selected.
+    resolve_serving_config
+    ensure_backend_installed
+
     log_info "Local model server starting with $LOCAL_MODEL ($MLX_MODEL), context ${CONTEXT_WINDOW} tokens"
+    if [[ "$MLX_BACKEND" == "mlx_dspark" ]]; then
+        log_info "Serving backend: mlx-dspark (mode: ${MLX_DSPARK_MODE:-dflash}) -- text-only, no image/video support"
+    elif [[ -n "$MLX_DRAFT_MODEL" ]]; then
+        log_info "Serving backend: mlx_vlm with $MLX_DRAFT_KIND drafter ($MLX_DRAFT_MODEL) -- multimodal-capable"
+    fi
 
     ensure_model_downloaded
     ensure_mlx_running

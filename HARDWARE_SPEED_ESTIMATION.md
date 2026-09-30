@@ -845,3 +845,116 @@ None of these block the work already implemented, but all fourteen should be cal
 script's own comments (mirroring how this document treats them), not silently smoothed over —
 consistent with this whole research effort's practice of recording what's actually confirmed versus
 what's still an approximation.
+
+## 18. Speculative decoding (mlx-dspark / mlx_vlm draft models) — a real measured multiplier
+##     layered on top of §6's bandwidth formula, not a new physics model
+
+Added 2026-09-29. This section covers a second, independent speedup mechanism from everything
+above: speculative decoding, where a small "drafter" model proposes several candidate tokens per
+round and the target model verifies them in one forward pass, reducing the number of full target
+forward passes needed per emitted token. This does NOT bypass the memory-bandwidth bound §3
+established — a verify pass still reads the full target weights — it amortizes that same bandwidth
+cost across more tokens per pass. So the right way to model it is a **multiplier on top of §6's
+existing bandwidth estimate**, not a competing formula, which is how it's implemented in
+`model_advisor.py`'s `estimate_speed_tok_s()`.
+
+### Two backends, not one, and why
+
+Two serving backends exist for this project now: `mlx_vlm.server` (already covered above) and
+`mlx-dspark`, a separate third-party package. `mlx_vlm.server` has its own native
+`--draft-model`/`--draft-kind {dflash,mtp,eagle3}` support and was the obvious first thing to try —
+but confirmed live, on this machine, across three separate model+quant pairs, `mlx-dspark`
+measurably outperforms `mlx_vlm`'s native draft-decoding path by roughly 15-20%, even after manually
+matching `mlx_vlm`'s `--draft-block-size` to the value `mlx-dspark` auto-discovers. The reason:
+`mlx-dspark` runs a one-time per-machine kernel calibration (`small_m`, `sdpa_split`,
+`multirow_attn`, wide-GEMM crossover — all confirmed live via its own startup log output) that
+`mlx_vlm`'s implementation doesn't have. `mlx_vlm`'s own default (uncalibrated) draft-block-size was
+worse than no drafter at all in one measured case (Qwen3.5-9B-8bit: 11.3 tok/s vs. 31.6 tok/s
+baseline). So `mlx-dspark` is used for the pure-speed, text-only tier; `mlx_vlm`'s native draft
+support is kept for the one case `mlx-dspark` structurally cannot cover: multimodal (image/video)
+requests, since `mlx-dspark`'s CLI has no image/video support at all and silently drops the target's
+vision tower on load if one is present.
+
+### Measured speedup multipliers (all on this machine, Apple M5 Pro, 20-core GPU, 2026-09-29)
+
+Each row is `decode tok/s with drafter ÷ decode tok/s baseline`, measured directly via matched
+before/after runs, not derived from any formula:
+
+| Target | Quant | Backend | Drafter | Speedup | Greedy match at temp=0? |
+|---|---|---|---|---|---|
+| Qwen3.8-27B | 4-bit | mlx-dspark (DFlash2) | `incoai/Qwen3.8-27B-DFlash2` | 2.4x | Diverged |
+| Qwen3.5-9B | 8-bit | mlx-dspark (DFlash) | `z-lab/Qwen3.5-9B-DFlash` | 2.55x | Identical |
+| Qwen3.5-9B | 4-bit | mlx-dspark (DFlash) | `z-lab/Qwen3.5-9B-DFlash` | 1.91x | Diverged |
+| Gemma-4-12B | 8-bit | mlx-dspark (DFlash) | `z-lab/gemma4-12B-it-DFlash` | 3.09x | Identical |
+| Gemma-4-12B | 4-bit | mlx-dspark (DFlash) | `z-lab/gemma4-12B-it-DFlash` | 2.21x | Identical |
+| Gemma-4-E4B | 4-bit | mlx_vlm native (MTP) | `mlx-community/gemma-4-E4B-it-assistant-bf16` | 1.56x | Diverged (text); identical (one image test) |
+| Gemma-4-26B-A4B (MoE) | 4-bit | mlx_vlm native (MTP) | `mlx-community/gemma-4-26B-A4B-it-assistant-bf16` | 1.08x | Identical |
+| Qwen3.8-27B | 4-bit | mlx_vlm native (DFlash) | `incoai/Qwen3.8-27B-DFlash2` | 1.54x (image) | Identical |
+| Qwen3.5-9B | 8-bit | mlx_vlm native (DFlash) | `z-lab/Qwen3.5-9B-DFlash` | 1.64x (image), 2.17x (text) | Identical |
+| Gemma-4-12B | 8-bit | mlx_vlm native (DFlash) | `z-lab/gemma4-12B-it-DFlash` | 1.82x (image) | Diverged |
+| Qwen3.5-9B | 4-bit | mlx_vlm native (DFlash) | `z-lab/Qwen3.5-9B-DFlash` | 1.26-1.47x (image) | Identical |
+| Gemma-4-12B | 4-bit | mlx_vlm native (DFlash) | `z-lab/gemma4-12B-it-DFlash` | 1.51-1.63x (image) | Diverged |
+
+The Gemma-4-26B-A4B (MoE) row deliberately has no `models.json` entry using it — the 1.08x gain
+isn't worth the extra drafter download/complexity for a MoE target that's already fast per-token
+(few active params).
+
+### Greedy-decoding divergence: real, but no clean predictive rule found
+
+Every speculative-decoding framework here documents lossless output — greedy decode should be
+byte-identical to no-drafter baseline, and sampled decode should preserve the same distribution via
+rejection sampling. Live testing at `temperature=0` with a matched seed found real exceptions to the
+greedy-identical claim specifically, on this hardware, for roughly half the tested combinations —
+and the pattern doesn't cleanly track model, quant, or backend individually. Same model
+(Gemma-4-12B) diverges under `mlx_vlm`'s native DFlash path on an image request while staying
+byte-identical under `mlx-dspark`'s own DFlash implementation on a text request — so the risk is a
+property of the specific model+quant+backend+content combination, not any one of those alone. Most
+likely mechanism: floating-point rounding differences between the batched verify kernel and the
+serial baseline decode kernel on this GPU, surfacing at a near-tie in the logits — not a correctness
+bug in any framework's design. Tracked per-`models.json`-entry
+(`serving.greedy_divergence_observed`) rather than assumed from any framework's own documentation.
+
+### How this is applied in `model_advisor.py`
+
+```
+dflash_or_mtp_estimate = (§6's existing chip-scaled bandwidth estimate) × serving.measured_speedup
+```
+
+Deliberately a multiplier on the physics estimate, not a flat absolute tok/s number, so a slower or
+older Mac than this M5 Pro (where every number above was measured) still gets a proportionally
+scaled-down estimate rather than inheriting a number measured on unrelated hardware. Confirmed this
+reproduces the real measured numbers closely on this specific machine (e.g.
+`qwen3.8-27b-4bit-dflash`: 42.7 estimated vs. 42.9-46.7 measured) — a good sanity check, though it
+doesn't validate the multiplier's portability to other chips (see open items below).
+
+### Open items specific to this section
+
+1. **Every multiplier above was measured on exactly one machine (this M5 Pro).** Whether the ratio
+   holds on an M1/M2/M3/M4 Mac, or even a different M5 variant, is completely unverified — the
+   underlying accept-rate could shift with a different GPU's kernel scheduling/memory-latency
+   balance, not just its raw bandwidth (which the multiplier doesn't correct for at all, unlike §6's
+   own bandwidth term).
+2. **The greedy-divergence pattern has no predictive model, only a table of observed outcomes.**
+   Whoever adds a new drafter-backed `models.json` entry needs to independently live-test
+   `greedy_divergence_observed` rather than assume it from a similar existing entry — confirmed this
+   session that similarity (same model family, same backend) does not predict the outcome.
+3. **~~Multimodal (image/video) + drafter combinations were only tested for 8-bit quants~~ —
+   COMPLETED 2026-09-29** (follow-up session). The 4-bit quants of both Qwen3.5-9B
+   (`qwen3.5-9b-mlx-4bit-dflash-vlm`) and Gemma-4-12B (`gemma-4-12b-it-4bit-dflash-vlm`) were
+   tested with the full baseline-vs-drafter image-request methodology (three image prompts of
+   91-900-token completions each, temperature=0, matched seed) and added to `models.json` with the
+   measured numbers in the table above. The two new rows also strengthened the §18 divergence
+   finding: Qwen3.5-9B-4-bit stayed identical under `mlx_vlm`'s DFlash path even though the same
+   quant diverged under `mlx-dspark`'s, while Gemma-4-12B-4-bit diverged under `mlx_vlm` even
+   though the same quant stayed identical under `mlx-dspark` — each family flipping its divergence
+   outcome when the backend changes, in opposite directions. `--draft-block-size` was manually
+   swept (3/4/5/6) on both new pairings rather than assumed from the 8-bit tuning; 4 held up as
+   the right value on both.
+4. **All measured speedups are single-prompt, single-run numbers** (a short code-generation and a
+   longer image-description prompt), not an average over a real benchmark suite — `mlx-dspark`'s own
+   published numbers show real workload-dependence (chat vs. code vs. math accept differently), which
+   this session's measurements didn't attempt to span systematically.
+5. **`mlx-dspark`'s per-machine kernel calibration is cached after first run** (confirmed live: "one-time,
+   cached" log messages for wide-GEMM crossover and CPU co-prefill split) — the measured numbers above
+   are all POST-calibration; a cold first run on a fresh machine would be measurably slower than these
+   numbers until that one-time calibration completes.

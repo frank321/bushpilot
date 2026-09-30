@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Local Model Setup — Run Claude Code & OpenCode on Your Mac</title>
-  <meta name="description" content="Run Claude Code or OpenCode against a local, on-device MLX-served model. Hardware-aware selection, memory monitoring, token speed estimation, and safe context sizing.">
+  <meta name="description" content="Run Claude Code or OpenCode against a local, on-device MLX-served model. Hardware-aware selection, memory monitoring, token speed estimation, safe context sizing, and optional speculative-decoding speedups.">
   <style>
     :root {
       --bg: #f8f9fa;
@@ -428,7 +428,8 @@
     <p class="tagline">
       Run Claude Code or OpenCode against a model served locally on your Mac by Apple's MLX,
       instead of a cloud API. Hardware-aware model selection, memory monitoring with automatic
-      termination, real-time token speed estimation, and safe context sizing — all built-in.
+      termination, real-time token speed estimation, safe context sizing, and optional
+      speculative-decoding speedups (up to 3x measured on some models) — all built-in.
     </p>
     <div class="cta-row">
       <a class="btn primary" href="local-model-setup.zip">⬇ Download local-model-setup.zip</a>
@@ -594,7 +595,7 @@
     <ul>
       <li><strong>API endpoint:</strong> the exact <code class="inline">http://host:port/v1</code> URL to point any tool at</li>
       <li><strong>Model, context &amp; concurrency:</strong> which model is loaded, its active context window, and how many concurrent requests it's sized for</li>
-      <li><strong>Requests:</strong> completed/failed/in-flight counts, lifetime token totals, decode speed</li>
+      <li><strong>Requests:</strong> completed/failed/in-flight counts, lifetime token totals, decode speed (models using speculative decoding show a different stats section — see Feature 7 below)</li>
       <li><strong>System:</strong> free memory %, memory-pressure level, and the server process's own RSS</li>
       <li><strong>Connected tools:</strong> which client processes currently hold a connection to the server</li>
       <li><strong>Controls:</strong> quit with <code class="inline">q</code> or <code class="inline">Ctrl-C</code></li>
@@ -612,6 +613,31 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
       All tools hit the same local model over the same local port. The dashboard's "Connected" line lists every
       tool process currently attached, so you can see at a glance who's using the server.
     </p>
+
+    <h3>7. Speculative Decoding — Real Measured Speedups, Where Available</h3>
+    <p>
+      Several models in the catalog have a faster variant that uses <strong>speculative decoding</strong>: a
+      small "drafter" model proposes several tokens per round, and the main model verifies them in one pass
+      instead of generating one token at a time. This is a real, independently measured speedup on this
+      project's own reference hardware — not a marketing estimate — ranging from about 1.5x to just over 3x
+      depending on the model, and it's exposed as extra, clearly-labeled entries in the model picker, never a
+      hidden default.
+    </p>
+    <ul>
+      <li><strong>Text-only speed variants</strong> (labeled <code class="inline">-dflash</code>): the fastest
+        option, but drops image/video input entirely while active — pick the plain entry instead for anything
+        involving an image.</li>
+      <li><strong>Multimodal speed variants</strong> (labeled <code class="inline">-dflash-vlm</code> /
+        <code class="inline">-mtp</code>): a smaller but still real speedup that keeps full image/video support.</li>
+      <li><strong>The plain entry</strong> for every model remains available and unchanged — the safest choice
+        when you want guaranteed byte-for-byte-standard output.</li>
+    </ul>
+    <div class="info-box">
+      <strong>Known tradeoff:</strong> every drafter-backed model entry in this catalog documents whether
+      greedy (deterministic) output was found to exactly match the plain entry's output in testing — some
+      combinations do, some don't. Each entry's description says which, so you can choose based on whether
+      exact reproducibility matters for your use case.
+    </div>
   </section>
 
   <!-- How It Works -->
@@ -776,14 +802,18 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
     <p>The curated list currently ships with these MLX-format models, roughly smallest to largest:</p>
     <ul>
       <li><strong>Qwen3.5 0.8B (4-bit):</strong> ~0.6GB — fits on almost anything, useful on very memory-constrained machines</li>
-      <li><strong>Gemma-4 E4B (4-bit):</strong> ~4.8GB</li>
-      <li><strong>Gemma-4 12B (4-bit):</strong> ~6.3GB</li>
-      <li><strong>Qwen3.5 9B (4-bit):</strong> ~6.3GB</li>
-      <li><strong>Qwen3.5 9B (8-bit):</strong> ~9.7GB — higher precision, same parameter count</li>
-      <li><strong>Gemma-4 12B (8-bit):</strong> ~12GB</li>
+      <li><strong>Gemma-4 E4B (4-bit):</strong> ~4.8GB — also available with an MTP speculative-decoding speedup</li>
+      <li><strong>Gemma-4 12B (4-bit):</strong> ~6.3GB — also available with a speculative-decoding speedup (text-only and multimodal variants)</li>
+      <li><strong>Qwen3.5 9B (4-bit):</strong> ~6.3GB — also available with a speculative-decoding speedup (text-only and multimodal variants)</li>
+      <li><strong>Qwen3.5 9B (8-bit):</strong> ~9.7GB — higher precision, same parameter count; also available with a speculative-decoding speedup (text-only and multimodal variants)</li>
+      <li><strong>Gemma-4 12B (8-bit):</strong> ~12GB — also available with a speculative-decoding speedup (text-only and multimodal variants)</li>
       <li><strong>Gemma-4 26B-A4B (4-bit, MoE):</strong> ~14GB — mixture-of-experts, only a fraction of weights active per token</li>
-      <li><strong>Qwen3.8 27B (4-bit):</strong> ~15GB — largest model in the current catalog</li>
+      <li><strong>Qwen3.8 27B (4-bit):</strong> ~15GB — largest model in the current catalog; also available with a speculative-decoding speedup (text-only and multimodal variants)</li>
     </ul>
+    <p>
+      19 total selectable entries once the speculative-decoding variants above are counted — see
+      <a href="#features">Core Features</a> above for what those variants trade off.
+    </p>
     <p>
       Want a different model? It's a Python data file — add an entry to <code class="inline">models.json</code> with its
       Hugging Face MLX repo id and size, and the picker will pick it up. It only serves MLX-format weights, not GGUF.
@@ -819,11 +849,11 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
         </tr>
         <tr>
           <td><code class="inline">MLX server</code> (Python)</td>
-          <td>OpenAI API–compatible LLM server backed by MLX</td>
+          <td>OpenAI API–compatible LLM server backed by MLX — either <code class="inline">mlx_vlm.server</code> (default; multimodal-capable) or <code class="inline">mlx-dspark</code> (text-only, faster, only for models with a speculative-decoding speedup) depending on which model entry you picked</td>
         </tr>
         <tr>
           <td><code class="inline">dashboard</code></td>
-          <td>Live monitor showing the API endpoint, free memory, and request performance</td>
+          <td>Live monitor showing the API endpoint, free memory, and request performance — shows extra speculative-decoding stats (accept rate, drafter name) for models using one</td>
         </tr>
       </tbody>
     </table>
@@ -854,6 +884,29 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
       every machine before you've picked or downloaded anything would be far too slow — the formula trades some
       precision for being instant and requiring no download first.
     </p>
+
+    <h3>Speculative Decoding: Two Backends, Selected Per Model</h3>
+    <p>
+      Some catalog entries add a small "drafter" model that proposes several tokens per round, which the main
+      model verifies in one pass — a real, independently measured speedup (not derived from the formula above)
+      layered on top of it. This uses a second serving backend, <code class="inline">mlx-dspark</code>, for
+      text-only speed variants: measured directly on this project's own reference hardware to run ~15-20% faster
+      than the alternative (pointing <code class="inline">mlx_vlm.server</code>'s own native drafter support at
+      the same model), because <code class="inline">mlx-dspark</code> runs a one-time per-machine kernel
+      calibration pass the alternative doesn't. <code class="inline">mlx-dspark</code> has no image/video support
+      at all, so multimodal-capable speed variants stay on <code class="inline">mlx_vlm.server</code> with its
+      native drafter support attached instead, trading a smaller speedup for keeping vision input. Which backend
+      a given catalog entry uses is picked automatically based on which entry you select — never something you
+      configure directly.
+    </p>
+    <div class="info-box">
+      <strong>Correctness note:</strong> both backends' drafter implementations are documented as
+      "lossless" (greedy output should exactly match not using one). Live testing on this project's own
+      reference hardware found real exceptions to that claim for some model/quant/backend combinations and not
+      others, with no single rule predicting which — tracked per catalog entry rather than assumed. Both the
+      speedup and this exception are documented per-model in <code class="inline">models.json</code> and in
+      <code class="inline">HARDWARE_SPEED_ESTIMATION.md</code>.
+    </div>
 
     <h3>Memory Monitoring & Teardown</h3>
     <p>

@@ -826,3 +826,93 @@ docs/
   Also lint-checked `index.html` (`tidy -utf8`, after ruling out the installed
   `tidy`'s HTML5-element/encoding false positives) and served `docs/` locally to
   confirm the zip's relative download link actually resolves next to the page.
+
+### Phase 8 — Speculative-decoding backend (`mlx-dspark`)
+
+Added 2026-09-29. Real measured decode-speed gains (1.5x-3.1x depending on model) are available
+via speculative decoding — a small "drafter" model proposes several tokens per round, the target
+verifies them in one pass — but getting them requires a second serving backend, not just a flag on
+the existing one: `mlx_vlm.server`'s own native `--draft-model` support works, but underperforms a
+separate third-party package, `mlx-dspark`, by ~15-20% on this project's actual hardware (measured,
+not assumed — see `HARDWARE_SPEED_ESTIMATION.md` §18 for the full methodology and per-model
+numbers), because `mlx-dspark` runs a one-time per-machine kernel calibration `mlx_vlm`'s
+implementation doesn't have.
+
+**Decision: two backends, selected per-`models.json`-entry, not a global setting.**
+`mlx-dspark` cannot handle image/video input at all (no CLI support, silently drops the target's
+vision tower on load) — so it's only used for a text-only "fast" tier. `mlx_vlm`'s native draft
+support is kept for the two things `mlx-dspark` structurally can't do: a multimodal-capable "some
+speedup, keeps vision" tier, and Gemma-4-E4B's MTP drafter specifically (Google's own architecture,
+not a DFlash checkpoint — no `mlx-dspark`-compatible drafter exists for this model at all). Every
+model that has a real drafter checkpoint gets up to 3 selectable `models.json` entries: the
+original plain entry (safest, always multimodal-capable, no speedup), an `mlx-dspark`-backed
+text-only speed variant (where a compatible drafter exists), and — only where multimodal+drafter
+was actually tested — an `mlx_vlm`-backed multimodal speed variant.
+
+**Decision: `models.json` gets a new optional `serving` block, not a command template.**
+Considered making the launcher fully data-driven (`models.json` specifies the literal command to
+run) and rejected it: letting a data file control an executed shell command is an injection-shaped
+risk, and several flags (`--max-kv-size`/`--kv-bits`/`--max-num-seqs`) genuinely have to be computed
+from the *live* free memory at launch time, which can't be frozen into a static file. Landed on
+structured fields instead (`backend`, `mode`/`drafter` for `mlx-dspark`; `draft_model`/`draft_kind`/
+`draft_block_size` for `mlx_vlm`; plus informational `measured_speedup`/`drafter_size_gb`/
+`multimodal_capable`/`greedy_divergence_observed`) — `start_mlx_server.sh` branches only on the
+`backend` enum, never on a specific model id, so adding model #18 later never requires touching the
+launcher script.
+
+**Implemented and live-validated (2026-09-29)** — every item below was tested against a real
+running server (`mlx-dspark serve` and `mlx_vlm.server` both), with real inference requests, not
+just written and assumed correct:
+
+- `models.json`: 11 new drafter-backed entries alongside the original 8 (19 total), each with real
+  measured `serving.measured_speedup`/`greedy_divergence_observed` data — 9 covering the text-only
+  `mlx-dspark` tier and the 8-bit multimodal `mlx_vlm` tier in the main session, plus the two 4-bit
+  multimodal variants (`qwen3.5-9b-mlx-4bit-dflash-vlm`, `gemma-4-12b-it-4bit-dflash-vlm`) in a
+  same-day follow-up that ran the full baseline-vs-drafter image-request methodology on both,
+  including a manual `--draft-block-size` sweep (3/4/5/6) and live tool-call checks with the drafter
+  attached. See `HARDWARE_SPEED_ESTIMATION.md` §18 for the full table and methodology.
+  `_schema_notes.serving` documents the new field set.
+- `model_advisor.py`: `effective_size_gb()` folds `serving.drafter_size_gb` into the existing
+  memory-fit checks (a drafter is a real, separate download sitting in memory alongside the
+  target); `estimate_speed_tok_s()` applies `serving.measured_speedup` as a multiplier on top of
+  the existing chip-scaled bandwidth formula, verified to reproduce real measured tok/s closely on
+  this machine.
+- `start_mlx_server.sh`: `resolve_serving_config()` (single source of truth reading `models.json`
+  by id, used by both the interactive picker and the fixed-model CLI form so they can't drift out
+  of sync), `ensure_backend_installed()` (installs/upgrades `mlx-dspark` only when a
+  selected model needs it, with a minimum-version floor — `MLX_DSPARK_MIN_VERSION`,
+  mirroring `MLX_VLM_MIN_VERSION`'s upgrade-if-older pattern; added by the same-day
+  follow-up along with the 4-bit vlm entries), a generalized `ensure_repo_downloaded()`
+  (pre-downloads the drafter too, same as the target), backend-aware process-identity
+  matching, two full argument-building branches (each
+  backend's own flag set — confirmed via each backend's own `--help`, not guessed), a
+  backend-aware startup smoke check (`mlx-dspark` has no `/v1/cache/stats` endpoint and a different
+  `/metrics` shape, confirmed live), and a backend-aware `render_dashboard()` with an
+  `mlx-dspark`-specific stats section (live speculative-decoding accept rate, per-position
+  acceptance decay, real peak-memory figures, swap usage, memory-guard shed warnings — richer than
+  what `mlx_vlm`'s own API exposes for some of these).
+- **A real bash bug found and fixed along the way, not just a script bug**: macOS's shipped
+  `/bin/bash` (3.2.57, pre-GPLv3) has a genuine parser bug with `eval "$(cmd <<'EOF' ... EOF)"`
+  nested inside a function body — it silently fed the heredoc's Python source text back as shell
+  code instead of running it. Fixed via the two-step capture-then-`eval` form. Wouldn't have
+  surfaced from `bash -n` alone; only found by actually running the script.
+- **Tool-calling verified live** through all three paths — `mlx-dspark` with both the `gemma4` and
+  `qwen3_coder` tool-parser families, and `mlx_vlm`+MTP — via real `/v1/chat/completions` requests
+  with a `web_search` tool schema attached. All three correctly returned `finish_reason: tool_calls`
+  with a well-formed function call, with the drafter confirmed genuinely active in the same
+  response (not silently bypassed for tool-call requests). `models.json`'s `tool_calling` blocks for
+  the tested entries were updated with the real method/timestamp rather than left inherited from
+  the base entry.
+- `launch_tool.sh`: checked, needs no changes — it only checks `/health` returns 200 and points
+  `ANTHROPIC_BASE_URL` at host:port, never inspects response shape, so it's already
+  backend-agnostic.
+- Investigated but deliberately NOT integrated: **Splash**, a purpose-built third-party inference
+  engine for the same Qwen3.8-27B target — real, well-provenanced (same publisher as the DFlash2
+  drafter already in use), but too young a project at investigation time (~2 weeks old, single
+  committer, a documented benchmark/shipped-defaults discrepancy in its own launch post, no
+  fallback path, only covers one model already covered by `mlx-dspark`) to justify a third backend.
+
+**Remaining work** (see `NEXT_SESSION_HANDOFF.md` for the actionable version): `config.json` doesn't
+yet expose a context-window override or `mlx-dspark`'s `--prefix-cache-*` tuning flags. (The 4-bit
+multimodal+drafter combos and the `mlx-dspark` minimum-version pin (`MLX_DSPARK_MIN_VERSION`)
+originally listed here were completed in the same-day follow-up above.)
