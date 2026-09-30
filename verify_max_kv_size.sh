@@ -42,9 +42,9 @@ set -uo pipefail
 MODEL_ID="${1:?Usage: $0 <huggingface-model-id> [port]}"
 PORT="${2:-8295}"
 
-MLX_VENV="$HOME/.local-model-setup/venv"
+MLX_VENV="$HOME/.bushpilot/venv"
 MLX_PYTHON="$MLX_VENV/bin/python"
-export HF_HOME="${HF_HOME:-$HOME/.local-model-setup/models}"
+export HF_HOME="${HF_HOME:-$HOME/.bushpilot/models}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS_FILE="$SCRIPT_DIR/mlx_verification_results.json"
 LOG_FILE="/tmp/verify_max_kv_size_$$.log"

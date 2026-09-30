@@ -1,7 +1,7 @@
 # Project Status — Memory-Aware Local MLX Model Launcher
 
 **Superseded as the current tracker (2026-09-29): see `PHASE_PLAN.md` instead.** This
-file predates the Phase 1-4 redesign (single `~/.local-model-setup/` home, LiteLLM +
+file predates the Phase 1-4 redesign (single `~/.bushpilot/` home, LiteLLM +
 Postgres dropped entirely, `start_litellm_proxy.sh` split into `start_mlx_server.sh` +
 `launch_tool.sh`). Its `~/scripts/` location references below are stale — the project
 now lives in this git repo — and `start_litellm_proxy.sh`/`monitor_memory.sh` no

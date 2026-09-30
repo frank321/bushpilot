@@ -1,4 +1,4 @@
-# Local Model Setup
+# Bushpilot
 
 Run Claude Code or OpenCode against a model served locally on your Mac by Apple's
 MLX, instead of a cloud API. Hardware-aware: it detects your Mac's chip and free
@@ -53,7 +53,7 @@ To stop everything, go back to the Terminal 1 window and press **Ctrl-C** or
 **`q`**.
 
 Everything this project manages (downloaded model weights, its Python
-environment, logs, and state) lives under `~/.local-model-setup/` — remove that
+environment, logs, and state) lives under `~/.bushpilot/` — remove that
 one directory for a full reset.
 
 ## More

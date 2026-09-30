@@ -59,28 +59,28 @@ fi
 
 # ---------------------------------------------------------------------------
 # Phase 1: single-home directory layout. Everything (venv, downloaded models, APC
-# disk cache, state, logs) lives under ~/.local-model-setup/ so the whole install is
+# disk cache, state, logs) lives under ~/.bushpilot/ so the whole install is
 # removable by deleting one directory. Migrating an EXISTING scattered install
 # (~/pip_env/mlx_lm, ~/mlx_models/~/MLX_Models, ~/.cache/mlx-vlm/caching,
 # /tmp/mlx-llm-proxy-*) into this layout is a deliberate one-time manual step on this
 # machine, not scripted here (see PHASE_PLAN.md's "Open / still deciding" resolution)
 # — this script always uses the new paths below, full stop.
 # ---------------------------------------------------------------------------
-LMS_HOME="$HOME/.local-model-setup"
-LMS_VENV="$LMS_HOME/venv"
-LMS_STATE_DIR="$LMS_HOME/state"
-LMS_LOG_DIR="$LMS_HOME/logs"
-LMS_APC_DIR="$LMS_HOME/apc-cache"
-export HF_HOME="$LMS_HOME/models"
-mkdir -p "$LMS_VENV" "$LMS_STATE_DIR" "$LMS_LOG_DIR" "$LMS_APC_DIR" "$HF_HOME"
+BUSHPILOT_HOME="$HOME/.bushpilot"
+BUSHPILOT_VENV="$BUSHPILOT_HOME/venv"
+BUSHPILOT_STATE_DIR="$BUSHPILOT_HOME/state"
+BUSHPILOT_LOG_DIR="$BUSHPILOT_HOME/logs"
+BUSHPILOT_APC_DIR="$BUSHPILOT_HOME/apc-cache"
+export HF_HOME="$BUSHPILOT_HOME/models"
+mkdir -p "$BUSHPILOT_VENV" "$BUSHPILOT_STATE_DIR" "$BUSHPILOT_LOG_DIR" "$BUSHPILOT_APC_DIR" "$HF_HOME"
 
-MLX_STATE_FILE="$LMS_STATE_DIR/mlx-loaded.txt"
-MLX_LOG_FILE="$LMS_LOG_DIR/mlx-server.log"
+MLX_STATE_FILE="$BUSHPILOT_STATE_DIR/mlx-loaded.txt"
+MLX_LOG_FILE="$BUSHPILOT_LOG_DIR/mlx-server.log"
 
-MLX_PYTHON="$LMS_VENV/bin/python"
+MLX_PYTHON="$BUSHPILOT_VENV/bin/python"
 MLX_SERVER_MODULE="mlx_vlm.server"
 
-# Config file (optional): $LMS_HOME/config.json can override host/port/preferred_model/
+# Config file (optional): $BUSHPILOT_HOME/config.json can override host/port/preferred_model/
 # concurrency/max_context_tokens below the built-in defaults, plus the mlx-dspark
 # prefix-cache tuning keys (CONFIG_DSPARK_PC_*, documented at their use site).
 # Precedence: MLX_HOST/MLX_PORT env var (if
@@ -102,7 +102,7 @@ MLX_SERVER_MODULE="mlx_vlm.server"
 # result, never grow it past what the host can afford; like all computed contexts
 # it rounds down to the nearest clean tier. Invalid values are ignored (the advisor
 # falls back to no cap) rather than erroring the launch.
-LMS_CONFIG_FILE="$LMS_HOME/config.json"
+BUSHPILOT_CONFIG_FILE="$BUSHPILOT_HOME/config.json"
 CONFIG_HOST=""
 CONFIG_PORT=""
 CONFIG_PREFERRED_MODEL=""
@@ -112,8 +112,8 @@ CONFIG_DSPARK_PC_SLOTS=""
 CONFIG_DSPARK_PC_RUNGS=""
 CONFIG_DSPARK_PC_DIR=""
 CONFIG_DSPARK_PC_MAX_RAM_MB=""
-if [[ -f "$LMS_CONFIG_FILE" ]]; then
-    eval "$(python3 - "$LMS_CONFIG_FILE" <<'PYEOF'
+if [[ -f "$BUSHPILOT_CONFIG_FILE" ]]; then
+    eval "$(python3 - "$BUSHPILOT_CONFIG_FILE" <<'PYEOF'
 import json, shlex, sys
 try:
     with open(sys.argv[1]) as f:
@@ -175,7 +175,7 @@ PREFILL_STEP_SIZE=2048
 # Automatic Prefix Caching (APC) — see HARDWARE_SPEED_ESTIMATION.md §13.
 APC_ENABLED=1
 APC_NUM_BLOCKS=4096
-APC_DISK_PATH="$LMS_APC_DIR"
+APC_DISK_PATH="$BUSHPILOT_APC_DIR"
 APC_DISK_MAX_GB=5
 
 # Memory-pressure backstop thresholds — same values/rationale as the now-retired
@@ -383,15 +383,15 @@ find_suitable_python() {
 }
 
 create_venv_if_needed() {
-    if [ -d "$LMS_VENV" ] && [ -x "$MLX_PYTHON" ] \
+    if [ -d "$BUSHPILOT_VENV" ] && [ -x "$MLX_PYTHON" ] \
         && "$MLX_PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
         log_info "MLX venv already exists"
         return 0
     fi
 
-    if [ -d "$LMS_VENV" ]; then
+    if [ -d "$BUSHPILOT_VENV" ]; then
         log_info "Existing MLX venv is built on a Python older than 3.10 (required by mlx-vlm>=${MLX_VLM_MIN_VERSION}) — rebuilding it..."
-        rm -rf "$LMS_VENV"
+        rm -rf "$BUSHPILOT_VENV"
     fi
 
     local py
@@ -400,8 +400,8 @@ create_venv_if_needed() {
         log_error "Install one, e.g.: brew install python@3.12"
         exit 1
     }
-    log_info "Creating MLX virtual environment at $LMS_VENV using $py ($("$py" --version 2>&1))..."
-    "$py" -m venv "$LMS_VENV"
+    log_info "Creating MLX virtual environment at $BUSHPILOT_VENV using $py ($("$py" --version 2>&1))..."
+    "$py" -m venv "$BUSHPILOT_VENV"
     log_success "MLX venv created"
 }
 
@@ -445,27 +445,27 @@ install_packages_if_needed() {
             have="$(installed_version "$import_name")"
             if [[ "$dist" == "mlx-vlm" ]] && ! version_at_least "$have" "$MLX_VLM_MIN_VERSION"; then
                 log_info "mlx-vlm $have is older than required minimum $MLX_VLM_MIN_VERSION -- upgrading..."
-                "$LMS_VENV/bin/pip" install --upgrade "$pkg" > /dev/null
+                "$BUSHPILOT_VENV/bin/pip" install --upgrade "$pkg" > /dev/null
                 log_success "mlx-vlm upgraded to $(installed_version mlx_vlm)"
             else
                 log_info "$dist already installed (version $have)"
             fi
         else
             log_info "Installing $pkg..."
-            "$LMS_VENV/bin/pip" install --upgrade pip setuptools wheel > /dev/null
-            "$LMS_VENV/bin/pip" install "$pkg" > /dev/null
+            "$BUSHPILOT_VENV/bin/pip" install --upgrade pip setuptools wheel > /dev/null
+            "$BUSHPILOT_VENV/bin/pip" install "$pkg" > /dev/null
             log_success "$pkg installed"
         fi
     done
 
     # packaging is used by version_at_least above; certifi for the CA bundle lookup.
     if ! "$MLX_PYTHON" -c "import packaging" 2>/dev/null; then
-        "$LMS_VENV/bin/pip" install packaging > /dev/null
+        "$BUSHPILOT_VENV/bin/pip" install packaging > /dev/null
     fi
 }
 
 bootstrap_mlx() {
-    log_info "Bootstrapping MLX environment at $LMS_HOME..."
+    log_info "Bootstrapping MLX environment at $BUSHPILOT_HOME..."
     create_venv_if_needed
     install_packages_if_needed
     if [ ! -x "$MLX_PYTHON" ]; then
@@ -555,7 +555,7 @@ ensure_backend_installed() {
             # Same upgrade-if-older pattern install_packages_if_needed uses for
             # mlx-vlm (see MLX_VLM_MIN_VERSION there) -- helpers are shared.
             log_info "mlx-dspark $have is older than required minimum $MLX_DSPARK_MIN_VERSION -- upgrading..."
-            "$LMS_VENV/bin/pip" install --upgrade "mlx-dspark>=${MLX_DSPARK_MIN_VERSION}" > /dev/null
+            "$BUSHPILOT_VENV/bin/pip" install --upgrade "mlx-dspark>=${MLX_DSPARK_MIN_VERSION}" > /dev/null
             log_success "mlx-dspark upgraded to $(installed_version mlx_dspark)"
         else
             log_info "mlx-dspark already installed (version $have)"
@@ -564,7 +564,7 @@ ensure_backend_installed() {
     fi
 
     log_info "Installing mlx-dspark>=${MLX_DSPARK_MIN_VERSION} (required by $LOCAL_MODEL's serving.backend)..."
-    "$LMS_VENV/bin/pip" install "mlx-dspark>=${MLX_DSPARK_MIN_VERSION}" > /dev/null
+    "$BUSHPILOT_VENV/bin/pip" install "mlx-dspark>=${MLX_DSPARK_MIN_VERSION}" > /dev/null
     log_success "mlx-dspark installed"
 }
 
@@ -888,7 +888,7 @@ ensure_mlx_running() {
             mlx_args+=(--kv-bits 0)
             [[ "$CONCURRENCY" -gt 1 ]] && mlx_args+=(--max-batch "$CONCURRENCY")
         fi
-        launch_cmd=("$LMS_VENV/bin/mlx-dspark" serve "${mlx_args[@]}")
+        launch_cmd=("$BUSHPILOT_VENV/bin/mlx-dspark" serve "${mlx_args[@]}")
     else
         mlx_args=(
             --model "$MLX_MODEL"
@@ -1099,7 +1099,7 @@ def rule(ch="─"):
     print("├" + ch * (W - 2) + "┤")
 
 print("┌" + "─" * (W - 2) + "┐")
-line(f"local-model-setup  {model}  up {uptime}   [mlx-dspark]")
+line(f"bushpilot  {model}  up {uptime}   [mlx-dspark]")
 line(f"API endpoint  http://{host}:{port}/v1   (OpenAI-compatible -- point any tool here)")
 line(f"context {context}   concurrency {concurrency}")
 rule()
@@ -1170,7 +1170,7 @@ def gb(v):
     return f"{v/1e9:.1f}" if isinstance(v, (int, float)) else "—"
 
 print("┌" + "─" * (W - 2) + "┐")
-line(f"local-model-setup  {model}  up {uptime}")
+line(f"bushpilot  {model}  up {uptime}")
 line(f"API endpoint  http://{host}:{port}/v1   (OpenAI-compatible -- point any tool here)")
 line(f"context {context}   concurrency {concurrency}   APC: {'on' if apc_on == '1' else 'off'}")
 rule()

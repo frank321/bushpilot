@@ -40,7 +40,7 @@ process, no matter which wire format each client speaks.
   back to a plain numbered menu if it's missing
 
 Everything else (venv, downloaded model weights, APC disk cache, state, logs) lives
-under `~/.local-model-setup/` — the whole install is removable by deleting that one
+under `~/.bushpilot/` — the whole install is removable by deleting that one
 directory.
 
 ---
@@ -55,7 +55,7 @@ With no arguments this runs `model_advisor.py`'s interactive picker: it detects 
 Mac's chip and free wired memory, shows every model in `models.json` (greying out ones
 that don't currently fit, with the reason why), and lets you pick one. It then:
 
-1. Bootstraps `~/.local-model-setup/venv` (creates it if needed, installs/upgrades
+1. Bootstraps `~/.bushpilot/venv` (creates it if needed, installs/upgrades
    `mlx-lm`/`mlx-vlm>=0.7.0`)
 2. Pre-downloads the model if it isn't cached yet (so a killed download can resume,
    unlike `mlx_vlm.server`'s own lazy on-demand fetch)
@@ -105,8 +105,8 @@ you're not looking — see `MONITORING_ARCHITECTURE.md`.)
 
 - **MLX server** (port 11435, `127.0.0.1` only) — the only background process this
   project runs. No PostgreSQL, no LiteLLM.
-- **Single home**: `~/.local-model-setup/{venv,models,state,logs,apc-cache}/`
-- **State file**: `~/.local-model-setup/state/mlx-loaded.txt` —
+- **Single home**: `~/.bushpilot/{venv,models,state,logs,apc-cache}/`
+- **State file**: `~/.bushpilot/state/mlx-loaded.txt` —
   `<huggingface_id>|<context_window>|<kv_bits>`, read by `launch_tool.sh` to know
   what's actually running.
 - **Reliability checks carried over from the old script**: a real (not just `/health`)
@@ -143,7 +143,7 @@ alive. Once it's up, run `launch_tool.sh` again in a **different** terminal.
 
 | Log | Purpose |
 |-----|---------|
-| `~/.local-model-setup/logs/mlx-server.log` | `mlx_vlm.server` stdout/stderr |
+| `~/.bushpilot/logs/mlx-server.log` | `mlx_vlm.server` stdout/stderr |
 
 ### "No healthy local model server detected"
 
@@ -152,7 +152,7 @@ file. Start (or check) `start_mlx_server.sh` in its own terminal first.
 
 ### "Cannot import mlx_vlm" / package errors
 
-Remove `~/.local-model-setup/venv` and re-run `start_mlx_server.sh` — it rebuilds the
+Remove `~/.bushpilot/venv` and re-run `start_mlx_server.sh` — it rebuilds the
 venv from scratch.
 
 ### Preload-fit error from `launch_tool.sh`
@@ -164,7 +164,7 @@ currently-loaded context window for an actual conversation. Restart
 ### Full reset
 
 ```bash
-rm -rf ~/.local-model-setup
+rm -rf ~/.bushpilot
 ```
 
 Removes the venv, downloaded model weights, APC cache, state, and logs — everything

@@ -6,7 +6,7 @@ Implemented in `model_advisor.py`, called by `start_mlx_server.sh` (renamed from
 formula below is traceable back to its sources and isn't reinvented or drifted from
 silently later.
 
-**Owner:** this repo (`local-model-setup`)
+**Owner:** this repo (`bushpilot`)
 **Related:** `MLX_SERVER_USAGE.md` (renamed from `LITELLM_PROXY_USAGE.md` — interactive
 menu design), `models.json` (per-model metadata this feeds into),
 `verify_max_kv_size.sh` / `mlx_verification_results.json` (separate verification —

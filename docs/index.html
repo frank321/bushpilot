@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Local Model Setup — Run Claude Code & OpenCode on Your Mac</title>
+  <title>Bushpilot — Run Claude Code & OpenCode on Your Mac</title>
   <meta name="description" content="Run Claude Code or OpenCode against a local, on-device MLX-served model. Hardware-aware selection, memory monitoring, token speed estimation, safe context sizing, and optional speculative-decoding speedups.">
   <style>
     :root {
@@ -423,7 +423,7 @@
 
   <!-- Header -->
   <header class="hero">
-    <h1>🚀 Local Model Setup</h1>
+    <h1>🚀 Bushpilot</h1>
     <p class="subtitle">On-device AI for Claude Code & OpenCode</p>
     <p class="tagline">
       Run Claude Code or OpenCode against a model served locally on your Mac by Apple's MLX,
@@ -432,7 +432,7 @@
       speculative-decoding speedups (up to 3x measured on some models) — all built-in.
     </p>
     <div class="cta-row">
-      <a class="btn primary" href="local-model-setup.zip">⬇ Download local-model-setup.zip</a>
+      <a class="btn primary" href="bushpilot.zip">⬇ Download bushpilot.zip</a>
       <a class="btn secondary" href="https://github.com/frank321/bushpilot">View on GitHub →</a>
     </div>
   </header>
@@ -441,8 +441,8 @@
   <div class="toc">
     <h2>On this page</h2>
     <ol>
-      <li><a href="#what-is-it">What Is Local Model Setup?</a></li>
-      <li><a href="#safety">Safe Local Model Setup</a></li>
+      <li><a href="#what-is-it">What Is Bushpilot?</a></li>
+      <li><a href="#safety">Safe Bushpilot</a></li>
       <li><a href="#why">Why Run Models Locally?</a></li>
       <li><a href="#features">Core Features</a></li>
       <li><a href="#how-it-works">How It Works</a></li>
@@ -456,9 +456,9 @@
 
   <!-- What Is It -->
   <section id="what-is-it">
-    <h2>🎯 What Is Local Model Setup?</h2>
+    <h2>🎯 What Is Bushpilot?</h2>
     <p>
-      Local Model Setup is a toolkit that lets you run <strong>Claude Code</strong> or <strong>OpenCode</strong>
+      Bushpilot is a toolkit that lets you run <strong>Claude Code</strong> or <strong>OpenCode</strong>
       against a model served locally on your Mac, instead of a cloud API. It detects your hardware and currently-free
       memory, recommends only models that actually fit (with a computed context size, speed estimate, and safe
       concurrency for each), then runs the server with continuous memory monitoring and a live dashboard — details
@@ -466,19 +466,19 @@
     </p>
     <div class="info-box">
       <strong>Key insight:</strong> Most developers just pick a model size and hope it doesn't crash.
-      Local Model Setup detects your exact hardware and memory, then recommends safe options with real performance estimates — no guessing, no crashes, no silent context truncation.
+      Bushpilot detects your exact hardware and memory, then recommends safe options with real performance estimates — no guessing, no crashes, no silent context truncation.
     </div>
   </section>
 
   <!-- Safety & Reliability -->
   <section id="safety">
-    <h2>🛡️ Safe Local Model Setup — No Crashes, No Guessing</h2>
+    <h2>🛡️ Safe Bushpilot — No Crashes, No Guessing</h2>
     <p>
       Running LLM models locally on your Mac is powerful, but it's risky if you don't know your hardware limits.
       Most developers just download a model, hope it fits in memory, and then watch their Mac slow to a crawl when it runs out.
     </p>
     <p>
-      <strong>Local Model Setup eliminates that risk.</strong> It's built specifically to make local models <em>safe and reliable</em>:
+      <strong>Bushpilot eliminates that risk.</strong> It's built specifically to make local models <em>safe and reliable</em>:
     </p>
 
     <div class="features-grid">
@@ -644,7 +644,7 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
   <section id="how-it-works">
     <h2>⚙️ How It Works</h2>
     <p>
-      Local Model Setup orchestrates three main pieces: hardware detection, model selection, and a live server.
+      Bushpilot orchestrates three main pieces: hardware detection, model selection, and a live server.
     </p>
 
     <div class="how-it-works">
@@ -751,7 +751,7 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
     <ol class="steps">
       <li>
         <strong>Download and unzip</strong>
-        <p>Get <code class="inline">local-model-setup.zip</code> from above and unzip it. Open a terminal in the resulting folder.</p>
+        <p>Get <code class="inline">bushpilot.zip</code> from above and unzip it. Open a terminal in the resulting folder.</p>
       </li>
       <li>
         <strong>Terminal 1 — Start the server</strong>
@@ -958,7 +958,7 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
     </p>
     <p>
       <strong>Changing the port or host:</strong> both scripts read an optional
-      <code class="inline">~/.local-model-setup/config.json</code> file, in this order of precedence — an exported
+      <code class="inline">~/.bushpilot/config.json</code> file, in this order of precedence — an exported
       <code class="inline">MLX_PORT</code>/<code class="inline">MLX_HOST</code> environment variable wins, then the
       config file, then the built-in default:
     </p>
@@ -1077,7 +1077,7 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
     <h3>Model download is slow</h3>
     <p>
       Model files in the current catalog range from under 1GB to ~15GB depending on size and quantization.
-      Once downloaded, the model is cached under <code class="inline">~/.local-model-setup/models</code> and reused;
+      Once downloaded, the model is cached under <code class="inline">~/.bushpilot/models</code> and reused;
       subsequent starts of the same model don't re-download.
     </p>
     <h3>The server shut itself down unexpectedly</h3>
@@ -1105,13 +1105,13 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
   <!-- CTA -->
   <div class="cta-section">
     <h2>Ready to Get Started?</h2>
-    <p>Download the local-model-setup.zip file and follow the quick start guide above.</p>
-    <a class="btn primary" href="local-model-setup.zip">⬇ Download Now</a>
+    <p>Download the bushpilot.zip file and follow the quick start guide above.</p>
+    <a class="btn primary" href="bushpilot.zip">⬇ Download Now</a>
   </div>
 
   <!-- Footer -->
   <footer>
-    <p><strong>Local Model Setup</strong> — Run Claude Code & OpenCode on your Mac</p>
+    <p><strong>Bushpilot</strong> — Run Claude Code & OpenCode on your Mac</p>
     <p><a href="https://github.com/frank321/bushpilot">View on GitHub</a> • Built for on-device AI coding</p>
     <p style="margin-top: 16px; opacity: 0.7;">Last updated: 2026-09-29</p>
   </footer>

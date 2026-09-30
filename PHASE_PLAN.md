@@ -1,4 +1,4 @@
-# Phase Plan: local-model-setup redesign
+# Phase Plan: bushpilot redesign
 
 ## What this project is
 
@@ -28,7 +28,7 @@ later "drop LiteLLM + Postgres entirely" decision below — the supervisor scrip
 described here is superseded by Phase 2's MLX-only version once implemented.)*
 
 - Everything (venvs, downloaded models, Postgres data, logs, state) moves under a
-  single `~/.local-model-setup/` directory instead of scattering
+  single `~/.bushpilot/` directory instead of scattering
   `~/pip_env/*`, `~/mlx_models`, `/tmp/*`. Fully removable by deleting one directory.
 - The proxy launcher script is symlinked into a writable directory already on the
   user's `$PATH` (e.g. `~/.local/bin`), so it can be run from anywhere without typing
@@ -142,7 +142,7 @@ that's explicitly out of scope, so every number here only updates once per
 completed request):
 
 ```
-┌─ local-model-setup ── mlx-community/Qwen3.5-9B-MLX-8bit ── up 00:04:12 ─┐
+┌─ bushpilot ── mlx-community/Qwen3.5-9B-MLX-8bit ── up 00:04:12 ─┐
 │ port 11435   context 131072/262144   APC: on                                   │
 ├───────────────────────────────────────────────────────────────────────────────┤
 │ REQUESTS        completed 14   failed 0   in-flight 0                          │
@@ -181,16 +181,16 @@ completed request):
 - **Resolved (2026-09-29): manual, one-time, this-machine-only migration — not
   scripted.** Chose not to auto-migrate on first run; the mapping from old scattered
   paths (`~/pip_env/mlx_lm`, `~/mlx_models`/`~/MLX_Models`, `/tmp/mlx-llm-proxy-*`)
-  into the new `~/.local-model-setup/` layout will be done by hand on this
+  into the new `~/.bushpilot/` layout will be done by hand on this
   machine only, as the last step of implementing Phase 1/2 — not before, since the
   *current* `start_litellm_proxy.sh` still hardcodes the old paths (`MLX_DIR`,
   `HF_HOME` default) and would break if those directories moved before the rewrite
   lands. `~/pip_env/litellm` gets deleted outright at that point too (dead weight,
   nothing to migrate). No code needed for this — it's a one-off `mv`/`rm` on frank's
   machine, deliberately not written into any script.
-  **EXECUTED (2026-09-30):** removed the interim `~/.local-model-setup/models`
+  **EXECUTED (2026-09-30):** removed the interim `~/.bushpilot/models`
   symlink (which pointed back out at the still-visible `~/MLX_Models`) and
-  `mv`'d the 147 GB cache to `~/.local-model-setup/models` for real (same volume —
+  `mv`'d the 147 GB cache to `~/.bushpilot/models` for real (same volume —
   instant rename); `~/.zshrc`'s `HF_HOME`/`SSL_CERT_FILE` exports updated to the
   hidden path; `~/pip_env/litellm` and `~/pip_env/mlx_lm` deleted (1.5 GB freed;
   `headroom_enabled_env` deliberately kept — unknown purpose, not in plan);
@@ -344,15 +344,15 @@ validated end-to-end for both target tools. Remaining follow-ups, not blockers:
 ## Phases
 
 ### Phase 1 — Directory & path migration
-- Introduce `~/.local-model-setup/` as the single home for venvs, model
+- Introduce `~/.bushpilot/` as the single home for venvs, model
   weights, Postgres data dir, logs, and state files.
 - Decide + implement the migration story for existing installs (see Open items).
 - Symlink the proxy script into a writable `$PATH` directory; detect one that
   already exists (`~/.local/bin`, `/opt/homebrew/bin`) rather than assuming.
 - **Move APC's disk cache under the new single home** (panel finding, GLM, low —
   confirmed `APC_DISK_PATH="$HOME/.cache/mlx-vlm/caching"` in the current script,
-  outside `~/.local-model-setup/`): relocate to
-  `~/.local-model-setup/apc-cache/` so "fully removable by deleting one directory"
+  outside `~/.bushpilot/`): relocate to
+  `~/.bushpilot/apc-cache/` so "fully removable by deleting one directory"
   is actually true, and keep exporting `APC_ENABLED`/`APC_NUM_BLOCKS`/
   `APC_DISK_PATH`/`APC_DISK_MAX_GB` plus the `mkdir -p` it needs (mlx_vlm doesn't
   create the dir itself).
@@ -379,7 +379,7 @@ the current script; those are now explicit preserve/fix items, not just removals
   inference probe — `/health` alone was already proven insufficient once),
   `wait_for_port_free`/`wait_for_process_gone`, the loaded-model/context/kv-bits
   state file (relocate from `/tmp/mlx-llm-proxy-loaded.txt` to
-  `~/.local-model-setup/state/`, matching the single-home decision), the
+  `~/.bushpilot/state/`, matching the single-home decision), the
   "different model already running, confirm?" interactive flow, and
   `ensure_model_downloaded`'s pre-download step (no resume support if a download is
   killed mid-transfer, so pre-checking matters).
@@ -523,7 +523,7 @@ the current script; those are now explicit preserve/fix items, not just removals
   `start_mlx_server.sh`'s `check_memory_backstop` as where that logic actually lives
   now.
 - `LITELLM_PROXY_USAGE.md` renamed to `MLX_SERVER_USAGE.md` and rewritten for the
-  two-script architecture (no LiteLLM/Postgres, `~/.local-model-setup/` paths, both
+  two-script architecture (no LiteLLM/Postgres, `~/.bushpilot/` paths, both
   scripts' real env vars/behavior). `QUICK_START.md` rewritten the same way.
   `PROJECT_STATUS.md` and `HARDWARE_SPEED_ESTIMATION.md` got stale-path fixes (old
   `~/scripts/`/`~/pip_env` locations, old script name) — `PROJECT_STATUS.md` also got
@@ -800,7 +800,7 @@ its contents can still be built and committed before that.
 ```
 docs/
 ├── index.html              # GitHub Pages landing page
-├── local-model-setup.zip   # packaged release bundle
+├── bushpilot.zip   # packaged release bundle
 └── build_release.sh        # regenerates the zip — run manually before publishing an update
 ```
 
@@ -810,13 +810,13 @@ docs/
   Silicon Mac, macOS, Homebrew, Python 3), a short user guide (download → unzip →
   run the supervisor script → run the launcher script), the zip's download link,
   and a link back to the GitHub repo itself for anyone who'd rather clone/contribute.
-- **`local-model-setup.zip`**: end-user runtime files only, not this project's
+- **`bushpilot.zip`**: end-user runtime files only, not this project's
   internal planning/research docs — the renamed supervisor script and
   `launch_tool` script (Phase 4's final names), `model_advisor.py`, `models.json`,
   and a short standalone `README.md` written specifically for zip users (distinct
   from `PHASE_PLAN.md`/`PROJECT_STATUS.md`, which stay working docs, not shipped).
 - **`build_release.sh`**: a small manual script that zips exactly that file list
-  into `docs/local-model-setup.zip` — no CI/automation, matching this project's
+  into `docs/bushpilot.zip` — no CI/automation, matching this project's
   existing plain-shell-scripts-only approach elsewhere.
 
 **Implemented and live-validated (2026-09-29):**
@@ -825,7 +825,7 @@ docs/
   deferred: pushed this repo to a real remote —
   `https://github.com/frank321/bushpilot` (created public via `gh
   repo create`, at the user's direction) — and enabled GitHub Pages on it via the
-  API (`POST /repos/frank-yan/local-model-setup/pages`, `source.branch=main`,
+  API (`POST /repos/frank-yan/bushpilot/pages`, `source.branch=main`,
   `source.path=/docs`), rather than leaving it as a manual step. `index.html` and
   the footer link both point at that real repo URL.
 - Built `docs/index.html` (tagline, requirements, download button, repo link, a
@@ -833,8 +833,8 @@ docs/
   (the zip's standalone `README.md` source, distinct from this doc and
   `PROJECT_STATUS.md`), and `docs/build_release.sh` (zips
   `start_mlx_server.sh`/`launch_tool.sh`/`model_advisor.py`/`models.json` +
-  `release-README.md` into `docs/local-model-setup.zip`, from a temp dir so the
-  zip's top-level folder is `local-model-setup/`, not loose files).
+  `release-README.md` into `docs/bushpilot.zip`, from a temp dir so the
+  zip's top-level folder is `bushpilot/`, not loose files).
 - **Validated, not just built:** ran `build_release.sh` for real; unzipped the
   actual output into an isolated scratch directory (no other repo files present)
   and confirmed `start_mlx_server.sh`/`launch_tool.sh` both pass `bash -n`,

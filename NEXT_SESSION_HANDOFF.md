@@ -210,7 +210,7 @@ style. Structurally validated (`docs/index.html`'s tag balance checked, `tidy`'s
 pre-existing HTML5/UTF-8 false positives — already documented in `PHASE_PLAN.md`
 Phase 7 — confirmed unrelated to these edits).
 
-**Not done as part of this**: the release zip (`docs/local-model-setup.zip`) was not
+**Not done as part of this**: the release zip (`docs/bushpilot.zip`) was not
 rebuilt via `docs/build_release.sh`, and nothing was pushed to the GitHub remote —
 the zip's file list already includes `models.json`/`model_advisor.py`/
 `start_mlx_server.sh` by name, so a rebuild would pick up all of this session's
@@ -229,14 +229,14 @@ month or two if curious, not urgent.
 ## Quick orientation for a new session
 
 - Real drafters are downloaded into the standard HF cache
-  (`~/.local-model-setup/models/hub/models--{org}--{repo}/`) for: `z-lab/gemma4-12B-it-DFlash`,
+  (`~/.bushpilot/models/hub/models--{org}--{repo}/`) for: `z-lab/gemma4-12B-it-DFlash`,
   `z-lab/Qwen3.5-9B-DFlash`, `incoai/Qwen3.8-27B-DFlash2`,
   `mlx-community/gemma-4-E4B-it-assistant-bf16`, `mlx-community/gemma-4-26B-A4B-it-assistant-bf16`
   — all checksum-verified against HF's own reported SHA-256 at download time. You should
   NOT need to re-download these to keep testing.
-- `~/.local-model-setup/venv` already has `mlx-dspark==0.20.1` installed alongside
+- `~/.bushpilot/venv` already has `mlx-dspark==0.20.1` installed alongside
   `mlx-lm`/`mlx-vlm`.
 - To manually smoke-test either backend without the full script:
-  `~/.local-model-setup/venv/bin/mlx-dspark serve --model <repo> --drafter <repo> --mode dflash --port 38999`
-  or `~/.local-model-setup/venv/bin/python -m mlx_vlm.server --model <path> --draft-model <repo> --draft-kind {dflash,mtp} --port 38999`,
+  `~/.bushpilot/venv/bin/mlx-dspark serve --model <repo> --drafter <repo> --mode dflash --port 38999`
+  or `~/.bushpilot/venv/bin/python -m mlx_vlm.server --model <path> --draft-model <repo> --draft-kind {dflash,mtp} --port 38999`,
   then `curl http://127.0.0.1:38999/health` / `/metrics` / `/v1/chat/completions`.

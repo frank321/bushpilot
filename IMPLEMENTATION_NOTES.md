@@ -4,7 +4,7 @@
 doc for the pre-redesign architecture — the LiteLLM-fronted proxy it describes was
 dropped entirely (MLX serves both wire formats natively), the supervisor it planned
 became `start_mlx_server.sh`, and its paths (`~/pip_env/*`, `~/MLX_Models`) predate
-the Phase 1 migration of everything into `~/.local-model-setup/` (completed
+the Phase 1 migration of everything into `~/.bushpilot/` (completed
 2026-09-30). Kept for the memory-detection and tiering design research below, which
 informed the current implementation — read `start_mlx_server.sh` and
 `model_advisor.py` for where that logic actually lives now, not this doc.

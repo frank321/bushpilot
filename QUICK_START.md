@@ -1,4 +1,4 @@
-# Quick Start: Local Model Setup
+# Quick Start: Bushpilot
 
 Run Claude Code or OpenCode against a model served locally on-device by Apple's MLX,
 instead of a cloud API. Hardware-aware: it detects your Mac's chip and free memory
@@ -56,7 +56,7 @@ memory gets dangerously low.
 ## Live Dashboard
 
 ```
-┌─ local-model-setup ── mlx-community/Qwen3.5-9B-MLX-8bit ── up 00:04:12 ─┐
+┌─ bushpilot ── mlx-community/Qwen3.5-9B-MLX-8bit ── up 00:04:12 ─┐
 │ port 11435   context 131072/262144   APC: on                                   │
 ├───────────────────────────────────────────────────────────────────────────────┤
 │ REQUESTS        completed 14   failed 0   in-flight 0                          │
@@ -81,7 +81,7 @@ endpoints — no separate instrumentation needed.
 ## Full Reset
 
 ```bash
-rm -rf ~/.local-model-setup
+rm -rf ~/.bushpilot
 ```
 
 Removes the venv, downloaded model weights, APC cache, state, and logs.
