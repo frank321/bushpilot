@@ -353,8 +353,17 @@ def compute_kv_formula(kv_config, kv_bits=UNQUANTIZED_KV_BITS):
 
 
 def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BITS,
-                           safety_buffer_gb=SAFETY_BUFFER_GB):
-    """Returns (recommended_tokens_or_None, reason_string, detail_dict_or_None)."""
+                           safety_buffer_gb=SAFETY_BUFFER_GB, concurrency=1):
+    """Returns (recommended_tokens_or_None, reason_string, detail_dict_or_None).
+
+    concurrency>1 sizes context for N identically-sized concurrent slots instead of
+    one -- inflating the per-token/fixed KV costs by N before the fits check is
+    mathematically the same as dividing the memory budget by N, and yields the
+    per-slot context size such that N copies of it all fit. Used for an explicit
+    concurrency request (config.json's "concurrency"); the default auto-detected
+    bonus-concurrency path (see compute_bonus_concurrency) instead calls this with
+    concurrency=1 (unchanged, context-maximizing behavior) and separately checks
+    whether tier-rounding leftover fits extra same-size slots for free."""
     available_gb = free_wired_gb - model_entry["size_gb"] - safety_buffer_gb
     if available_gb <= 0:
         return None, "insufficient_memory_for_model_weights", None
@@ -363,6 +372,8 @@ def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BIT
     if formula is None:
         return None, "architecture_fields_missing_from_config", None
     bytes_per_growing_token, fixed_bytes, detail = formula
+    bytes_per_growing_token *= concurrency
+    fixed_bytes *= concurrency
 
     available_bytes = available_gb * 1024**3
     usable_bytes = available_bytes - fixed_bytes
@@ -420,7 +431,7 @@ def _apply_preload(ctx, reason, preload_overhead):
 
 
 def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0,
-                                   safety_buffer_gb=SAFETY_BUFFER_GB):
+                                   safety_buffer_gb=SAFETY_BUFFER_GB, concurrency=1):
     """Decides BOTH whether to quantize the KV cache AND the resulting context size, in
     one pass — see HARDWARE_SPEED_ESTIMATION.md §14 for the full reasoning and its
     measured basis (§10/§12).
@@ -442,7 +453,7 @@ def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0
     """
     ctx_u, reason_u, detail_u = recommend_max_context(
         model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BITS,
-        safety_buffer_gb=safety_buffer_gb,
+        safety_buffer_gb=safety_buffer_gb, concurrency=concurrency,
     )
     fits_u, reason_u, after_u = _apply_preload(ctx_u, reason_u, preload_overhead)
     if fits_u:
@@ -453,7 +464,7 @@ def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0
 
     ctx_q, reason_q, detail_q = recommend_max_context(
         model_entry, free_wired_gb, kv_bits=MEMORY_CONSTRAINED_KV_BITS,
-        safety_buffer_gb=safety_buffer_gb,
+        safety_buffer_gb=safety_buffer_gb, concurrency=concurrency,
     )
     fits_q, reason_q, after_q = _apply_preload(ctx_q, reason_q, preload_overhead)
     if fits_q:
@@ -472,10 +483,52 @@ def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0
     }
 
 
-def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_overhead=0):
+# Auto mode never suggests more than this many free bonus slots -- beyond it, more
+# concurrent local coding sessions against one model isn't a realistic use case even
+# when memory technically allows it (and continuous-batched prefill is CPU/GPU-bound
+# too, not just memory-bound).
+AUTO_MAX_CONCURRENCY = 4
+
+
+def compute_bonus_concurrency(model_entry, free_wired_gb, kv_bits_used, recommended_context,
+                               safety_buffer_gb=SAFETY_BUFFER_GB):
+    """Auto mode (no explicit concurrency requested): recommend_kv_bits_and_context has
+    already picked the max context for ONE slot, rounded DOWN to a clean tier (see
+    recommend_max_context's own tiering comment) -- which almost always leaves some
+    memory unused. This checks whether that rounding leftover fits one or more
+    additional, identically-sized slots for free, without shrinking anyone's context,
+    and returns the total slot count (>=1)."""
+    if recommended_context is None:
+        return 1
+    formula = compute_kv_formula(model_entry.get("kv_config"),
+                                  kv_bits_used if kv_bits_used is not None else UNQUANTIZED_KV_BITS)
+    if formula is None:
+        return 1
+    bytes_per_growing_token, fixed_bytes, _ = formula
+    per_slot_bytes = fixed_bytes + bytes_per_growing_token * recommended_context
+    if per_slot_bytes <= 0:
+        return 1
+
+    available_bytes = (free_wired_gb - model_entry["size_gb"] - safety_buffer_gb) * 1024**3
+    remaining = available_bytes - per_slot_bytes
+    concurrency = 1
+    while remaining >= per_slot_bytes and concurrency < AUTO_MAX_CONCURRENCY:
+        concurrency += 1
+        remaining -= per_slot_bytes
+    return concurrency
+
+
+def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_overhead=0,
+                           requested_concurrency=None):
+    """requested_concurrency: None means auto (maximize context for 1 slot, then add
+    free bonus slots from tier-rounding leftover -- see compute_bonus_concurrency).
+    An explicit int forces that many slots, shrinking context as needed to guarantee
+    all of them fit (see recommend_max_context's concurrency param)."""
     rows = []
     for m in models:
-        kv_result = recommend_kv_bits_and_context(m, free_wired_gb, preload_overhead)
+        sizing_concurrency = requested_concurrency if requested_concurrency else 1
+        kv_result = recommend_kv_bits_and_context(m, free_wired_gb, preload_overhead,
+                                                    concurrency=sizing_concurrency)
         speed, speed_reason = estimate_speed_tok_s(m, chip_name, gpu_cores)
 
         fits = kv_result["fits"]
@@ -490,6 +543,12 @@ def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_o
             fits = False
             context_reason = "estimated_speed_too_slow"
 
+        concurrency = sizing_concurrency
+        if fits and not requested_concurrency:
+            concurrency = compute_bonus_concurrency(
+                m, free_wired_gb, kv_result["kv_bits"], kv_result["recommended_context"],
+            )
+
         rows.append({
             "model": m,
             "recommended_context": kv_result["recommended_context"],
@@ -500,6 +559,7 @@ def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_o
             "speed_reason": speed_reason,
             "context_after_preload": kv_result["context_after_preload"],
             "fits": fits,
+            "concurrency": concurrency,
         })
     return rows
 
@@ -577,6 +637,8 @@ def format_model_body_lines(m, r=None):
             lines.append(f"[KV cache quantized to {r['kv_bits']}-bit — needed to fit this context in free memory]")
         else:
             lines.append("[KV cache unquantized — full decode speed, plenty of free memory for this context]")
+        if r.get("concurrency", 1) > 1:
+            lines.append(f"[{r['concurrency']} concurrent requests supported at this context size, without exceeding safe memory]")
     return lines
 
 
@@ -597,7 +659,8 @@ def format_model_compact_row(r):
     size_str = f"{m['size_gb']:g}GB"
     ctx_str = f"{format_context_k(r['recommended_context'])} tok"
     speed_str = f"~{r['estimated_tok_s']} tok/s" if r["estimated_tok_s"] is not None else "speed unknown"
-    return f"{m['id']}\t{size_str}\t{ctx_str}\t{speed_str}"
+    conc_str = f"×{r['concurrency']} concurrent" if r["concurrency"] > 1 else "1 concurrent"
+    return f"{m['id']}\t{size_str}\t{ctx_str}\t{speed_str}\t{conc_str}"
 
 
 def print_list_compact(rows, chip_name, gpu_cores, total_ram_gb, free_wired_gb, preload=None):
@@ -657,9 +720,10 @@ def print_menu(rows, free_wired_gb, chip_name, gpu_cores, total_ram_gb, preload=
             headroom_str = ""
             if r["context_after_preload"] is not None:
                 headroom_str = f"  (~{r['context_after_preload']:,} left for conversation after preload)"
+            conc_str = f"  concurrency={r['concurrency']}" if r["concurrency"] > 1 else ""
             log(f"  {i}) {m['id']}  [{m['display']['tagline']}]")
             log(f"       size={m['size_gb']}GB  max context={m['max_context_architectural']:,} tokens  "
-                f"recommended context={r['recommended_context']:,} tokens  {speed_str}{headroom_str}")
+                f"recommended context={r['recommended_context']:,} tokens  {speed_str}{headroom_str}{conc_str}")
             for line in format_model_body_lines(m, r):
                 log(f"       {line}" if line else "")
         else:
@@ -698,6 +762,7 @@ def emit_selection_json(m, selected):
         "recommended_context": selected["recommended_context"],
         "kv_bits": selected["kv_bits"],
         "estimated_tok_s": selected["estimated_tok_s"],
+        "concurrency": selected["concurrency"],
     }))
 
 
@@ -708,6 +773,15 @@ def main():
     detail_id = _flag_value(argv, "--detail")
     resolve_id = _flag_value(argv, "--resolve")
     tool = _flag_value(argv, "--tool")
+    concurrency_flag = _flag_value(argv, "--concurrency")
+    # Explicit request wins; anything absent/invalid falls back to auto mode (None)
+    # rather than erroring, since this is a convenience override, not a required arg.
+    requested_concurrency = None
+    if concurrency_flag:
+        try:
+            requested_concurrency = max(1, int(concurrency_flag))
+        except ValueError:
+            requested_concurrency = None
 
     with open(MODELS_JSON) as f:
         catalog = json.load(f)
@@ -724,6 +798,7 @@ def main():
     rows = build_recommendations(
         models, free_wired_gb, chip_name, gpu_cores,
         preload_overhead=(preload["total"] if preload else 0),
+        requested_concurrency=requested_concurrency,
     )
 
     # Phase 6: three non-interactive presentation modes for the fzf-based picker.

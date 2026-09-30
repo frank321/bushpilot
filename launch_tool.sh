@@ -26,11 +26,29 @@ START_PROXY_SCRIPT="$SCRIPT_DIR/start_mlx_server.sh"
 
 # Must match start_mlx_server.sh's own LMS_HOME/MLX_HOST/MLX_PORT -- this script
 # never starts the server, only attaches to it, so these have to point at the exact
-# same place that script uses.
+# same place that script uses, including reading the same optional config.json.
 LMS_HOME="$HOME/.local-model-setup"
 MLX_STATE_FILE="$LMS_HOME/state/mlx-loaded.txt"
-MLX_HOST=127.0.0.1
-MLX_PORT=11435
+LMS_CONFIG_FILE="$LMS_HOME/config.json"
+CONFIG_HOST=""
+CONFIG_PORT=""
+if [[ -f "$LMS_CONFIG_FILE" ]]; then
+    eval "$(python3 - "$LMS_CONFIG_FILE" <<'PYEOF'
+import json, shlex, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+except Exception:
+    cfg = {}
+for var, key in (("CONFIG_HOST", "host"), ("CONFIG_PORT", "port")):
+    val = cfg.get(key)
+    if val is not None:
+        print(f"{var}={shlex.quote(str(val))}")
+PYEOF
+)"
+fi
+MLX_HOST="${MLX_HOST:-${CONFIG_HOST:-127.0.0.1}}"
+MLX_PORT="${MLX_PORT:-${CONFIG_PORT:-38472}}"
 
 MLX_PYTHON="$LMS_HOME/venv/bin/python"
 [[ -x "$MLX_PYTHON" ]] || MLX_PYTHON="python3"

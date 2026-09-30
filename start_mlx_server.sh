@@ -79,8 +79,50 @@ MLX_LOG_FILE="$LMS_LOG_DIR/mlx-server.log"
 
 MLX_PYTHON="$LMS_VENV/bin/python"
 MLX_SERVER_MODULE="mlx_vlm.server"
-MLX_HOST=127.0.0.1
-MLX_PORT=11435
+
+# Config file (optional): $LMS_HOME/config.json can override host/port/preferred_model/
+# concurrency below the built-in defaults. Precedence: MLX_HOST/MLX_PORT env var (if
+# exported by the caller) > config.json > hardcoded default here. 38472 is deliberately
+# NOT 8000/3000/5000/8080 (common dev-server ports) or 11434 (Ollama's default, one off
+# from this project's old 11435) -- picked to avoid colliding with other local software.
+#
+# "concurrency" is left UNSET (empty CONFIG_CONCURRENCY, auto mode) by default rather
+# than defaulting to 1 here -- auto mode still maximizes context for one slot first,
+# then adds free bonus slots from tier-rounding leftover (see model_advisor.py's
+# compute_bonus_concurrency), which is strictly better than a hardcoded 1 whenever
+# there's slack. Set an explicit integer to force that many slots instead, trading
+# context size for guaranteed concurrency.
+LMS_CONFIG_FILE="$LMS_HOME/config.json"
+CONFIG_HOST=""
+CONFIG_PORT=""
+CONFIG_PREFERRED_MODEL=""
+CONFIG_CONCURRENCY=""
+if [[ -f "$LMS_CONFIG_FILE" ]]; then
+    eval "$(python3 - "$LMS_CONFIG_FILE" <<'PYEOF'
+import json, shlex, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+except Exception:
+    cfg = {}
+for var, key in (("CONFIG_HOST", "host"), ("CONFIG_PORT", "port"),
+                 ("CONFIG_PREFERRED_MODEL", "preferred_model"), ("CONFIG_CONCURRENCY", "concurrency")):
+    val = cfg.get(key)
+    if val is not None:
+        print(f"{var}={shlex.quote(str(val))}")
+PYEOF
+)"
+fi
+MLX_HOST="${MLX_HOST:-${CONFIG_HOST:-127.0.0.1}}"
+MLX_PORT="${MLX_PORT:-${CONFIG_PORT:-38472}}"
+# Resolved to an actual integer once model selection completes (interactive path) or
+# right below (fixed-model path) -- 1 is the safe fallback if nothing ever sets it.
+CONCURRENCY=1
+CONCURRENCY_FLAG=()
+if [[ -n "$CONFIG_CONCURRENCY" ]]; then
+    CONCURRENCY_FLAG=(--concurrency "$CONFIG_CONCURRENCY")
+    [[ "$INTERACTIVE" == "false" ]] && CONCURRENCY="$CONFIG_CONCURRENCY"
+fi
 
 # Panel finding (GLM, high): the LiteLLM-removal decision rests on this specific
 # installed mlx-vlm version's behavior (native /v1/messages routes, /metrics's
@@ -404,9 +446,9 @@ bootstrap_mlx() {
 # install.
 run_fzf_model_picker() {
     local selection selected_id
-    local preview_cmd="\"$MLX_PYTHON\" \"$SCRIPT_DIR/model_advisor.py\" --detail {1}"
+    local preview_cmd="\"$MLX_PYTHON\" \"$SCRIPT_DIR/model_advisor.py\" --detail {1} ${CONCURRENCY_FLAG[*]}"
 
-    selection="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact | fzf \
+    selection="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact "${CONCURRENCY_FLAG[@]}" | fzf \
         --delimiter=$'\t' \
         --preview "$preview_cmd" --preview-window down:50%:wrap \
         --prompt="Model> " --height=~80% --layout=reverse)"
@@ -416,7 +458,7 @@ run_fzf_model_picker() {
     fi
 
     selected_id="$(printf '%s' "$selection" | cut -f1)"
-    if ! "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --resolve "$selected_id"; then
+    if ! "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --resolve "$selected_id" "${CONCURRENCY_FLAG[@]}"; then
         log_error "Could not resolve '$selected_id' -- free memory may have changed since the list was shown. Try again."
         return 1
     fi
@@ -429,9 +471,11 @@ run_interactive_selection() {
     log_info "Detecting hardware and free memory for model recommendations..."
 
     local advisor_output
-    if is_command_available fzf; then
+    if [[ -n "$CONFIG_PREFERRED_MODEL" ]] && advisor_output=$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --resolve "$CONFIG_PREFERRED_MODEL" "${CONCURRENCY_FLAG[@]}" 2>/dev/null); then
+        log_success "Using preferred_model from config.json: $CONFIG_PREFERRED_MODEL"
+    elif is_command_available fzf; then
         advisor_output="$(run_fzf_model_picker)" || exit 1
-    elif ! advisor_output=$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py"); then
+    elif ! advisor_output=$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" "${CONCURRENCY_FLAG[@]}"); then
         log_error "Model selection cancelled or failed."
         exit 1
     fi
@@ -440,6 +484,7 @@ run_interactive_selection() {
     LOCAL_MODEL=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['id'])" "$advisor_output")
     CONTEXT_WINDOW=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['recommended_context'])" "$advisor_output")
     KV_BITS=$("$MLX_PYTHON" -c "import json,sys; v=json.loads(sys.argv[1])['kv_bits']; print(v if v is not None else '')" "$advisor_output")
+    CONCURRENCY=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['concurrency'])" "$advisor_output")
 
     local kv_bits_log="unquantized (full decode speed — recommended context already fits free memory)"
     if [[ -n "$KV_BITS" ]]; then
@@ -447,6 +492,9 @@ run_interactive_selection() {
     fi
     log_success "Selected $LOCAL_MODEL ($MLX_MODEL) — context set to ${CONTEXT_WINDOW} tokens (computed from your current free memory)"
     log_success "KV cache: $kv_bits_log"
+    if [[ "$CONCURRENCY" -gt 1 ]]; then
+        log_success "Concurrency: $CONCURRENCY slots (free bonus from tier-rounding leftover, or your config.json override)"
+    fi
 }
 
 # Pre-downloads the model via snapshot_download() BEFORE the server ever starts.
@@ -625,6 +673,12 @@ ensure_mlx_running() {
         --port "$MLX_PORT"
         --max-kv-size "$CONTEXT_WINDOW"
         --prefill-step-size "$PREFILL_STEP_SIZE"
+        # Server's own default is UNBOUNDED concurrent sequences -- since
+        # recommend_max_context already sizes CONTEXT_WINDOW's memory footprint for
+        # exactly $CONCURRENCY slots (see model_advisor.py), leaving this unset would
+        # let an (N+1)th concurrent request allocate a KV cache with zero memory
+        # headroom reserved for it -- the exact crash this project exists to prevent.
+        --max-num-seqs "$CONCURRENCY"
     )
     if [[ -n "$KV_BITS" ]]; then
         mlx_args+=(
@@ -746,10 +800,10 @@ render_dashboard() {
     clear
     "$MLX_PYTHON" - "$metrics_json" "$cache_json" "$MLX_MODEL" "$MLX_PORT" "$CONTEXT_WINDOW" \
         "$elapsed_fmt" "${APC_ENABLED}" "${pct_free:-?}" "$pressure_name" "${mlx_rss:-?}" "$TEARDOWN_REASON" \
-        "$SCRIPT_DIR/launch_tool.sh" "${connected_clients:-}" <<'PYEOF'
+        "$SCRIPT_DIR/launch_tool.sh" "${connected_clients:-}" "$MLX_HOST" "$CONCURRENCY" <<'PYEOF'
 import json, sys
 
-metrics_raw, cache_raw, model, port, context, uptime, apc_on, pct_free, pressure, rss, teardown_reason, launch_cmd, connected = sys.argv[1:14]
+metrics_raw, cache_raw, model, port, context, uptime, apc_on, pct_free, pressure, rss, teardown_reason, launch_cmd, connected, host, concurrency = sys.argv[1:16]
 
 def safe_json(s):
     try:
@@ -779,7 +833,8 @@ def gb(v):
 
 print("┌" + "─" * (W - 2) + "┐")
 line(f"local-model-setup  {model}  up {uptime}")
-line(f"port {port}   context {context}   APC: {'on' if apc_on == '1' else 'off'}")
+line(f"API endpoint  http://{host}:{port}/v1   (OpenAI-compatible -- point any tool here)")
+line(f"context {context}   concurrency {concurrency}   APC: {'on' if apc_on == '1' else 'off'}")
 rule()
 line(f"REQUESTS        completed {num(summary.get('requests_completed'), 0)}   "
      f"failed {num(summary.get('requests_failed'), 0)}   in-flight {num(summary.get('in_flight'), 0)}")
