@@ -191,15 +191,22 @@ MEM_ABORT_CONSECUTIVE_POLLS=3
 
 DASHBOARD_POLL_INTERVAL=5
 
-# Use Python's certifi CA bundle if available, fall back to system default.
-CERT_PATH=$(python3 -c "import certifi; print(certifi.where())" 2>/dev/null) || true
-if [[ -z "$CERT_PATH" || ! -f "$CERT_PATH" ]]; then
-    for cert_file in /etc/ssl/cert.pem /usr/local/etc/openssl/cert.pem /opt/homebrew/etc/openssl@3/cert.pem; do
-        if [ -f "$cert_file" ]; then
-            CERT_PATH="$cert_file"
-            break
-        fi
-    done
+# Respect an already-set SSL_CERT_FILE (e.g. a corporate TLS-interception-aware
+# bundle exported in ~/.zshrc) -- overriding it with certifi's bundle would drop
+# the intercepting root CA and break every HTTPS download behind such a proxy.
+# Otherwise use Python's certifi CA bundle if available, fall back to system default.
+if [[ -n "${SSL_CERT_FILE:-}" && -f "${SSL_CERT_FILE:-}" ]]; then
+    CERT_PATH="$SSL_CERT_FILE"
+else
+    CERT_PATH=$(python3 -c "import certifi; print(certifi.where())" 2>/dev/null) || true
+    if [[ -z "$CERT_PATH" || ! -f "$CERT_PATH" ]]; then
+        for cert_file in /etc/ssl/cert.pem /usr/local/etc/openssl/cert.pem /opt/homebrew/etc/openssl@3/cert.pem; do
+            if [ -f "$cert_file" ]; then
+                CERT_PATH="$cert_file"
+                break
+            fi
+        done
+    fi
 fi
 if [[ -n "$CERT_PATH" ]]; then
     export SSL_CERT_FILE="$CERT_PATH"

@@ -79,20 +79,27 @@ the fuller decision-record/research version of what's summarized here.
   See `resolve_serving_config()` for the fixed pattern; copy that style for any future
   eval+heredoc inside a function.
 
-- **This dev sandbox has a broken corporate TLS proxy.** Python's `httpx`/`ssl`
-  (via `huggingface_hub`) fails with either `CERTIFICATE_VERIFY_FAILED` (custom CA
-  bundle in `~/.zshrc`'s `SSL_CERT_FILE` has a cert with a non-compliant Basic
-  Constraints extension) or `unable to get local issuer certificate` (system bundle
-  doesn't have the intercepting corporate root at all). Plain `curl` works fine
-  (LibreSSL is lenient). This is environment-specific, not a bug in any of the code
-  written this session — don't try to "fix" it in the scripts. Workaround used for
-  testing: fetch real commit hash via `curl` to `https://huggingface.co/api/models/{repo}`,
-  then build a real `huggingface_hub`-compatible cache layout by hand (blobs/ +
-  snapshots/{realcommit}/ symlinks + refs/main) using files already on disk from
-  earlier `curl`-based downloads. `mlx-dspark`'s own internal resolver is stricter than
-  a hand-rolled fake cache (rejected a fake revision name) — it needs the REAL commit
-  hash and REAL huggingface_hub blob/symlink structure to accept a cache as complete
-  without touching the network.
+- **This dev sandbox sits behind a corporate TLS-intercepting proxy.**
+  Historically this broke every Python HTTPS download (`huggingface_hub`/
+  `httpx`) two ways: `unable to get local issuer certificate` (bundle without
+  the intercepting corporate root) or `Basic Constraints of CA cert not marked
+  critical` (bundle with it). **Root cause was two-fold and BOTH halves are now
+  fixed (2026-09-30):** (1) Python 3.14 enables `VERIFY_X509_STRICT` by default and
+  the intercepting corporate root CA is non-compliant (non-critical Basic
+  Constraints, no keyUsage) — fixed by patching the copy of that root in the
+  machine-local CA bundle pointed to by `~/.zshrc`'s `SSL_CERT_FILE`
+  (BC marked critical, critical keyCertSign keyUsage added; trust-anchor
+  self-signatures aren't checked by OpenSSL, so the DER surgery is safe —
+  verified by a live strict-mode handshake to huggingface.co; the original
+  bundle is backed up alongside it). This bundle is machine-local and must
+  NEVER be committed to the repo. (2) `start_mlx_server.sh` used to
+  clobber the user's `SSL_CERT_FILE` (pointing at that interception-aware
+  bundle) with certifi's — it now respects an already-set, valid `SSL_CERT_FILE`,
+  and falls back to certifi / the system bundle on machines where it is unset,
+  so the script stays fully portable to non-intercepted networks.
+  Plain `curl` always worked (LibreSSL is lenient). The old hand-built
+  curl-cache workaround should no longer be needed — `snapshot_download` now
+  works directly.
 
 - **`mlx-dspark`'s `verdict.headline` field is unreliable** — observed live saying
   "No decode measured yet" in the same `/metrics` response where
