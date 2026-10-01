@@ -29,6 +29,7 @@ Usage:
                                                 servers) — see estimate_preload_overhead
 """
 import json
+import math
 import os
 import re
 import subprocess
@@ -427,7 +428,7 @@ def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BIT
 def estimate_speed_tok_s(model_entry, chip_name, gpu_cores):
     """Returns (estimate_or_None, reason_string). Deliberately returns None rather than
     a guess when we don't have real active-weight data — see gemma-4-26b-a4b-it-4bit's
-    entry below, whose MoE routing config is missing num_experts_per_tok.
+    entry if its active_weight_gb were ever removed.
 
     A "serving" block's measured_speedup (see models.json's _schema_notes.serving) is
     applied AFTER the base bandwidth estimate below, as a multiplier -- not as a flat
@@ -447,7 +448,7 @@ def estimate_speed_tok_s(model_entry, chip_name, gpu_cores):
 
     active_gb = model_entry.get("active_weight_gb")
     if active_gb is None:
-        if model_entry.get("is_moe"):
+        if model_entry.get("type") == "moe":
             return None, "MoE model with unknown active-parameter fraction — no reliable estimate without a live benchmark"
         active_gb = model_entry["size_gb"]  # dense model: full weight size is the active weight
 
@@ -622,7 +623,16 @@ def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_o
 
 
 DIM = "\033[2m"
+BOLD = "\033[1m"
 RESET = "\033[0m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+
+
+def use_color():
+    """Color only on a real terminal and when NO_COLOR isn't set. stdout is a pipe into
+    fzf here, so the TTY check is on stderr (where the banner is painted)."""
+    return "NO_COLOR" not in os.environ and sys.stderr.isatty()
 
 
 def print_preload_banner(preload):
@@ -705,43 +715,275 @@ def format_context_k(tokens):
     return f"{round(tokens / 1000)}K"
 
 
-def format_model_compact_row(r):
-    """One tab-delimited row for --list-compact: id\\tsize\\tcontext\\tspeed. Column 1
-    (id) is hidden from fzf's display via --with-nth=2.. and used only internally (the
-    preview command, and the final --resolve call once selected)."""
+DRAFTER_LABELS = {"dflash": "DFlash", "mtp": "MTP", "eagle3": "EAGLE3"}
+DRAFTER_ID_SUFFIXES = ("-dflash-vlm", "-dflash", "-mtp")
+
+
+def model_engine(m):
+    """Inference engine that serves this entry. Entries without a serving block run on
+    plain mlx_vlm.server (see models.json's _schema_notes.serving)."""
+    return (m.get("serving") or {}).get("backend", "mlx_vlm")
+
+
+def model_drafter_label(m):
+    """Speculative-decoding method of the attached drafter ('DFlash', 'MTP', ...), or '—'
+    when the entry has no drafter. mlx_dspark entries carry it in `mode`, mlx_vlm entries
+    in `draft_kind`."""
+    sv = m.get("serving") or {}
+    if not (sv.get("drafter") or sv.get("draft_model")):
+        return "—"
+    kind = sv.get("draft_kind") or sv.get("mode") or "?"
+    return DRAFTER_LABELS.get(kind, kind)
+
+
+def model_display_name(m):
+    """The id minus its engine/drafter suffix, since those have their own columns. Display
+    only -- the full id stays the unique key for selection, config.json and the CLI."""
+    if model_drafter_label(m) == "—":
+        return m["id"]
+    for suffix in DRAFTER_ID_SUFFIXES:
+        if m["id"].endswith(suffix):
+            return m["id"][: -len(suffix)]
+    return m["id"]
+
+
+def model_input_label(m):
+    """Input modalities this entry actually serves, e.g. 'text+img+vid'. The model's own
+    `modalities` are narrowed to text when the serving variant drops the vision tower
+    (serving.multimodal_capable false -- every mlx_dspark entry)."""
+    if (m.get("serving") or {}).get("multimodal_capable") is False:
+        mods = {"text"}
+    else:
+        mods = set(m.get("modalities") or ["text"])
+    return "+".join(["text"] + [lbl for key, lbl in (("image", "img"), ("video", "vid")) if key in mods])
+
+
+def model_tools_label(m):
+    """Whether the server returns structured tool_calls for this model, per its recorded
+    tool_calling test ('tools' / 'no tools'); 'tools?' when it has never been tested."""
+    verdict = (m.get("tool_calling") or {}).get("verdict")
+    return {"SUPPORTED": "tools", "NOT_SUPPORTED": "no tools"}.get(verdict, "tools?")
+
+
+def short_unavailable_reason(r, free_wired_gb, preload=None):
+    """One-line version of describe_unavailable_reason for the greyed-out picker rows,
+    with the actual numbers where we have them."""
+    if r["context_reason"] == "insufficient_memory_for_model_weights":
+        need = effective_size_gb(r["model"]) + SAFETY_BUFFER_GB
+        return f"needs ~{math.ceil(need)} GB free, you have {free_wired_gb:.0f} GB"
+    return describe_unavailable_reason(r, preload)
+
+
+def compact_row_cells(r, reason=None):
+    """Plain-text cells of one --list-compact row, in display order: name (with a leading
+    tested/untested marker), type, engine, drafter, input, tools, released, size, context,
+    KV-cache precision, speed, and a last column (concurrency, or why the model doesn't fit when `reason` is
+    given)."""
+    m = r["model"]
+    if r["fits"]:
+        ctx_str = f"{format_context_k(r['recommended_context'])} tok"
+        kv_str = f"{r['kv_bits']}-bit" if r["kv_bits"] else f"{UNQUANTIZED_KV_BITS}-bit"
+    else:
+        ctx_str = kv_str = "—"
+    mark = "○" if m.get("status") == "untested" else "✓"
+    speed = f"~{r['estimated_tok_s']} tok/s" if r["estimated_tok_s"] is not None else (
+        "speed unknown" if r["fits"] else "—")
+    return [
+        f"{mark} {model_display_name(m)}",
+        "MoE" if m.get("type") == "moe" else "Dense",
+        model_engine(m),
+        model_drafter_label(m),
+        model_input_label(m),
+        model_tools_label(m),
+        m.get("released") or "—",
+        f"{m['size_gb']:g}GB",
+        ctx_str,
+        kv_str,
+        speed,
+        reason or (f"×{r['concurrency']} concurrent" if r["concurrency"] > 1 else "1 concurrent"),
+    ]
+
+
+# Column indexes in compact_row_cells. Numeric columns right-align, text columns
+# left-align; the last column is never padded.
+COL_ENGINE, COL_SIZE, COL_CTX, COL_KV, COL_SPEED, COL_LAST = 2, 7, 8, 9, 10, 11
+COMPACT_RIGHT_ALIGNED = {COL_SIZE, COL_SPEED}
+
+
+# Header words double as --sort values (fzf's click-header passes the clicked word), so
+# each is a single lowercase-able word that SORT_KEYS below accepts. The first cell is
+# indented past the "✓ " tested marker so "Name" sits over the model names.
+COMPACT_HEADERS = ["  Name", "Type", "Engine", "Drafter", "Input", "Tools", "Released",
+                   "Size", "Context", "KV", "Speed", "Notes"]
+
+
+def compact_row_widths(rows):
+    """Max width of each padded column across `rows`, never narrower than its header plus
+    room for the " ▼" sort arrow, so the columns don't shift when the sort changes."""
+    cells = [compact_row_cells(r) for r in rows]
+    return tuple(max([len(COMPACT_HEADERS[k]) + 2] + [len(c[k]) for c in cells]) for k in range(COL_LAST))
+
+
+def format_compact_header_row(widths, sort_key=None, descending=False):
+    """First line of --list-compact, consumed by fzf's --header-lines=1: same
+    `id<TAB>display<TAB>reason` shape as a data row (so --with-nth applies to it
+    identically and the columns line up), id left as a placeholder. The column the list
+    is currently sorted by gets a ▼ (high to low / newest first) or ▲ (low to high / A-Z)."""
+    labels = list(COMPACT_HEADERS)
+    if sort_key in COLUMN_SORT_KEYS:
+        k = COLUMN_SORT_KEYS.index(sort_key)
+        labels[k] += " ▼" if descending else " ▲"
+    padded = [h.rjust(widths[k]) if k in COMPACT_RIGHT_ALIGNED else h.ljust(widths[k])
+              for k, h in enumerate(labels[:COL_LAST])]
+    line = "  ".join(padded + [labels[COL_LAST]])
+    return f"-\t{BOLD + line + RESET if use_color() else line}\t"
+
+
+def format_model_compact_row(r, widths=None, reason=None):
+    """One row for --list-compact: `id<TAB>display<TAB>reason`. Field 1 (id) is used
+    internally (fzf's {1} for the preview command, `cut -f1` for the final --resolve
+    call); field 2 is what fzf shows and matches against (the caller hides the others
+    with --with-nth=2); field 3 is empty for models that fit and the why-not text for
+    the ones that don't, so the caller can refuse them. Columns are padded to `widths`
+    (computed across all rows by print_list_compact) so they line up -- tab stops alone
+    don't."""
     # No known_issues marker here -- every model in this catalog carries some caveat
     # note (severity varies widely), so it wouldn't discriminate anything in this
     # compact view. Full known_issues text is always in the --detail preview pane.
-    m = r["model"]
-    size_str = f"{m['size_gb']:g}GB"
-    ctx_str = f"{format_context_k(r['recommended_context'])} tok"
-    speed_str = f"~{r['estimated_tok_s']} tok/s" if r["estimated_tok_s"] is not None else "speed unknown"
-    conc_str = f"×{r['concurrency']} concurrent" if r["concurrency"] > 1 else "1 concurrent"
-    return f"{m['id']}\t{size_str}\t{ctx_str}\t{speed_str}\t{conc_str}"
+    cells = compact_row_cells(r, reason)
+    w = widths or (0,) * COL_LAST
+    padded = [c.rjust(w[k]) if k in COMPACT_RIGHT_ALIGNED else c.ljust(w[k])
+              for k, c in enumerate(cells[:COL_LAST])]
+    line = "  ".join(padded + [cells[COL_LAST]])
+    if use_color():
+        if not r["fits"]:
+            line = f"{DIM}{line}{RESET}"
+        else:
+            # Named 16-color ANSI only (never 256/RGB), so the user's terminal decides
+            # the actual hues. Green = fits unquantized; yellow = needs KV quantization
+            # to fit. Meaning is also carried by the KV column text.
+            hue = YELLOW if r["kv_bits"] else GREEN
+            padded[COL_CTX] = f"{hue}{padded[COL_CTX]}{RESET}"
+            padded[COL_KV] = f"{hue}{padded[COL_KV]}{RESET}"
+            padded[COL_ENGINE] = f"{DIM}{padded[COL_ENGINE]}{RESET}"
+            line = "  ".join(padded + [f"{DIM}{cells[COL_LAST]}{RESET}"])
+    return f"{r['model']['id']}\t{line}\t{reason or ''}"
 
 
-def print_list_compact(rows, chip_name, gpu_cores, total_ram_gb, free_wired_gb, preload=None):
-    """--list-compact: the fzf-facing presentation mode. Fitting models' compact rows
-    go to stdout (fzf's list input); everything else (header banner, hidden-model
-    summary) goes to stderr, so it's visible in the terminal right above where fzf
-    paints -- same pattern print_menu already uses for its own banner."""
-    log(f"  Local Model Advisor — {chip_name or 'unknown chip'}   "
-        f"RAM: {total_ram_gb or '?'}GB   Free: {free_wired_gb:.1f}GB")
-    if preload:
-        print_preload_banner(preload)
+SORT_KEYS = ("released", "speed", "size", "name", "type", "engine", "drafter", "input",
+             "tools", "context", "kv")
 
-    fitting = [r for r in rows if r["fits"]]
-    not_fitting = [r for r in rows if not r["fits"]]
+# Sort key for each compact_row_cells column (None = not sortable), for header clicks.
+COLUMN_SORT_KEYS = ("name", "type", "engine", "drafter", "input", "tools", "released",
+                    "size", "context", "kv", "speed", None)
 
-    for r in fitting:
-        print(format_model_compact_row(r))
 
-    if not_fitting:
-        reasons = {describe_unavailable_reason(r, preload) for r in not_fitting}
-        reason_txt = reasons.pop() if len(reasons) == 1 else "various reasons"
-        log(f"  {len(fitting)}/{len(rows)} models shown ({len(not_fitting)} hidden: {reason_txt})")
+def sort_key_for_click(char_index, widths):
+    """Map fzf's FZF_CLICK_HEADER_COLUMN (1-based character index into the displayed
+    header line, calibrated against fzf 0.74: index 1 is the first character of the
+    header text, indent excluded) to the sort key of the column under it. Clicks in the
+    2-space gap between columns count toward the column on their left."""
+    start = 1
+    chosen = None
+    for k in range(COL_LAST + 1):
+        if char_index >= start:
+            chosen = COLUMN_SORT_KEYS[k]
+        width = widths[k] if k < COL_LAST else len(COMPACT_HEADERS[COL_LAST])
+        start += width + 2
+    return chosen
 
-    return fitting
+
+# Keys whose natural order is high-to-low / newest-first; the rest are A-Z.
+DESCENDING_SORT_KEYS = {"released", "speed", "size", "context", "kv", "input", "tools"}
+
+
+def sort_rows(rows, sort_key, reverse=False):
+    """Tested-and-fitting first, then untested-and-fitting, then the models that don't
+    fit -- under every sort, so a fast untested model never outranks a tested one --
+    and `sort_key` orders within each group. Numeric/date keys (released, speed, size,
+    context, kv) put the biggest or newest first with missing values last; the rest sort
+    A-Z; `reverse` flips that within each group (the groups themselves never move). Ties
+    keep a model's variants together by name. Stable sorts, innermost first. Returns
+    (rows, descending) where `descending` is the direction actually applied."""
+    def display(r):
+        m = r["model"]
+        return (model_display_name(m), model_engine(m), model_drafter_label(m))
+
+    keys = {
+        "released": lambda r: r["model"].get("released") or "",
+        "speed": lambda r: r["estimated_tok_s"] if r["estimated_tok_s"] is not None else -1,
+        "size": lambda r: r["model"]["size_gb"],
+        "context": lambda r: r["recommended_context"] or 0,
+        "kv": lambda r: (r["kv_bits"] or UNQUANTIZED_KV_BITS) if r["fits"] else 0,
+        # more modalities first; "tools" first, then untested, then no tools
+        "input": lambda r: len(compact_row_cells(r)[4]),
+        "tools": lambda r: {"tools": 2, "tools?": 1, "no tools": 0}[model_tools_label(r["model"])],
+        "type": lambda r: r["model"].get("type", "dense"),
+        "engine": lambda r: model_engine(r["model"]),
+        "drafter": lambda r: model_drafter_label(r["model"]),
+        "name": display,
+    }
+    descending = (sort_key in DESCENDING_SORT_KEYS) != reverse
+    rows = sorted(rows, key=display)
+    rows.sort(key=keys[sort_key], reverse=descending)
+    rows.sort(key=lambda r: (not r["fits"], r["model"].get("status") == "untested"))
+    return rows, descending
+
+
+def next_sort(requested_key, state_path):
+    """Pick the sort for this render and remember it in `state_path` ("key reversed").
+    Asking for the key the list is already sorted by flips its direction -- clicking the
+    same header twice reverses it -- while a different key starts in its natural order.
+    requested_key None (a click on a non-sortable spot) keeps the current sort as is."""
+    prev_key, prev_rev = None, False
+    if state_path:
+        try:
+            with open(state_path) as f:
+                prev_key, flag = f.read().split()
+                prev_rev = flag == "1"
+        except (OSError, ValueError):
+            pass
+    if requested_key is None:
+        key, rev = (prev_key, prev_rev) if prev_key in SORT_KEYS else ("released", False)
+    elif requested_key == prev_key:
+        key, rev = requested_key, not prev_rev
+    else:
+        key, rev = requested_key, False
+    if state_path:
+        try:
+            with open(state_path, "w") as f:
+                f.write(f"{key} {int(rev)}")
+        except OSError:
+            pass
+    return key, rev
+
+
+def print_list_compact(rows, chip_name, gpu_cores, total_ram_gb, free_wired_gb, preload=None,
+                       sort_key="released", banner=True, sort_col=None, sort_state=None):
+    """--list-compact: the fzf-facing presentation mode. Every catalog model is listed;
+    the ones that don't fit your free memory are dimmed and carry the reason, so you can
+    see what a bigger machine would unlock. Rows go to stdout (fzf's list input); the
+    header banner goes to stderr, so it's visible in the terminal right above where fzf
+    paints (suppressed with banner=False when fzf re-runs this to re-sort). `sort_col`
+    is a header click (see sort_key_for_click); `sort_state` is the file remembering the
+    current sort so a second request for the same key reverses it (see next_sort)."""
+    fitting_count = sum(1 for r in rows if r["fits"])
+    if banner:
+        log(f"  Local Model Advisor — {chip_name or 'unknown chip'}   "
+            f"RAM: {total_ram_gb or '?'}GB   Free: {free_wired_gb:.1f}GB   "
+            f"{fitting_count}/{len(rows)} models fit")
+        if preload:
+            print_preload_banner(preload)
+
+    widths = compact_row_widths(rows)
+    requested = sort_key_for_click(sort_col, widths) if sort_col is not None else sort_key
+    sort_key, reverse = next_sort(requested, sort_state)
+    rows, descending = sort_rows(rows, sort_key, reverse)
+    print(format_compact_header_row(widths, sort_key, descending))
+    for r in rows:
+        reason = None if r["fits"] else short_unavailable_reason(r, free_wired_gb, preload)
+        print(format_model_compact_row(r, widths, reason))
+    return [r for r in rows if r["fits"]]
 
 
 def print_menu(rows, free_wired_gb, chip_name, gpu_cores, total_ram_gb, preload=None):
@@ -901,7 +1143,16 @@ def main():
         return
 
     if list_compact:
-        print_list_compact(rows, chip_name, gpu_cores, total_ram_gb, free_wired_gb, preload)
+        # fzf's click-header passes whatever word was clicked ("Notes", "✓", ...), so an
+        # unrecognized value falls back to the default instead of failing the reload.
+        sort_key = (_flag_value(argv, "--sort") or "").lower()
+        if sort_key not in SORT_KEYS:
+            sort_key = "released"
+        sort_col = _flag_value(argv, "--sort-col")
+        print_list_compact(rows, chip_name, gpu_cores, total_ram_gb, free_wired_gb, preload,
+                           sort_key=sort_key, banner="--no-banner" not in argv,
+                           sort_col=int(sort_col) if sort_col and sort_col.isdigit() else None,
+                           sort_state=_flag_value(argv, "--sort-state"))
         return
 
     if list_json:

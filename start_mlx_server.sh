@@ -582,38 +582,70 @@ ensure_backend_installed() {
 # model_advisor.py's own --resolve output (the same JSON contract the plain-menu path
 # already produces) on success, or returns non-zero on cancel/failure.
 #
-# NOTE: deliberately NOT using --with-nth to hide the id column. Confirmed live
-# (fzf 0.74.4) that --with-nth restricts fuzzy MATCHING to only the displayed fields,
-# not just their presentation -- hiding the id column would make "type to filter" not
-# match on model name at all, the opposite of the locked design's own mockup (which
-# shows the id as the first visible column and explicitly promises "Type to filter").
-# Showing all 4 tab fields (id/size/context/speed) keeps both display and search
-# matching the mockup; `cut -f1` below extracts the id from the accepted line without
-# depending on a newer fzf feature (--accept-nth) that may not exist on an older
-# install.
+# NOTE: rows are `id<TAB>display<TAB>reason`. --with-nth=2 hides field 1 (the bare id,
+# used for {1} in the preview and `cut -f1` below) and field 3 from view AND from
+# matching (confirmed live on fzf 0.74.4), so model_advisor.py's display text in field 2
+# carries everything worth typing a filter against (name, engine, drafter, ...).
+# Field 3 is empty for models that fit and the why-not text for the dimmed ones; fzf
+# can't make a row unselectable, so picking a dimmed row explains why and reopens.
+# Ctrl-R/S/T/O re-run the list command with a different --sort via fzf's reload.
 run_fzf_model_picker() {
-    local selection selected_id
+    local selection selected_id reason
     # preview_cmd is a double-quoted STRING re-parsed by fzf, so the empty-safe
     # array idiom can't be used inline here -- build it conditionally instead
     # (the ${#arr[@]} length expansion is safe on empty arrays under set -u even
     # on bash 3.2).
     local preview_cmd="\"$MLX_PYTHON\" \"$SCRIPT_DIR/model_advisor.py\" --detail {1}"
     [[ ${#ADVISOR_FLAGS[@]} -gt 0 ]] && preview_cmd+=" ${ADVISOR_FLAGS[*]}"
+    # system_profiler prints a hw.cpufamily line to stderr on every call; fzf would show it.
+    preview_cmd+=" 2>/dev/null"
 
-    selection="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} | fzf \
-        --delimiter=$'\t' \
-        --preview "$preview_cmd" --preview-window down:50%:wrap \
-        --prompt="Model> " --height=~80% --layout=reverse)"
-    if [[ -z "$selection" ]]; then
-        log_error "Model selection cancelled or no model available."
-        return 1
-    fi
+    # Shell-quoted list command for fzf's reload bindings (no banner: the banner goes
+    # to stderr and would scribble over fzf's screen).
+    local list_cmd
+    # --sort-state remembers the current sort between reloads so asking for the same
+    # column twice (key or header click) reverses it.
+    local sort_state="$BUSHPILOT_STATE_DIR/picker-sort.state"
+    list_cmd="$(printf '%q ' "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact --no-banner --sort-state "$sort_state" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"})"
 
-    selected_id="$(printf '%s' "$selection" | cut -f1)"
-    if ! "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --resolve "$selected_id" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"}; then
-        log_error "Could not resolve '$selected_id' -- free memory may have changed since the list was shown. Try again."
-        return 1
-    fi
+    local header_text=$'Models fit, context size and speed are calculated live for your hardware (chip + free memory); speed is an estimate.\n↑↓ move · type to filter · Enter select · Esc cancel\nSort: click a column header (again to reverse), or ^R newest · ^S fastest · ^T largest · ^O name\ngreen = fits as-is · yellow = KV-quantized to fit · dim = does not fit · ✓ tested · ○ untested'
+    # The column-header row sits right below fzf's --header lines; a click-header event
+    # reports which line was clicked, and only that row should trigger a re-sort.
+    local header_row=$(( $(printf '%s\n' "$header_text" | wc -l) + 1 ))
+
+    while true; do
+        : > "$sort_state"   # every (re)opened picker starts from the default sort
+        selection="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact --sort-state "$sort_state" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} | fzf \
+            --delimiter=$'\t' --with-nth=2 \
+            --preview "$preview_cmd" --preview-window down:50%:wrap \
+            --bind "ctrl-r:reload($list_cmd --sort released 2>/dev/null)" \
+            --bind "ctrl-s:reload($list_cmd --sort speed 2>/dev/null)" \
+            --bind "ctrl-t:reload($list_cmd --sort size 2>/dev/null)" \
+            --bind "ctrl-o:reload($list_cmd --sort name 2>/dev/null)" \
+            --bind "click-header:transform:[ \"\$FZF_CLICK_HEADER_LINE\" = $header_row ] && echo \"reload($list_cmd --sort-col \$FZF_CLICK_HEADER_COLUMN 2>/dev/null)\"" \
+            --header-lines=1 \
+            --ansi --border=rounded --pointer="▶" \
+            --header="$header_text" \
+            --prompt="Model> " --height=~80% --layout=reverse)"
+        if [[ -z "$selection" ]]; then
+            log_error "Model selection cancelled or no model available."
+            return 1
+        fi
+
+        selected_id="$(printf '%s' "$selection" | cut -f1)"
+        reason="$(printf '%s' "$selection" | cut -f3)"
+        if [[ -n "$reason" ]]; then
+            echo "[INFO] $selected_id doesn't fit this machine right now: $reason" >&2
+            read -r -p "Press Enter to pick another model... " _ </dev/tty || true
+            continue
+        fi
+
+        if ! "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --resolve "$selected_id" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"}; then
+            log_error "Could not resolve '$selected_id' -- free memory may have changed since the list was shown. Try again."
+            return 1
+        fi
+        return 0
+    done
 }
 
 # Interactive model selection (Phase 2: no --tool factored in here anymore -- the

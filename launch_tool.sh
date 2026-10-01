@@ -131,6 +131,8 @@ pick_tool() {
     if is_command_available fzf; then
         local selection
         selection="$(printf '%s\n' "${rows[@]}" | fzf --delimiter=$'\t' --with-nth=2.. \
+            --border=rounded --pointer="▶" \
+            --header="↑↓ move · Enter select · Esc cancel" \
             --prompt="Launch which tool> " --height=~40% --layout=reverse)" || exit 1
         printf '%s' "$selection" | cut -f1
         return
