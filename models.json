@@ -2,10 +2,15 @@
     "_comment": "Candidate local models for start_litellm_proxy.sh's interactive menu, served via mlx_vlm.server (not Ollama — see LITELLM_PROXY_USAGE.md for why). Every entry here has been through verify_max_kv_size.sh with verdict SAFE before being added; do not add a model to this file without running that script first. 'display' fields are shown to the user when picking a model, in plain language they can act on without reading the underlying research docs.",
     "_schema_notes": {
         "serving": "OPTIONAL block. Absent entirely = today's default behavior unchanged: launch_mlx_server.sh serves this entry via mlx_vlm.server with no drafter attached. When present, 'backend' selects which of the two adapter code paths the launcher uses to build its argv -- 'mlx_vlm' (same mlx_vlm.server process as always, optionally with --draft-model/--draft-kind/--draft-block-size appended) or 'mlx_dspark' (a different process, `mlx-dspark serve`, with its own flag set: --drafter/--mode/etc). The launcher branches only on this enum, never on a specific model id, so adding a new drafter-backed entry never requires editing the launch script -- only fitting one of the two existing adapters. All numeric/text fields below (measured_speedup, measured_on, greedy_divergence_observed, multimodal_capable) are informational metadata surfaced to the picker and to model_advisor.py's speed estimate -- never passed as CLI args, and never used to auto-generate a shell command from this file (deliberately: letting a data file control the executed command is an injection-shaped risk, and the memory-derived flags like --max-kv-size/--kv-bits genuinely have to be computed from the live host's free memory at launch time, not frozen into this static file). Fields: backend (mlx_vlm|mlx_dspark, required); mode (mlx_dspark only -- dflash|dspark|lookup|baseline, maps to --mode); drafter (mlx_dspark only -- HF repo id, maps to --drafter); draft_model/draft_kind/draft_block_size (mlx_vlm only -- HF repo id / dflash|mtp|eagle3 / int, map to the matching mlx_vlm.server flags); drafter_size_gb (added to size_gb by model_advisor.py's memory-fit gate, since the drafter's weights are real committed memory the base entry's size_gb doesn't include); measured_speedup (a real measured multiplier on the reference hardware in measured_on, applied on top of model_advisor.py's existing chip-scaled bandwidth formula -- not a flat absolute tok/s, so it scales down sensibly on a slower Mac than the one it was measured on; still labeled as an estimate in the picker, since the underlying accept-rate/speedup ratio could shift on a very different GPU generation); multimodal_capable (whether THIS specific serving variant retains image/video input -- false for every mlx_dspark entry, since mlx-dspark's CLI has no image/video flags at all and silently drops the vision tower on load; true for mlx_vlm+draft entries, confirmed by live-testing an actual image prompt through the drafter path, not assumed from architecture docs); greedy_divergence_observed (whether live testing at temperature=0/matched seed found the drafter path producing different token-level output than the same entry's no-drafter baseline -- both frameworks document lossless/byte-identical greedy output, and live testing found real exceptions to that claim on this specific reference hardware for some model+quant combos and not others, with no clean rule found yet for which -- e.g. Gemma-4-12B stayed identical at both 4-bit and 8-bit while Qwen3.5-9B and Qwen3.8-27B's 4-bit quants diverged but Qwen3.5-9B's 8-bit didn't, so this is tracked per-entry rather than assumed from the framework's own claims).",
+        "type": "'dense' or 'moe'. Dense models read every weight for each decoded token; MoE models read only the routed experts plus the always-on layers, so a MoE entry must also carry active_weight_gb for model_advisor.py's speed estimate (an MoE entry without it reports 'speed unknown' rather than a guess).",
+        "active_weight_gb": "MoE only. GB of weights actually read per decoded token = always-on tensors + (top_k / num_experts) x expert tensors, measured from the model's safetensors headers and config.json. Dense models omit it (size_gb is used).",
         "size_gb": "Real on-disk size, measured directly (du -sh on the cached HF repo), not estimated from quantization bit-width.",
         "max_context_architectural": "The model's trained/architectural context ceiling, read from its own config.json (max_position_embeddings). This is NOT the same as a safe operating context on any given machine — see recommended_max_kv_size_gb_tier (pending) once real-load memory testing is done.",
         "verification": "Result of verify_max_kv_size.sh — confirms mlx_vlm.server's --max-kv-size admission gate actually rejects oversized requests for this model rather than silently ignoring them (the failure mode Ollama's MLX runner has, unfixably, per LITELLM_ROUTING_PLAN.md §4.15 and upstream Ollama issue discussion). It does NOT confirm real long-context memory safety — that needs a separate near-cap-fill test (LITELLM_ROUTING_PLAN.md §4.14 methodology) not yet run for any model in this file.",
-        "tool_calling": "Whether OpenCode/Claude Code's tool calls (webfetch, bash, edit, etc.) actually come back as a structured, parseable tool_calls response instead of silently degrading to plain chat text. Determined by LIVE testing (real /v1/chat/completions request with a tool schema attached, temperature=0), not by static inspection of the chat template or by which mlx_vlm tool_parser gets auto-assigned — several models (the whole qwen2.5-coder-*-instruct family) get assigned a parser (json_tools) that matches their template's markers, yet still fail live because the model itself doesn't reliably emit the <tool_call> tags its own template instructs it to use. That specific failure was independently reproduced on TWO OTHER serving stacks besides mlx_vlm (vLLM — see github.com/QwenLM/Qwen3-Coder/issues/180 — and Ollama/llama.cpp, tested directly on this machine 2026-09-28), confirming it's a property of the model's own fine-tuning, not a bug in any one harness. phi-4-mini-instruct-4bit is the opposite case: Microsoft's own model card documents real function-calling support and benchmarks it on Berkeley Function-Calling Leaderboard, but mlx_vlm's tool_parsers registry (mlx_vlm/tool_parsers/__init__.py's _TEMPLATE_MARKERS) has no entry matching Phi's <|tool|>/<|tool_call|> token format, so mlx_vlm never even tries to parse its output — a serving-stack gap, not a model capability gap (vLLM has a dedicated --tool-call-parser phi4_mini_json for this exact model, merged via vllm-project/vllm#14886). KNOWN GAP (historical): model_advisor.py did NOT read this field, so the interactive picker would recommend a NOT_SUPPORTED model (e.g. the former qwen2.5-coder-*-instruct or phi-4-mini-instruct-4bit entries, both since removed from this catalog — see PROJECT_STATUS.md items #20-#21) for coding tasks without warning that tool use would silently no-op. Any future NOT_SUPPORTED entry added to this catalog has the same exposure until model_advisor.py is updated to read this field. Same pattern as max_context_verified_safe's documented gap above; fixing both in model_advisor.py at the same time would make sense."
+        "tool_calling": "Whether OpenCode/Claude Code's tool calls (webfetch, bash, edit, etc.) actually come back as a structured, parseable tool_calls response instead of silently degrading to plain chat text. Determined by LIVE testing (real /v1/chat/completions request with a tool schema attached, temperature=0), not by static inspection of the chat template or by which mlx_vlm tool_parser gets auto-assigned — several models (the whole qwen2.5-coder-*-instruct family) get assigned a parser (json_tools) that matches their template's markers, yet still fail live because the model itself doesn't reliably emit the <tool_call> tags its own template instructs it to use. That specific failure was independently reproduced on TWO OTHER serving stacks besides mlx_vlm (vLLM — see github.com/QwenLM/Qwen3-Coder/issues/180 — and Ollama/llama.cpp, tested directly on this machine 2026-09-28), confirming it's a property of the model's own fine-tuning, not a bug in any one harness. phi-4-mini-instruct-4bit is the opposite case: Microsoft's own model card documents real function-calling support and benchmarks it on Berkeley Function-Calling Leaderboard, but mlx_vlm's tool_parsers registry (mlx_vlm/tool_parsers/__init__.py's _TEMPLATE_MARKERS) has no entry matching Phi's <|tool|>/<|tool_call|> token format, so mlx_vlm never even tries to parse its output — a serving-stack gap, not a model capability gap (vLLM has a dedicated --tool-call-parser phi4_mini_json for this exact model, merged via vllm-project/vllm#14886). KNOWN GAP (historical): model_advisor.py did NOT read this field, so the interactive picker would recommend a NOT_SUPPORTED model (e.g. the former qwen2.5-coder-*-instruct or phi-4-mini-instruct-4bit entries, both since removed from this catalog — see PROJECT_STATUS.md items #20-#21) for coding tasks without warning that tool use would silently no-op. Any future NOT_SUPPORTED entry added to this catalog has the same exposure until model_advisor.py is updated to read this field. Same pattern as max_context_verified_safe's documented gap above; fixing both in model_advisor.py at the same time would make sense.",
+        "status": "'tested' = run through verify_max_kv_size.sh (verification block) and a live tool-calling check (tool_calling block) on this project's mlx_vlm version. 'untested' = entry generated by add_model.py from the model's published config; the picker lists it after all tested entries, marked untested, and memory fit (kv_config/size_gb) is computed the same way, but nothing has been confirmed by actually running it. An untested entry may omit verification and tool_calling.",
+        "modalities": "Input modalities the MODEL supports per its own config.json (text always; image if a vision_config exists; video if it declares a video token). What a given entry actually serves is narrower when serving.multimodal_capable is false (every mlx_dspark entry is text-only) -- model_advisor.py's picker column applies that rule. Audio input is not tracked.",
+        "released": "'YYYY-MM' the model was released: the base model's Hugging Face repo creation date when the repo's base_model tag names one, else the repo's own creation date (the MLX conversion usually lags the real release). Filled in by add_model.py; shown in the picker and the default sort."
     },
     "models": [
         {
@@ -13,6 +18,14 @@
             "huggingface": "mlx-community/Qwen3.5-0.8B-4bit",
             "size_gb": 0.6,
             "architecture": "qwen3_5",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-02",
             "max_context_architectural": 262144,
             "display": {
                 "tagline": "Ultra-light sanity-check model",
@@ -76,6 +89,14 @@
             "huggingface": "mlx-community/gemma-4-e4b-it-4bit",
             "size_gb": 4.82,
             "architecture": "gemma4 (elastic/MatFormer \"E4B\" variant)",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-03",
             "max_context_architectural": 131072,
             "display": {
                 "tagline": "Small multimodal option, 16-24GB Macs",
@@ -157,6 +178,14 @@
             "huggingface": "mlx-community/gemma-4-e4b-it-4bit",
             "size_gb": 4.82,
             "architecture": "gemma4 (elastic/MatFormer \"E4B\" variant)",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-03",
             "max_context_architectural": 131072,
             "serving": {
                 "backend": "mlx_vlm",
@@ -249,6 +278,14 @@
             "huggingface": "mlx-community/gemma-4-12B-it-4bit",
             "size_gb": 6.31,
             "architecture": "gemma4_unified",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-06",
             "max_context_architectural": 262144,
             "display": {
                 "tagline": "Lighter version of our trusted 12B multimodal model",
@@ -336,6 +373,14 @@
             "huggingface": "mlx-community/gemma-4-12B-it-4bit",
             "size_gb": 6.31,
             "architecture": "gemma4_unified",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-06",
             "max_context_architectural": 262144,
             "serving": {
                 "backend": "mlx_dspark",
@@ -433,6 +478,14 @@
             "huggingface": "mlx-community/gemma-4-12B-it-4bit",
             "size_gb": 6.31,
             "architecture": "gemma4_unified",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-06",
             "max_context_architectural": 262144,
             "serving": {
                 "backend": "mlx_vlm",
@@ -531,6 +584,14 @@
             "huggingface": "mlx-community/Qwen3.5-9B-MLX-8bit",
             "size_gb": 9.7,
             "architecture": "qwen3_5",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-02",
             "max_context_architectural": 262144,
             "display": {
                 "tagline": "Best all-around choice on 24GB+ Macs",
@@ -602,6 +663,14 @@
             "huggingface": "mlx-community/Qwen3.5-9B-MLX-8bit",
             "size_gb": 9.7,
             "architecture": "qwen3_5",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-02",
             "max_context_architectural": 262144,
             "serving": {
                 "backend": "mlx_dspark",
@@ -683,6 +752,14 @@
             "huggingface": "mlx-community/Qwen3.5-9B-MLX-8bit",
             "size_gb": 9.7,
             "architecture": "qwen3_5",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-02",
             "max_context_architectural": 262144,
             "serving": {
                 "backend": "mlx_vlm",
@@ -765,6 +842,14 @@
             "huggingface": "mlx-community/Qwen3.5-9B-MLX-4bit",
             "size_gb": 6.3,
             "architecture": "qwen3_5",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-02",
             "max_context_architectural": 262144,
             "display": {
                 "tagline": "Best all-around choice on 16GB+ Macs (lighter quant of our 8-bit favorite)",
@@ -836,6 +921,14 @@
             "huggingface": "mlx-community/Qwen3.5-9B-MLX-4bit",
             "size_gb": 6.3,
             "architecture": "qwen3_5",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-02",
             "max_context_architectural": 262144,
             "serving": {
                 "backend": "mlx_dspark",
@@ -917,6 +1010,14 @@
             "huggingface": "mlx-community/Qwen3.5-9B-MLX-4bit",
             "size_gb": 6.3,
             "architecture": "qwen3_5",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-02",
             "max_context_architectural": 262144,
             "serving": {
                 "backend": "mlx_vlm",
@@ -999,6 +1100,14 @@
             "huggingface": "mlx-community/gemma-4-12B-it-8bit",
             "size_gb": 12,
             "architecture": "gemma4_unified",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-06",
             "max_context_architectural": 262144,
             "display": {
                 "tagline": "Multimodal (vision-capable) option, 24GB+ Macs",
@@ -1086,6 +1195,14 @@
             "huggingface": "mlx-community/gemma-4-12B-it-8bit",
             "size_gb": 12,
             "architecture": "gemma4_unified",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-06",
             "max_context_architectural": 262144,
             "serving": {
                 "backend": "mlx_dspark",
@@ -1183,6 +1300,14 @@
             "huggingface": "mlx-community/gemma-4-12B-it-8bit",
             "size_gb": 12,
             "architecture": "gemma4_unified",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-06",
             "max_context_architectural": 262144,
             "serving": {
                 "backend": "mlx_vlm",
@@ -1281,9 +1406,16 @@
             "huggingface": "mlx-community/gemma-4-26b-a4b-it-4bit",
             "size_gb": 14,
             "architecture": "gemma4",
-            "is_moe": true,
-            "active_weight_gb": null,
-            "_active_weight_note": "MoE (num_experts=128 per config.json), but config.json is missing num_experts_per_tok — cannot compute the active-expert fraction the way qwen3-coder-30b-a3b-instruct-4bit's config allowed. Left null deliberately rather than guessed; model_advisor.py's speed estimator correctly reports 'unknown' for this model rather than a fabricated number. Needs its own live decode-speed benchmark to get a real active_weight_gb.",
+            "type": "moe",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-03",
+            "active_weight_gb": 2.16,
+            "_active_weight_note": "Computed from the cached safetensors headers + config.json (num_experts=128, top_k_experts=8): language-model tensors that are always read per token (attention, dense MLP, norms, router, embeddings/tied lm_head) = 1.354GB, plus 8/128 of the 12.846GB expert tensors (0.803GB) = 2.157GB. Vision-tower weights (1.14GB) are excluded since text decode never touches them. Note the key is top_k_experts here, not num_experts_per_tok.",
             "max_context_architectural": 262144,
             "display": {
                 "tagline": "Larger multimodal option, 32GB+ Macs",
@@ -1353,6 +1485,14 @@
             "huggingface": "mlx-community/Qwen3.8-27B-4bit",
             "size_gb": 15,
             "architecture": "qwen3_5",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-08",
             "max_context_architectural": 262144,
             "display": {
                 "tagline": "Most capable dense text model, 32GB+ Macs",
@@ -1456,6 +1596,14 @@
             "huggingface": "mlx-community/Qwen3.8-27B-4bit",
             "size_gb": 15,
             "architecture": "qwen3_5",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-08",
             "max_context_architectural": 262144,
             "serving": {
                 "backend": "mlx_dspark",
@@ -1569,6 +1717,14 @@
             "huggingface": "mlx-community/Qwen3.8-27B-4bit",
             "size_gb": 15,
             "architecture": "qwen3_5",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-08",
             "max_context_architectural": 262144,
             "serving": {
                 "backend": "mlx_vlm",
@@ -1675,6 +1831,1703 @@
                     "linear_attention",
                     "full_attention"
                 ],
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "qwen2.5-coder-3b-instruct-4bit",
+            "huggingface": "mlx-community/Qwen2.5-Coder-3B-Instruct-4bit",
+            "size_gb": 1.6,
+            "architecture": "qwen2",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2024-11",
+            "max_context_architectural": 32768,
+            "display": {
+                "tagline": "Lightweight coding assistant",
+                "good_for": "Simple coding help on a memory-constrained machine — function-level edits, boilerplate, and short scripts. The conservative fallback on a 16GB Mac if the 7B model feels too tight alongside other running apps.",
+                "usage_examples": [
+                    "\"Write a Python function that parses this CSV format and returns a list of dicts\" — clear-spec utility code",
+                    "\"Explain what this 20-line function does\" — code comprehension on a short, self-contained snippet"
+                ],
+                "known_issues": "32K architectural context ceiling — will not hold a large repo's AGENTS.md plus several file reads without hitting the limit. Struggles with complex multi-file reasoning; keep tasks scoped to one file/function at a time. ❌ TOOL CALLS DO NOT WORK: confirmed broken on THREE separate serving stacks (mlx_vlm, vLLM, and Ollama/llama.cpp) — the model ignores its own chat template's <tool_call> instructions and instead wraps attempted calls in <tools>/<response> tags that no parser recognizes, so OpenCode/Claude Code tool use (webfetch, bash, edit, etc.) silently falls back to plain chat text. Do not use for agentic/tool-using work — see tool_calling below.",
+                "size_label": "1.6 GB",
+                "max_context_label": "32,768 tokens (architectural max)"
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-09-28T01:10:12Z",
+                "mlx_vlm_version": "0.7.0",
+                "notes": "Admission gate verified at 32/256/1024-token bounds. Real long-context memory load not yet stress-tested."
+            },
+            "tool_calling": {
+                "verdict": "NOT_SUPPORTED",
+                "verified_at": "2026-09-28T09:07:00Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0 (repeated 3x, deterministic). Independently re-confirmed via Ollama 0.33.2 (qwen2.5-coder:3b-instruct, Q4_K_M GGUF) through both its OpenAI-compat and native /api/chat endpoints.",
+                "tool_parser": "json_tools (auto-assigned by mlx_vlm — template matches, model output doesn't)",
+                "notes": "finish_reason=stop every time, tool_calls always null/absent. Model echoes the tool schema back wrapped in <tools></tools> then attempts the call wrapped in <response>{...}</response> — never uses the <tool_call></tool_call> tags its own chat template explicitly instructs it to use. Same failure independently reported by a third party against vLLM: github.com/QwenLM/Qwen3-Coder/issues/180. This is a property of the model's fine-tuning, confirmed across 3 independent serving stacks — not fixable by switching harnesses."
+            },
+            "kv_config": {
+                "num_key_value_heads": 2,
+                "head_dim": 128.0,
+                "num_hidden_layers": 36,
+                "layer_types": null,
+                "sliding_window": 32768
+            }
+        },
+        {
+            "id": "qwen2.5-coder-7b-instruct-3bit",
+            "huggingface": "mlx-community/Qwen2.5-Coder-7B-Instruct-3bit",
+            "size_gb": 3.1,
+            "architecture": "qwen2",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2024-09",
+            "max_context_architectural": 32768,
+            "display": {
+                "tagline": "More capable coder, extra-quantized to save memory",
+                "good_for": "A step up in coding capability from the 3B model, at nearly the same memory footprint as the 4-bit 7B thanks to 3-bit quantization. Consider this over the 4-bit version specifically when memory is the binding constraint.",
+                "usage_examples": [
+                    "\"Refactor this function to handle the edge case where the input list is empty\" — multi-step reasoning within a single file",
+                    "\"Write unit tests for this function covering the main cases\" — test generation for existing code"
+                ],
+                "known_issues": "3-bit quantization trades some accuracy for size — expect occasional subtle mistakes the 4-bit sibling wouldn't make (wrong variable name, off-by-one, slightly wrong logic branch). Same 32K architectural ceiling as the 4-bit version. Prefer the 4-bit variant when the extra ~0.9GB isn't the deciding factor. ❌ TOOL CALLS DO NOT WORK: same Qwen2.5-Coder-Instruct family failure as the 3B/4bit/14B siblings — see tool_calling below and qwen2.5-coder-3b-instruct-4bit's notes for the cross-stack confirmation.",
+                "size_label": "3.1 GB",
+                "max_context_label": "32,768 tokens (architectural max)"
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-09-28T01:26:52Z",
+                "mlx_vlm_version": "0.7.0",
+                "notes": "Admission gate verified at 32/256/1024-token bounds, after fixing a real script bug (a stale server process from a prior failed download briefly caused a false reading — see verify_max_kv_size.sh's wait_for_port_free/served-model check, added specifically because of this incident). Real long-context memory load not yet stress-tested."
+            },
+            "tool_calling": {
+                "verdict": "NOT_SUPPORTED",
+                "verified_at": "2026-09-28T09:07:15Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
+                "tool_parser": "json_tools (auto-assigned by mlx_vlm — template matches, model output doesn't)",
+                "notes": "finish_reason=stop, tool_calls=null. Model wrapped its attempted call in a ```json code block instead of the <tool_call></tool_call> tags its own template instructs — a different wrong format than the 3B (<tools>/<response>) and 4bit (```xml/<tools>) siblings, but the same underlying failure: this whole model family doesn't reliably follow its own tool-call output format regardless of quantization."
+            },
+            "kv_config": {
+                "num_key_value_heads": 4,
+                "head_dim": 128.0,
+                "num_hidden_layers": 28,
+                "layer_types": null,
+                "sliding_window": 131072
+            }
+        },
+        {
+            "id": "qwen2.5-coder-7b-instruct-4bit",
+            "huggingface": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+            "size_gb": 4.0,
+            "architecture": "qwen2",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2024-09",
+            "max_context_architectural": 32768,
+            "display": {
+                "tagline": "Recommended default for 16GB Macs",
+                "good_for": "Real coding capability without the memory pressure of the 9B+ models — the primary recommendation for a 16GB MacBook Pro. Enough headroom left over for KV cache, the OS, and normal background apps.",
+                "usage_examples": [
+                    "\"Implement a REST endpoint that validates this payload and writes it to the database\" — moderately complex, multi-step feature work",
+                    "\"Review this diff and point out any bugs or style issues\" — code review on a realistic-sized change"
+                ],
+                "known_issues": "32K architectural ceiling means a large repo's AGENTS.md plus a long conversation history will need compaction sooner than a 128K-class model would. Not yet stress-tested at real long-context memory load (only the admission gate is verified). ❌ TOOL CALLS DO NOT WORK: same Qwen2.5-Coder-Instruct family failure as the 3B/3bit/14B siblings — see tool_calling below.",
+                "size_label": "4.0 GB",
+                "max_context_label": "32,768 tokens (architectural max)"
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-09-28T01:22:02Z",
+                "mlx_vlm_version": "0.7.0",
+                "notes": "Admission gate verified at 32/256/1024-token bounds, after fixing a real script bug (see qwen2.5-coder-7b-instruct-3bit's note — same incident, same fix applies to this model's result too since both were retested after the fix). Real long-context memory load not yet stress-tested."
+            },
+            "tool_calling": {
+                "verdict": "NOT_SUPPORTED",
+                "verified_at": "2026-09-28T09:07:14Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
+                "tool_parser": "json_tools (auto-assigned by mlx_vlm — template matches, model output doesn't)",
+                "notes": "finish_reason=stop, tool_calls=null. Model wrapped its attempted call in ```xml fenced <tools></tools> tags instead of the <tool_call></tool_call> tags its own template instructs — yet another wrong format, distinct from the 3bit sibling's plain ```json block. Confirms this is a per-generation-sampling issue with the model's fine-tuning, not a deterministic template bug that a fixed prompt tweak would solve."
+            },
+            "kv_config": {
+                "num_key_value_heads": 4,
+                "head_dim": 128.0,
+                "num_hidden_layers": 28,
+                "layer_types": null,
+                "sliding_window": 131072
+            }
+        },
+        {
+            "id": "qwen2.5-coder-14b-instruct-4bit",
+            "huggingface": "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
+            "size_gb": 7.8,
+            "architecture": "qwen2",
+            "type": "dense",
+            "status": "tested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2024-11",
+            "max_context_architectural": 32768,
+            "display": {
+                "tagline": "Recommended coding upgrade for 24GB Macs",
+                "good_for": "A real capability step up from the 7B Coder model for a 24GB Mac — same architecture family and same 32K context ceiling, just more capable at the same coding-specialized task.",
+                "usage_examples": [
+                    "\"Implement this feature across several files and keep the existing code style\" — more demanding multi-file coding tasks than the 7B model handles well",
+                    "\"Debug why this test is failing and fix it\" — more reliable reasoning through non-trivial bugs"
+                ],
+                "known_issues": "Same 32K architectural ceiling as the 3B/7B Coder models in this family — a large repo's AGENTS.md plus a long conversation will still need compaction sooner than a 128K+ class model. Encountered a real download-reliability issue during verification (see verification notes) — resolved by the harness, not a property of the model itself. ❌ TOOL CALLS DO NOT WORK: same Qwen2.5-Coder-Instruct family failure as the 3B/3bit/4bit siblings — see tool_calling below.",
+                "size_label": "7.8 GB",
+                "max_context_label": "32,768 tokens (architectural max)"
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-09-28T02:21:00Z",
+                "mlx_vlm_version": "0.7.0",
+                "notes": "Admission gate verified at 32/256/1024-token bounds, after fixing a real script bug: repeated health-check timeouts during this model's initial download each killed the in-progress transfer with no resume, leaving 5 abandoned .incomplete blob fragments (8GB) without ever completing the real 7.75GB download. Fixed by adding a standalone snapshot_download() pre-download step to verify_max_kv_size.sh, run before the server (and its kill-on-timeout path) ever touches the model — this fix now applies to every model verified after this one."
+            },
+            "tool_calling": {
+                "verdict": "NOT_SUPPORTED",
+                "verified_at": "2026-09-28T09:07:35Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
+                "tool_parser": "json_tools (auto-assigned by mlx_vlm — template matches, model output doesn't)",
+                "notes": "finish_reason=stop, tool_calls=null. Model wrapped its attempted call in bare <tools></tools> tags instead of the <tool_call></tool_call> tags its own template instructs — confirms the whole Qwen2.5-Coder-Instruct family fails regardless of size (3B/7B-3bit/7B-4bit/14B all fail, each with a slightly different wrong wrapper)."
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 128.0,
+                "num_hidden_layers": 48,
+                "layer_types": null,
+                "sliding_window": 131072
+            }
+        },
+        {
+            "id": "gemma-4-26b-a4b-it-8bit",
+            "huggingface": "mlx-community/gemma-4-26b-a4b-it-8bit",
+            "size_gb": 26.06,
+            "architecture": "gemma4",
+            "type": "moe",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-03",
+            "active_weight_gb": 4.06,
+            "_active_weight_note": "Generated by add_model.py from the safetensors headers + config.json (num_experts=128, top_k=8): 2.55GB of always-read text tensors + 8/128 of 24.27GB expert tensors. Vision/audio towers excluded. Heuristic tensor-name matching — sanity-check against a measured decode speed.",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "MoE model, 26.06 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "26.06 GB",
+                "max_context_label": "262,144 tokens (architectural max); sliding_window=1024 internally"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 256,
+                "num_hidden_layers": 30,
+                "layer_types": [
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 1024
+            }
+        },
+        {
+            "id": "gemma-4-e2b-it-4bit",
+            "huggingface": "mlx-community/gemma-4-e2b-it-4bit",
+            "size_gb": 3.34,
+            "architecture": "gemma4",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-03",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "Dense model, 3.34 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "3.34 GB",
+                "max_context_label": "131,072 tokens (architectural max); sliding_window=512 internally"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 1,
+                "head_dim": 256,
+                "num_hidden_layers": 35,
+                "layer_types": [
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 512
+            }
+        },
+        {
+            "id": "qwen3-4b-instruct-2507-4bit",
+            "huggingface": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+            "size_gb": 2.12,
+            "architecture": "qwen3",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-08",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "Dense model, 2.12 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "2.12 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "num_hidden_layers": 36,
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "deepseek-r1-0528-qwen3-8b-4bit",
+            "huggingface": "mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit",
+            "size_gb": 4.3,
+            "architecture": "qwen3",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-05",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "Dense model, 4.3 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "4.3 GB",
+                "max_context_label": "131,072 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "num_hidden_layers": 36,
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "gpt-oss-20b-mxfp4-q8",
+            "huggingface": "mlx-community/gpt-oss-20b-MXFP4-Q8",
+            "size_gb": 11.27,
+            "architecture": "gpt_oss",
+            "type": "moe",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-08",
+            "active_weight_gb": 3.18,
+            "_active_weight_note": "Generated by add_model.py from the safetensors headers + config.json (num_experts=32, top_k=4): 1.91GB of always-read text tensors + 4/32 of 10.17GB expert tensors. Vision/audio towers excluded. Heuristic tensor-name matching — sanity-check against a measured decode speed.",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "MoE model, 11.27 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "11.27 GB",
+                "max_context_label": "131,072 tokens (architectural max); sliding_window=128 internally"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 64,
+                "num_hidden_layers": 24,
+                "layer_types": [
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 128
+            }
+        },
+        {
+            "id": "devstral-small-2-24b-instruct-2512-4bit",
+            "huggingface": "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit",
+            "size_gb": 14.1,
+            "architecture": "mistral3",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image"
+            ],
+            "released": "2025-11",
+            "max_context_architectural": 393216,
+            "display": {
+                "tagline": "Dense model, 14.1 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "14.1 GB",
+                "max_context_label": "393,216 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "num_hidden_layers": 40,
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "qwen3-coder-30b-a3b-instruct-4bit",
+            "huggingface": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            "size_gb": 16.02,
+            "architecture": "qwen3_moe",
+            "type": "moe",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-07",
+            "active_weight_gb": 1.89,
+            "_active_weight_note": "Generated by add_model.py from the safetensors headers + config.json (num_experts=128, top_k=8): 0.87GB of always-read text tensors + 8/128 of 16.31GB expert tensors. Vision/audio towers excluded. Heuristic tensor-name matching — sanity-check against a measured decode speed.",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "MoE model, 16.02 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "16.02 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 4,
+                "head_dim": 128,
+                "num_hidden_layers": 48,
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "gemma-4-31b-it-4bit",
+            "huggingface": "mlx-community/gemma-4-31b-it-4bit",
+            "size_gb": 17.18,
+            "architecture": "gemma4",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-03",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "Dense model, 17.18 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "17.18 GB",
+                "max_context_label": "262,144 tokens (architectural max); sliding_window=1024 internally"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 16,
+                "head_dim": 256,
+                "num_hidden_layers": 60,
+                "layer_types": [
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 1024
+            }
+        },
+        {
+            "id": "deepseek-r1-distill-qwen-32b-4bit",
+            "huggingface": "mlx-community/DeepSeek-R1-Distill-Qwen-32B-4bit",
+            "size_gb": 17.18,
+            "architecture": "qwen2",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-01",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "Dense model, 17.18 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "17.18 GB",
+                "max_context_label": "131,072 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "num_hidden_layers": 64,
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "qwen3.6-35b-a3b-4bit",
+            "huggingface": "mlx-community/Qwen3.6-35B-A3B-4bit",
+            "size_gb": 19.03,
+            "architecture": "qwen3_5_moe",
+            "type": "moe",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-04",
+            "active_weight_gb": 1.96,
+            "_active_weight_note": "Generated by add_model.py from the safetensors headers + config.json (num_experts=256, top_k=8): 1.39GB of always-read text tensors + 8/256 of 18.12GB expert tensors. Vision/audio towers excluded. Heuristic tensor-name matching — sanity-check against a measured decode speed.",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "MoE model, 19.03 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "19.03 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "num_hidden_layers": 40,
+                "layer_types": [
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"
+                ],
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "qwen3.8-27b-8bit",
+            "huggingface": "mlx-community/Qwen3.8-27B-8bit",
+            "size_gb": 27.5,
+            "architecture": "qwen3_5",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-08",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "Dense model, 27.5 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "27.5 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 4,
+                "head_dim": 256,
+                "num_hidden_layers": 64,
+                "layer_types": [
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"
+                ],
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "gpt-oss-120b-mxfp4-q8",
+            "huggingface": "mlx-community/gpt-oss-120b-MXFP4-Q8",
+            "size_gb": 59.06,
+            "architecture": "gpt_oss",
+            "type": "moe",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-08",
+            "active_weight_gb": 4.3,
+            "_active_weight_note": "Generated by add_model.py from the safetensors headers + config.json (num_experts=128, top_k=4): 2.39GB of always-read text tensors + 4/128 of 60.99GB expert tensors. Vision/audio towers excluded. Heuristic tensor-name matching — sanity-check against a measured decode speed.",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "MoE model, 59.06 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "59.06 GB",
+                "max_context_label": "131,072 tokens (architectural max); sliding_window=128 internally"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 64,
+                "num_hidden_layers": 36,
+                "layer_types": [
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 128
+            }
+        },
+        {
+            "id": "gemma-4-e2b-it-8bit",
+            "huggingface": "mlx-community/gemma-4-e2b-it-8bit",
+            "size_gb": 5.49,
+            "architecture": "gemma4",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-03",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "Dense model, 5.49 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "5.49 GB",
+                "max_context_label": "131,072 tokens (architectural max); sliding_window=512 internally"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 1,
+                "head_dim": 256,
+                "num_hidden_layers": 35,
+                "layer_types": [
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 512
+            }
+        },
+        {
+            "id": "gemma-4-e4b-it-8bit",
+            "huggingface": "mlx-community/gemma-4-e4b-it-8bit",
+            "size_gb": 8.3,
+            "architecture": "gemma4",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-03",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "Dense model, 8.3 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "8.3 GB",
+                "max_context_label": "131,072 tokens (architectural max); sliding_window=512 internally"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "num_hidden_layers": 42,
+                "layer_types": [
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 512
+            }
+        },
+        {
+            "id": "gemma-4-31b-it-8bit",
+            "huggingface": "mlx-community/gemma-4-31b-it-8bit",
+            "size_gb": 31.47,
+            "architecture": "gemma4",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-03",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "Dense model, 31.47 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "31.47 GB",
+                "max_context_label": "262,144 tokens (architectural max); sliding_window=1024 internally"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 16,
+                "head_dim": 256,
+                "num_hidden_layers": 60,
+                "layer_types": [
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 1024
+            }
+        },
+        {
+            "id": "qwen3-4b-instruct-2507-8bit",
+            "huggingface": "mlx-community/Qwen3-4B-Instruct-2507-8bit",
+            "size_gb": 4.0,
+            "architecture": "qwen3",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-08",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "Dense model, 4 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "4 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "num_hidden_layers": 36,
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "devstral-small-2-24b-instruct-2512-8bit",
+            "huggingface": "mlx-community/Devstral-Small-2-24B-Instruct-2512-8bit",
+            "size_gb": 24.76,
+            "architecture": "mistral3",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image"
+            ],
+            "released": "2025-11",
+            "max_context_architectural": 393216,
+            "display": {
+                "tagline": "Dense model, 24.76 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "24.76 GB",
+                "max_context_label": "393,216 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "num_hidden_layers": 40,
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "qwen3-coder-30b-a3b-instruct-8bit",
+            "huggingface": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit",
+            "size_gb": 30.23,
+            "architecture": "qwen3_moe",
+            "type": "moe",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-07",
+            "active_weight_gb": 3.56,
+            "_active_weight_note": "Generated by add_model.py from the safetensors headers + config.json (num_experts=128, top_k=8): 1.64GB of always-read text tensors + 8/128 of 30.80GB expert tensors. Vision/audio towers excluded. Heuristic tensor-name matching — sanity-check against a measured decode speed.",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "MoE model, 30.23 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "30.23 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 4,
+                "head_dim": 128,
+                "num_hidden_layers": 48,
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "qwen3.6-35b-a3b-8bit",
+            "huggingface": "mlx-community/Qwen3.6-35B-A3B-8bit",
+            "size_gb": 35.16,
+            "architecture": "qwen3_5_moe",
+            "type": "moe",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-04",
+            "active_weight_gb": 3.67,
+            "_active_weight_note": "Generated by add_model.py from the safetensors headers + config.json (num_experts=256, top_k=8): 2.60GB of always-read text tensors + 8/256 of 34.23GB expert tensors. Vision/audio towers excluded. Heuristic tensor-name matching — sanity-check against a measured decode speed.",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "MoE model, 35.16 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "35.16 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "num_hidden_layers": 40,
+                "layer_types": [
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"
+                ],
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "deepseek-r1-distill-qwen-32b-mlx-8bit",
+            "huggingface": "mlx-community/DeepSeek-R1-Distill-Qwen-32B-MLX-8Bit",
+            "size_gb": 32.43,
+            "architecture": "qwen2",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-01",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "Dense model, 32.43 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "32.43 GB",
+                "max_context_label": "131,072 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "num_hidden_layers": 64,
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "gemma-4-e2b-it-bf16",
+            "huggingface": "mlx-community/gemma-4-e2b-it-bf16",
+            "size_gb": 9.54,
+            "architecture": "gemma4",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-03",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "Dense model, 9.54 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "9.54 GB",
+                "max_context_label": "131,072 tokens (architectural max); sliding_window=512 internally"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 1,
+                "head_dim": 256,
+                "num_hidden_layers": 35,
+                "layer_types": [
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 512
+            }
+        },
+        {
+            "id": "gemma-4-e4b-it-bf16",
+            "huggingface": "mlx-community/gemma-4-e4b-it-bf16",
+            "size_gb": 14.82,
+            "architecture": "gemma4",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-03",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "Dense model, 14.82 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "14.82 GB",
+                "max_context_label": "131,072 tokens (architectural max); sliding_window=512 internally"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "num_hidden_layers": 42,
+                "layer_types": [
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 512
+            }
+        },
+        {
+            "id": "qwen3-4b-instruct-2507-bf16",
+            "huggingface": "mlx-community/Qwen3-4B-Instruct-2507-bf16",
+            "size_gb": 7.5,
+            "architecture": "qwen3",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-08",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "Dense model, 7.5 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "7.5 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "num_hidden_layers": 36,
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "qwen3.5-9b-mlx-bf16",
+            "huggingface": "mlx-community/Qwen3.5-9B-MLX-bf16",
+            "size_gb": 17.55,
+            "architecture": "qwen3_5",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-02",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "Dense model, 17.55 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "17.55 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 4,
+                "head_dim": 256,
+                "num_hidden_layers": 32,
+                "layer_types": [
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"
+                ],
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "gemma-4-26b-a4b-it-bf16",
+            "huggingface": "mlx-community/gemma-4-26b-a4b-it-bf16",
+            "size_gb": 48.1,
+            "architecture": "gemma4",
+            "type": "moe",
+            "status": "untested",
+            "modalities": [
+                "text",
+                "image",
+                "video"
+            ],
+            "released": "2026-03",
+            "active_weight_gb": 7.65,
+            "_active_weight_note": "Generated by add_model.py from the safetensors headers + config.json (num_experts=128, top_k=8): 4.79GB of always-read text tensors + 8/128 of 45.68GB expert tensors. Vision/audio towers excluded. Heuristic tensor-name matching — sanity-check against a measured decode speed.",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "MoE model, 48.1 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "48.1 GB",
+                "max_context_label": "262,144 tokens (architectural max); sliding_window=1024 internally"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 256,
+                "num_hidden_layers": 30,
+                "layer_types": [
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "sliding_window": 1024
+            }
+        },
+        {
+            "id": "qwen3-coder-30b-a3b-instruct-bf16",
+            "huggingface": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-bf16",
+            "size_gb": 56.89,
+            "architecture": "qwen3_moe",
+            "type": "moe",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-07",
+            "active_weight_gb": 6.71,
+            "_active_weight_note": "Generated by add_model.py from the safetensors headers + config.json (num_experts=128, top_k=8): 3.08GB of always-read text tensors + 8/128 of 57.98GB expert tensors. Vision/audio towers excluded. Heuristic tensor-name matching — sanity-check against a measured decode speed.",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "MoE model, 56.89 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "56.89 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 4,
+                "head_dim": 128,
+                "num_hidden_layers": 48,
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "deepseek-r1-0528-qwen3-8b-8bit",
+            "huggingface": "mlx-community/DeepSeek-R1-0528-Qwen3-8B-8bit",
+            "size_gb": 8.12,
+            "architecture": "qwen3",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-05",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "Dense model, 8.12 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "8.12 GB",
+                "max_context_label": "131,072 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "num_hidden_layers": 36,
+                "sliding_window": null
+            }
+        },
+        {
+            "id": "deepseek-r1-0528-qwen3-8b-bf16",
+            "huggingface": "mlx-community/DeepSeek-R1-0528-Qwen3-8B-bf16",
+            "size_gb": 15.27,
+            "architecture": "qwen3",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-05",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "Dense model, 15.27 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "size_label": "15.27 GB",
+                "max_context_label": "131,072 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "num_hidden_layers": 36,
                 "sliding_window": null
             }
         }
