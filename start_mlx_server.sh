@@ -939,7 +939,7 @@ ensure_mlx_running() {
     "${launch_cmd[@]}" > "$MLX_LOG_FILE" 2>&1 &
     MLX_PID=$!
 
-    if ! wait_for_url "http://$MLX_HOST:$MLX_PORT/health" 600; then
+    if ! wait_for_url "http://$MLX_HOST:$MLX_PORT/health" 600 "$MLX_PID"; then
         log_error "MLX server failed to start. Check $MLX_LOG_FILE"
         tail -20 "$MLX_LOG_FILE" >&2
         exit 1
