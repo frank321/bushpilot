@@ -250,10 +250,19 @@ ensure_symlinked_on_path() {
 wait_for_url() {
     local url="$1"
     local timeout="${2:-30}"
+    local watch_pid="${3:-}"
     local attempts=0
     while [ $attempts -lt "$timeout" ]; do
         if curl -fsS --max-time 5 "$url" > /dev/null 2>&1; then
             return 0
+        fi
+        # If we're waiting on a freshly-launched child and it already exited,
+        # stop polling immediately -- there is nothing left to come up. Without
+        # this, a server that crashes at startup (bad flag, missing download,
+        # OOM) leaves the supervisor silently burning the full timeout before
+        # reporting anything (reproduced: crashed mlx-dspark + 600s health wait).
+        if [[ -n "$watch_pid" ]] && ! kill -0 "$watch_pid" 2>/dev/null; then
+            return 1
         fi
         attempts=$((attempts + 1))
         sleep 1
