@@ -53,6 +53,7 @@ recommendation as a real server-side cap — not just a client-side hint.
 | Raw data behind the real long-context stress test (only 1 of 14 models tested so far) | `mlx_long_context_stress_results.json` + `verify_long_context_memory.sh` (the tool itself) |
 | **Why** `--max-kv-size` matters and how it was verified | `verify_max_kv_size.sh` (the tool itself, heavily commented) + its header comment explains the 3-phase methodology |
 | The token-speed / context-size **formula research** (sourced, not guessed) | `HARDWARE_SPEED_ESTIMATION.md` — read this before touching `model_advisor.py`'s formulas |
+| Gemma-4 sliding-window prompt caching (does it actually work on `mlx_vlm`/`mlx-dspark`?) + drafter research for `gemma-4-26b-a4b-it-4bit` | `HARDWARE_SPEED_ESTIMATION.md` §19 — read this before re-investigating either; both are already answered |
 | The actual hardware-aware recommender implementation | `model_advisor.py` |
 | The main launcher script (now wired to the advisor) | `start_litellm_proxy.sh` |
 | User-facing usage guide | `LITELLM_PROXY_USAGE.md` — **partially stale**, see caveat below |

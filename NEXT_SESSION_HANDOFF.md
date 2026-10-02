@@ -231,7 +231,8 @@ month or two if curious, not urgent.
 - Real drafters are downloaded into the standard HF cache
   (`~/.bushpilot/models/hub/models--{org}--{repo}/`) for: `z-lab/gemma4-12B-it-DFlash`,
   `z-lab/Qwen3.5-9B-DFlash`, `incoai/Qwen3.8-27B-DFlash2`,
-  `mlx-community/gemma-4-E4B-it-assistant-bf16`, `mlx-community/gemma-4-26B-A4B-it-assistant-bf16`
+  `mlx-community/gemma-4-E4B-it-assistant-bf16`, `mlx-community/gemma-4-26B-A4B-it-assistant-bf16`,
+  `z-lab/gemma-4-26B-A4B-it-DFlash` (added 2026-10-01, see below)
   — all checksum-verified against HF's own reported SHA-256 at download time. You should
   NOT need to re-download these to keep testing.
 - `~/.bushpilot/venv` already has `mlx-dspark==0.20.1` installed alongside
@@ -240,3 +241,18 @@ month or two if curious, not urgent.
   `~/.bushpilot/venv/bin/mlx-dspark serve --model <repo> --drafter <repo> --mode dflash --port 38999`
   or `~/.bushpilot/venv/bin/python -m mlx_vlm.server --model <path> --draft-model <repo> --draft-kind {dflash,mtp} --port 38999`,
   then `curl http://127.0.0.1:38999/health` / `/metrics` / `/v1/chat/completions`.
+- **Gemma-4 sliding-window prompt caching + drafter research is DONE — see
+  `HARDWARE_SPEED_ESTIMATION.md` §19 before re-investigating any of this.** Short version: prompt
+  caching already works correctly on both `mlx_vlm` (the active backend for every Gemma-4 entry)
+  and `mlx-dspark`, with current launch parameters, no changes needed. A plausible-looking "swap
+  `RotatingKVCache` for `KVCache`" caching shortcut was tested and is WRONG (real output divergence
+  on real models) — do not attempt it again. Two drafters for `gemma-4-26b-a4b-it-4bit` (Google's
+  MTP, z-lab's DFlash) were tested for real and both land at ~1.07-1.08x — not worth adding either.
+  `mlx-optiq` was also investigated (installed, read its source) as a possible better-caching
+  alternative — no real indication it would help Gemma 4 specifically (its interesting paged-cache
+  design doesn't appear to reach Gemma 4 yet per its own internal support-maturity tracking).
+  Both `mlx_vlm`/`mlx-dspark` were confirmed already at the latest PyPI release (no upgrade
+  available) as of 2026-10-01; two relevant open upstream items were found and logged for later
+  (mlx-vlm PR #2356, a restored-row cache-efficiency fix, and issue #1559, a confirmed
+  Gemma-4-SWA-batch gap specific to combining APC with `--kv-bits` — narrow scope, not hit by
+  anything this project currently does, but not independently verified either).

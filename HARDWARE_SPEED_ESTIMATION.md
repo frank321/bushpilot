@@ -889,15 +889,25 @@ before/after runs, not derived from any formula:
 | Gemma-4-12B | 4-bit | mlx-dspark (DFlash) | `z-lab/gemma4-12B-it-DFlash` | 2.21x | Identical |
 | Gemma-4-E4B | 4-bit | mlx_vlm native (MTP) | `mlx-community/gemma-4-E4B-it-assistant-bf16` | 1.56x | Diverged (text); identical (one image test) |
 | Gemma-4-26B-A4B (MoE) | 4-bit | mlx_vlm native (MTP) | `mlx-community/gemma-4-26B-A4B-it-assistant-bf16` | 1.08x | Identical |
+| Gemma-4-26B-A4B (MoE) | 4-bit | mlx-dspark (DFlash) | `z-lab/gemma-4-26B-A4B-it-DFlash` | 1.07x | Diverged (code prompt); identical (math prompt) |
 | Qwen3.8-27B | 4-bit | mlx_vlm native (DFlash) | `incoai/Qwen3.8-27B-DFlash2` | 1.54x (image) | Identical |
 | Qwen3.5-9B | 8-bit | mlx_vlm native (DFlash) | `z-lab/Qwen3.5-9B-DFlash` | 1.64x (image), 2.17x (text) | Identical |
 | Gemma-4-12B | 8-bit | mlx_vlm native (DFlash) | `z-lab/gemma4-12B-it-DFlash` | 1.82x (image) | Diverged |
 | Qwen3.5-9B | 4-bit | mlx_vlm native (DFlash) | `z-lab/Qwen3.5-9B-DFlash` | 1.26-1.47x (image) | Identical |
 | Gemma-4-12B | 4-bit | mlx_vlm native (DFlash) | `z-lab/gemma4-12B-it-DFlash` | 1.51-1.63x (image) | Diverged |
 
-The Gemma-4-26B-A4B (MoE) row deliberately has no `models.json` entry using it — the 1.08x gain
-isn't worth the extra drafter download/complexity for a MoE target that's already fast per-token
-(few active params).
+The Gemma-4-26B-A4B (MoE) row deliberately has no `models.json` entry using it — **two
+independent drafters were tried and both land in the same ~1.05-1.1x range**: Google's own MTP
+(1.08x) and, in a later session, z-lab's DFlash (1.07x, measured directly on this machine via
+`mlx-dspark generate`, see §19) despite DFlash's own officially-published NVIDIA/vLLM benchmarks
+showing up to 3.7x on this exact model. The agreement between two differently-architected drafters
+confirms this is structural (the target is already fast per-token — few active params — so a
+dense drafter's own forward+verify cost eats most of what its decent accept rate would otherwise
+buy), not a drafter-quality problem that a better checkpoint would fix. §19 has the full
+methodology, a third candidate drafter identified but not tested (`makora-ai/gemma4-26b-a4b-dspark`,
+predicted worse — 3x larger than DFlash under the same constraint), and separately, confirms
+prompt caching itself (not speculative decoding) already works correctly for this model on both
+`mlx_vlm` and `mlx-dspark` with the project's current launch parameters.
 
 ### Greedy-decoding divergence: real, but no clean predictive rule found
 
@@ -958,3 +968,295 @@ doesn't validate the multiplier's portability to other chips (see open items bel
    cached" log messages for wide-GEMM crossover and CPU co-prefill split) — the measured numbers above
    are all POST-calibration; a cold first run on a fresh machine would be measurably slower than these
    numbers until that one-time calibration completes.
+
+---
+
+## 19. Gemma-4 sliding-window prompt caching — root cause, two frameworks' fixes both confirmed
+##     correct, one plausible-looking fix proved WRONG, and current launch params confirmed sufficient
+
+Added 2026-10-01. Triggered by a real multi-turn investigation (not a synthetic question): does
+prompt caching actually work for the Gemma-4 family given its sliding-window attention, on both
+backends this project supports, with the launch parameters `start_mlx_server.sh` already uses? Every
+claim below was tested against real, already-downloaded checkpoints on this machine (`gemma-4-26b-a4b-it-4bit`
+primarily, `gemma-4-12B-it-4bit` as a dense control), using the real installed `mlx_vlm` 0.7.4 and
+`mlx-dspark` 0.20.1 source directly in Python — not inferred from reading code or vendor docs alone,
+because one plausible-looking fix (below) looked correct by that kind of reasoning and was then
+disproven by actually running it.
+
+### Root cause
+
+Gemma 4's text model interleaves `full_attention` layers (`KVCache`, never evicts) with
+`sliding_attention` layers (`RotatingKVCache`, a fixed-size circular buffer — `sliding_window=512`
+on the 12B/E2B/E4B class, `1024` on `gemma-4-26b-a4b-it-4bit`). `RotatingKVCache` physically
+overwrites tokens once the window fills, by design, for memory efficiency. `mlx_vlm`'s own code
+(`generate/dispatch.py`'s `_cache_fully_retained`/`_prefix_cache_trim_amount`) documents the
+consequence directly: *"a cache can't be trimmed back to the shared prefix (wrapped rotating
+window); reusing it would corrupt state, so cold-prefill instead."* Confirmed empirically on a
+tiny synthetic Gemma-4 model: `RotatingKVCache.is_trimmable()` goes `False` the instant
+`offset > max_size`, and on the real `gemma-4-26b-a4b-it-4bit` after a 1040-token prefill (just 16
+over the 1024 window), 25 of 30 layers (the sliding ones) already show `fully_retained=False`.
+This is not a bug — mlx_vlm safely detects it and falls back to a full re-prefill rather than
+corrupting output — but it means a naive "resend the whole conversation" reuse path stops helping
+almost immediately in any real conversation.
+
+### A plausible-looking fix that is WRONG — do not do this
+
+The obvious-seeming fix: since the attention mask (not the cache object) enforces the actual
+sliding window (`create_attention_mask(..., window_size=self.window_size)` in
+`gemma4/language.py`, passed regardless of cache type), swap `RotatingKVCache` for a plain
+`KVCache` on the sliding layers — it never evicts, so it's trivially rewindable, and `mlx_vlm`'s
+existing APC "block" strategy should just work.
+
+Tested on an 8-layer **toy** Gemma-4 model (tiny dims, random weights, no quantization,
+`enable_moe_block=False`): output was bit-for-bit identical between stock and patched caches for
+14 steps, including well past the window wrap, with only ~1e-4 floating-point noise appearing
+several steps later — looked completely safe.
+
+Tested the identical patch on the **real** `gemma-4-26b-a4b-it-4bit` (quantized, MoE) and the
+**real, dense** `gemma-4-12B-it-4bit` (same architecture family, `enable_moe_block=False`): real
+divergence appeared immediately after the window wrap — up to 1.03e+01 absolute logit difference,
+and on the MoE model, **4 of 13 greedy next-tokens actually differed** from the unpatched run. The
+dense model's greedy tokens still matched 13/13 despite real logit perturbation (the gaps happened
+to stay wide enough), making the dense case look safe by output alone while the underlying
+numerics were already diverging.
+
+**Mechanism, traced to source**: `RotatingKVCache.make_mask()` returns `mask=None` for
+single-token decode once the window has fully wrapped (the physical ring buffer already *is*
+exactly the window, so no mask is needed). A plain `KVCache` never gets that shortcut — it always
+builds an explicit boolean mask array. Both attend to the mathematically identical set of key
+positions, but `mask=None` vs. an explicit mask array route through different internal branches of
+MLX's fused `mx.fast.scaled_dot_product_attention` Metal kernel — a genuine, reproducible
+floating-point-path difference (confirmed via a same-cache-type-twice control run returning exactly
+`0.0` — this machine's MLX execution is deterministic, so the non-zero diffs between cache types
+are real, not noise). This is invisible on a toy 8-layer model and compounds across 30-48 real
+layers into real logit shifts, and on a MoE target, tips the hard top-k expert-routing decision
+often enough to change output. **Conclusion: never swap `RotatingKVCache` for `KVCache` as a
+caching shortcut — it is not output-neutral on real models.**
+
+### `mlx_vlm`'s own cross-request APC — confirmed correct end-to-end, this IS the real fix
+
+`mlx_vlm`'s full `APCManager`/`APCCoordinator` system (what the server's `APC_ENABLED=1` actually
+wires up — a different, more capable code path than the single-session `prompt_cache_state`
+mechanism `dispatch.py` uses, which is the one that correctly refuses and cold-prefills above) has
+a dedicated "checkpoint" strategy specifically for hybrid/windowed caches: it stores an **exact
+copy** of the cache's `.state`/`.meta_state` (same primitive `RotatingKVCache.prefix_cache_snapshot()`/
+`.prefix_cache_restore()` expose) and restores it verbatim — it does not approximate or change
+cache type, so it does not hit the mechanism above.
+
+Tested directly (not inferred) on the real `gemma-4-26b-a4b-it-4bit`:
+- Raw snapshot/restore primitive: bit-for-bit identical (`0.0` diff, 10/10 greedy tokens) continuing
+  from a restored snapshot vs. an uninterrupted reference run, both **before and after** the window
+  wraps.
+- Full `APCCoordinator.commit()` → `.lookup()` → `.materialize_single()` pipeline, simulating two
+  genuinely different requests (Request A commits a checkpoint; Request B, a different request
+  sharing A's exact prefix plus a brand-new random suffix, looks it up): real cross-request HIT
+  (`prefix_len` matched exactly), `0.0` diff, 10/10 greedy tokens — both before and after the window
+  wrap.
+
+**`APC_CHECKPOINT_ENTRIES` capacity (default 2, never overridden by `start_mlx_server.sh`) is NOT a
+bottleneck.** Initially assumed this would cause misses once more than 2 conversations were live
+(the obvious reading of "resident checkpoint entries"). Tested 3 distinct conversations against a
+real `APCManager` configured exactly like `start_mlx_server.sh` (`APC_DISK_PATH` set): all 3
+committed to disk (confirmed via file listing — 3 `.safetensors` shards written) regardless of the
+entries cap, because `store_exact_cache()` (`apc.py:3580-3585`) unconditionally writes through to
+disk whenever a disk store is configured — the entries cap only governs the small RAM fast-path
+cache, not correctness. All 3 lookups HIT. Measured cost of the RAM-evicted (disk-tier) hit vs. a
+RAM-resident hit: 115-156ms vs. 109-145ms (modest difference) — both ~3x faster than a full cold
+prefill of the same length (459ms).
+
+**Conclusion: `start_mlx_server.sh`'s current mlx_vlm launch parameters
+(`APC_ENABLED=1 APC_NUM_BLOCKS=4096 APC_DISK_PATH=<set> APC_DISK_MAX_GB=5`) are confirmed
+sufficient for `gemma-4-26b-a4b-it-4bit` (and, structurally, any Gemma-4 variant) — no changes
+needed.** Note `APC_NUM_BLOCKS` itself is irrelevant to this model specifically (it governs the
+block-pool/"block" strategy; Gemma-4's hybrid cache always resolves to "checkpoint" strategy,
+confirmed via `APCCoordinator.strategy`) — the settings that actually matter here
+(`APC_CHECKPOINT_ENTRIES`/`APC_CHECKPOINT_INTERVAL_TOKENS`/`APC_CHECKPOINT_GUARD_TOKENS`, mlx_vlm's
+own hardcoded defaults: 2/2048/1) were never independently tuned by this project for checkpoint
+mode specifically — tested here and found adequate, not because they were deliberately chosen for
+this case.
+
+### `mlx-dspark`'s own `PrefixCache` — also confirmed correct, with one real asymmetry vs. `mlx_vlm`
+
+Important scoping note: `gemma-4-26b-a4b-it-4bit` has **no `serving` block in `models.json`**, so
+`model_advisor.py`'s default (`backend: "mlx_vlm"`) applies — `start_mlx_server.sh` only ever
+launches this model via `mlx_vlm`. The `mlx-dspark` testing below is a direct Python-level
+exercise of its `PrefixCache` class (reusing `mlx_vlm`'s own loaded model/cache objects — confirmed
+via `mlx_dspark/target.py` that `Target.make_cache()`/`.run()` for a gemma4 target call
+`model.language_model.make_cache()`/`.__call__()` directly, so this is not a different
+implementation to re-verify), not a test of this project's actual launch path, which doesn't
+currently route this model id to that backend.
+
+Drove `mlx_dspark.prefix_cache.PrefixCache`'s real `acquire()`/`checkpoint()`/`store()` state
+machine end-to-end on the real model: cross-request hit confirmed (`reuse_len=1084`), `0.0` diff,
+6/6 greedy tokens vs. a fresh reference — correct, same underlying exact-copy mechanism as
+`mlx_vlm`'s.
+
+**One real, confirmed asymmetry**: `mlx-dspark` discovers checkpoint mode *adaptively* —
+`checkpoint=False` initially (`server.py:457-459`, via `target_cache_reusable()`), and only
+latches to `True` after the **first** request that crosses the window during its own generation
+fails to store (`store()` returns `None`/falsy and sets `self.checkpoint_mode = True`, but that one
+request itself gets zero caching benefit — confirmed live: request 1's `store()` returned `None`;
+request 2, now that the mode was latched, correctly got `checkpoint()` called and request 3 then
+hit it). `mlx_vlm` has no equivalent gap — it determines checkpoint-vs-block strategy upfront from
+the cache *types* `make_cache()` returns, never from a failed attempt.
+
+**No CLI flag forces checkpoint-mode-from-the-start** (checked every `--prefix-cache-*` argument in
+`mlx_dspark/cli.py`: `--prefix-cache-slots`, `--prefix-cache-rungs`, `--prefix-cache-dir`,
+`--prefix-cache-max-ram-mb`, `--no-prefix-cache` — none of them). `PrefixCache.__init__` does accept
+a `checkpoint: bool` constructor argument, so this is a trivial code change if ever wanted, but
+there is a free workaround: **attaching a DFlash drafter forces `checkpoint=True` unconditionally**
+(`server.py:462-471`, because DFlash's own drafter-context cache is non-trimmable by design), which
+eliminates this gap as a side effect for any DFlash-paired target. A DSpark drafter does not get
+this; it keeps the adaptive-latch behavior.
+
+**Net: this is a one-time, bounded, minor cost (exactly one request, once, per server process
+lifetime), not something requiring a launch-parameter change** — and moot for this specific model
+today since it isn't the active backend.
+
+### Drafter research for `gemma-4-26b-a4b-it-4bit` (speculative decoding, separate from prompt caching)
+
+Three candidates identified; one tested for real, one ruled out, one left untested with a specific
+reason:
+
+1. **Google's own MTP** (`mlx-community/gemma-4-26B-A4B-it-assistant-bf16`) — already in the table
+   above, already tested in an earlier session: 1.08x, not integrated.
+2. **z-lab's DFlash** (`z-lab/gemma-4-26B-A4B-it-DFlash`) — same lab as this project's existing
+   `gemma4-12B-it-DFlash`/`Qwen3.5-9B-DFlash` drafters; real arXiv paper (2602.06036), Apache-2.0,
+   61 likes/14K downloads, officially benchmarked (vLLM, NVIDIA B300) up to 3.7x (task-dependent,
+   1.8x-3.7x). **Downloaded and tested for real** via `mlx-dspark generate --mode dflash` (same
+   methodology as the table above): 1.07x decode speedup on both a coding prompt (86.9→92.6 tok/s,
+   accept 3.01/round) and a math prompt (76.7→82.2 tok/s, accept 3.48/round) — matching MTP's
+   result almost exactly, confirming the bottleneck is structural (this MoE target's active weight
+   is only ~2.16GB/token, already fast per-step; a 0.4B dense drafter's own forward+verify cost
+   eats most of the savings its decent accept rate would otherwise buy), not a drafter-quality gap
+   DFlash's better pedigree would fix. On the math prompt, DFlash's own prefill overhead actually
+   made end-to-end throughput *lower* than baseline (47.7 vs. 53.7 tok/s) despite faster decode.
+   Greedy divergence observed on the coding prompt (a different, equally valid implementation
+   chosen) but not the math prompt (byte-identical) — the same "no clean predictive rule" pattern
+   documented earlier in this section, not a new issue.
+3. **makora-ai's DSpark** (`makora-ai/gemma4-26b-a4b-dspark`) — real arXiv paper (2607.05147),
+   smaller/less-established lab (34 followers) but a methodologically serious, honest benchmark
+   writeup (served not teacher-forced, discloses chat is weaker than its math/code focus). `mlx-dspark`'s
+   own source cites this exact checkpoint as a dev test fixture (`config.py:231`, confirming it
+   loads correctly), but it is not a registered/vetted entry in `mlx-dspark`'s own `REGISTRY` (checked
+   the full list — no Gemma-4-26B-A4B entry exists there at all). **Not tested**: at 1.2B params
+   (3x DFlash's 0.4B), it would face the identical structural bottleneck more severely, so a worse
+   result than DFlash's 1.07x is the predicted outcome, not a measured one.
+
+A fourth lead (`undeadindustries/gemma-4-26b-a4b-it-dflash-drafter-nvfp4-smlp`) was investigated and
+ruled out: it's a solo creator's drafter trained against their *own* custom NVFP4 requantization of
+the base model (`undeadindustries/gemma-4-26b-a4b-it-nvfp4-hybrid-smlp`), explicitly incompatible
+with any other verifier including the `mlx-community/gemma-4-26b-a4b-it-4bit` checkpoint this
+project actually uses ("Do not pair with any other Gemma 4 26B drafter — wrong verifier → ~0%
+acceptance"), and low community engagement (0 likes, 59 downloads/month).
+
+**Conclusion: no drafter is worth adding for this model** — two independently-trained, differently
+architected drafters (MTP, DFlash) both land at ~1.07-1.08x, confirming this is the target's own
+structural ceiling, re-confirming the project's original decision with a second, more reputable
+drafter rather than just the one prior data point.
+
+### Adjacent ecosystem notes (for context, not integrated into this project)
+
+- **"ml studio"** = LM Studio's open-source `mlx-engine` (`lmstudio-ai/mlx-engine`, MIT). Solves the
+  identical sliding-window rewind problem with a different mechanism: continuously copies each
+  about-to-be-evicted local-attention chunk to a disk-backed append log at 256-token boundaries
+  *during* generation, so arbitrary earlier boundaries can be reconstructed from logged chunks
+  instead of relying on periodic whole-cache checkpoints. A legitimate reference design, not
+  something this project depends on or needs — `mlx_vlm`'s checkpoint strategy and `mlx-dspark`'s
+  rung/checkpoint system both already solve the correctness problem via a different, also-correct
+  approach (exact snapshotting at commit-time boundaries rather than continuous chunked logging).
+- **mlx-optiq** — investigated properly (installed and read its actual source, not just its PyPI
+  README, which doesn't name "prefix caching" as a feature at all). It does have a real, substantial
+  system under a different name — **"SessionBank"** (`optiq/runtime/mtp/session_bank.py` +
+  `cache_state.py`): SHA-256 token-hash matching, exact-clone restore, granular `CacheMissReason`
+  diagnostics, a larger default capacity (8 entries vs. this project's 2), byte/TTL-based eviction,
+  and a self-verifying design (its own docstring: "the benchmark gate compares the warm result
+  against a cold full prefill before any generation path uses it"). It also implements its own
+  vLLM-style paged KV cache (`VllmMetalPagedKVCache`) that, unlike `RotatingKVCache`, never
+  physically evicts (`is_trimmable()` returns unconditionally `True`; `trim()` is pure offset
+  arithmetic) — architecturally capable of arbitrary-position rewind, not just
+  checkpoint-boundary reuse. **However, this entire SessionBank/paged-cache subsystem is built
+  around `mlx-lm` text models, and Gemma 4's own entry in mlx-optiq's internal architecture-support
+  registry (`optiq/runtime/mtp/backends/registry.py`) is marked
+  `support_level="recognized-backend-pending"` — the lowest maturity tier it tracks (12 of ~23
+  entries sit there; only one entry anywhere in the whole registry reaches `"verified-native"`, and
+  it isn't Gemma).** For actual multimodal-capable Gemma 4 serving, mlx-optiq vendors a stripped
+  copy of `mlx_vlm`'s own architecture code (`optiq/vlm/_mlxvlm/`) that **drops the entire APC
+  subsystem** (no `apc.py`/`apc_adapters.py`/`apc_coordinator.py`/`apc_storage.py` anywhere in the
+  vendored tree). Net: no real indication mlx-optiq's caching would be better for Gemma 4
+  specifically — the interesting part of its design doesn't appear to reach Gemma 4 yet, and the
+  path that does serve Gemma 4 looks weaker than what's already confirmed working here. Also a full
+  alternative serving stack (own quantization, own server) — adopting it would mean replacing
+  `mlx_vlm`/`mlx-dspark` entirely, not swapping a caching library. Not run live; this is
+  source-level evidence, not a benchmark.
+- **mlx-vllm** — two independent community re-implementations exist on GitHub
+  (`Mindlx/mlx-vllm`, `vishnualpha/mlx-vllm`); no evidence found of VLM/Gemma-4/windowed-attention
+  awareness in either. Unverified, not evaluated further.
+
+### Upstream version check (2026-10-01 follow-up): no newer release, but real open work found
+
+Checked whether a newer `mlx_vlm`/`mlx-dspark` release has better Gemma-4 prefix-caching support
+than what's documented above.
+
+- **Both packages are already at the latest PyPI release** (`mlx-vlm` 0.7.4, `mlx-dspark` 0.20.1 —
+  confirmed via `pip index versions`). Nothing to upgrade to.
+- **`mlx-dspark`'s GitHub `main` has exactly one commit beyond the installed 0.20.1**, and it's a
+  docs-site page, not a code change. No open issues/PRs matched a "gemma + cache + sliding" search.
+  Nothing new there.
+- **`mlx-vlm`'s GitHub `main` does have unreleased commits beyond the 0.7.4 tag**, but none of their
+  titles are caching-related (MoE router gradient stopping, a new "MoG"/"Laya"/"Decider" decision
+  API, Qwen3-Omni batching, test-harness work). Two *open, unmerged* items are directly relevant
+  though:
+  1. **PR [#2356](https://github.com/Blaizzy/mlx-vlm/pull/2356)**, "apc: a restored single row gets
+     the cache a cold row would" (open, no reviews as of this check). Real, measured bug: a restored
+     single-row APC hit currently goes through `APCCoordinator.merge_rows`, which wraps it in a
+     `BatchKVCache` even for one row. On `qwen3_5` models this triggers a per-decode-step
+     extract/merge shortcut, independently reproduced by a second reviewer on an M5 Pro (same chip
+     class as this project's dev machine) at **0.655x** restored/cold decode speed on a
+     26,690-token prefix, plus 3-10GiB of extra retained GPU memory from the per-step allocator
+     churn — not a leak, but held for the whole decode. The PR's own test suite includes `gemma4`
+     for correctness parity (restored output must match cold output bit-for-bit), but the *speed*
+     regression being fixed is specifically tied to `qwen3_5`'s single-row shortcut, not confirmed as
+     a `gemma4`-specific issue. The memory-retention finding comes from the general batch-wrap
+     mechanism `merge_rows` always uses today and plausibly extends to `gemma4` restores too, but
+     this is not measured for `gemma4` in the PR.
+  2. **Issue [#1559](https://github.com/Blaizzy/mlx-vlm/issues/1559)**, "Follow-up: APC + kv-bits
+     full batch/SWA coverage" (`confirmed`, `priority/p1`, open since Jul 2026). Directly names
+     Gemma 4: *"SWA layer caches (`BatchRotatingKVCache`) not clonable for exact store on batch
+     path"*, smoke-tested on `gemma-4-e2b-it-4bit`. **Narrow but real scope: this gap only applies
+     when `--kv-bits` quantization is combined with APC on the server's concurrent/batched request
+     path** — degrades gracefully (store rejected/logged — "prefix reuse still works" per the
+     smoke note — not corrupted), consistent with every other safe-fallback behavior found in §19.
+     Every APC test in §19 used **unquantized** KV cache; this project has not independently
+     verified the APC+`--kv-bits`+Gemma-4 combination specifically, and per this issue, upstream
+     has already found and documented a real gap there. If `start_mlx_server.sh` ever launches a
+     Gemma-4 entry with `--kv-bits` set (`model_advisor.py`'s `recommend_kv_bits_and_context` can
+     select this under memory pressure) with APC also enabled (always true — `APC_ENABLED=1` is
+     unconditional), the sliding layers likely won't get cached on the batched server path until
+     this issue is resolved upstream. Not independently tested here; flagged for whoever next
+     touches `--kv-bits` + Gemma-4 together.
+  - (A third open PR, [#2387](https://github.com/Blaizzy/mlx-vlm/pull/2387) "Allow a Gemma 4 model
+    with no vision tower," was also found but is unrelated to caching — a construction-crash fix
+    for a custom trimmed checkpoint with `vision_config: null`.)
+
+### Open items specific to this section
+
+1. **All speedup/latency numbers above are single-machine (this M5 Pro), single-prompt-pair
+   measurements** — same caveat as §18's open items 1 and 4, not independently re-derived here.
+2. **`mlx-dspark`'s drafter-context-cache checkpoint path (`DFlashCtxWindow`, the "DFlash is
+   checkpoint-only" branch in `server.py:448-454`) was not independently exercised** — only the
+   target-side `PrefixCache` state machine was tested directly; the combined target+drafter-context
+   checkpoint/restore round-trip when a drafter is actually attached is unverified. Low priority
+   given §19's own conclusion that no drafter is worth attaching to this model.
+3. **The `APC_CHECKPOINT_INTERVAL_TOKENS`/`GUARD_TOKENS` defaults (2048/1) were accepted, not
+   independently tuned** — found adequate for the cross-request scenario tested (two requests
+   sharing an exact prefix), but a scenario with many small, staggered checkpoint boundaries within
+   one very long single conversation (where `INTERVAL_TOKENS` spacing matters more) wasn't tested.
+4. **The `APC_ENABLED=1` + `--kv-bits` + Gemma-4 combination on the batched server path is an
+   upstream-confirmed gap (mlx-vlm issue #1559), not independently verified here** — see "Upstream
+   version check" above. Worth a real test (same methodology as the rest of §19) before relying on
+   `--kv-bits` for any Gemma-4 entry if APC's cross-request caching matters for that use case.
+5. **PR #2356's restored-row memory/speed fix is unmerged** — worth re-checking whether it landed
+   (and whether it measurably helps `gemma-4-26b-a4b-it-4bit` specifically, which was not in its
+   benchmark table) next time this project upgrades `mlx-vlm` past 0.7.4.
+
