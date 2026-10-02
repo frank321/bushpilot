@@ -272,6 +272,12 @@ import sys
 
 config_path, model_id, context_window, base_url = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 
+# Display strings for the OpenCode model picker. Provider name is the project name;
+# the model name is just its id (see the note at the assignment site for why the old
+# "(no LiteLLM)" suffixes were removed).
+MLX_DIRECT_PROVIDER_NAME = "BushPilot"
+MLX_DIRECT_MODEL_NAME = lambda mid: mid
+
 
 def strip_jsonc(s):
     out = []
@@ -328,10 +334,16 @@ provider = parsed.setdefault("provider", {})
 had_litellm = "litellm" in provider
 
 existing = provider.get("mlx-direct", {})
+# Also compare the display NAMES, not just the structural bits: OpenCode renders the
+# provider name and model name together, so a stale/duplicated name would otherwise be
+# left in place forever (the earlier "...(direct, no LiteLLM)" + "MLX direct (no
+# LiteLLM)" pair concatenated into a stutter that this check never corrected).
 already_correct = (
     not had_litellm
     and existing.get("options", {}).get("baseURL") == base_url
+    and existing.get("name") == MLX_DIRECT_PROVIDER_NAME
     and model_id in existing.get("models", {})
+    and existing["models"][model_id].get("name") == MLX_DIRECT_MODEL_NAME(model_id)
     and existing["models"][model_id].get("limit", {}).get("context") == context_window
 )
 if already_correct:
@@ -344,15 +356,20 @@ provider.pop("litellm", None)
 
 mlx_direct = provider.setdefault("mlx-direct", {
     "npm": "@ai-sdk/openai-compatible",
-    "name": "MLX direct (no LiteLLM)",
 })
+# Display name is "BushPilot" (this project name), NOT "(no LiteLLM)" -- LiteLLM is
+# long gone, so that qualifier was pure legacy noise, and having it on BOTH the provider
+# and the model name made the combined OpenCode label read as a duplicated stutter. The
+# model own name is just its id; the provider name already identifies the project, so
+# OpenCode shows e.g. "mlx-community/gemma-4-26b-a4b-it-4bit  BushPilot".
+mlx_direct["name"] = MLX_DIRECT_PROVIDER_NAME
 # Hardcoded, not "{env:...}" -- confirmed nothing ever set that env var, and the port
 # is already a fixed constant in the supervisor, so there is nothing dynamic to gain
 # by routing this through the environment instead.
 mlx_direct["options"] = {"baseURL": base_url, "apiKey": "sk-mlx-direct-local"}
 models = mlx_direct.setdefault("models", {})
 models[model_id] = {
-    "name": f"{model_id} (direct, no LiteLLM)",
+    "name": MLX_DIRECT_MODEL_NAME(model_id),
     "limit": {"context": context_window, "output": 4096},
 }
 

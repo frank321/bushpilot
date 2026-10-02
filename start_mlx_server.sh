@@ -76,6 +76,14 @@ mkdir -p "$BUSHPILOT_VENV" "$BUSHPILOT_STATE_DIR" "$BUSHPILOT_LOG_DIR" "$BUSHPIL
 
 MLX_STATE_FILE="$BUSHPILOT_STATE_DIR/mlx-loaded.txt"
 MLX_LOG_FILE="$BUSHPILOT_LOG_DIR/mlx-server.log"
+# The log is truncated ONCE per run by start_run_log() (called from main), then every
+# writer--this script's own profile/launch/teardown lines AND the engine's redirected
+# stdout/stderr--APPENDS. This replaced a `> "$MLX_LOG_FILE"` on the engine launch,
+# which would have erased anything logged before the process started.
+start_run_log() {
+    : > "$MLX_LOG_FILE"
+    printf '%s - ===== BushPilot run start (pid $$) =====\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$MLX_LOG_FILE"
+}
 
 MLX_PYTHON="$BUSHPILOT_VENV/bin/python"
 MLX_SERVER_MODULE="mlx_vlm.server"
@@ -185,9 +193,13 @@ MEM_ABORT_BELOW_PCT=10
 MEM_WARN_BELOW_PCT=18
 MEM_CAUTION_BELOW_PCT=25
 # Require this many CONSECUTIVE polls in the abort zone before tearing down, to absorb
-# a single noisy sample — except the discrete CRITICAL pressure-level override below,
-# which is treated as unambiguous and acts immediately (same as monitor_memory.sh did).
+# a single noisy sample. The discrete CRITICAL pressure-level override below applies
+# the SAME debounce (it originally acted on a single sample): kern.memorystatus_vm_
+# pressure_level is a momentary high-water signal under active memory use, not a
+# stable state, so one transient CRITICAL reading shouldn't kill a session on its
+# own -- sustained CRITICAL (3 consecutive 5s polls) still tears down.
 MEM_ABORT_CONSECUTIVE_POLLS=3
+MEM_CRITICAL_CONSECUTIVE_POLLS=3
 
 DASHBOARD_POLL_INTERVAL=5
 
@@ -851,6 +863,14 @@ ensure_mlx_running() {
 
         if [[ "$loaded_state" == "$desired_state" ]]; then
             log_success "MLX server already healthy with $MLX_MODEL (context: ${CONTEXT_WINDOW} tokens)"
+            # Append-only (do NOT truncate -- the running server's own log must survive,
+            # and its fd keeps writing to this file). Notes the attach plus a fresh
+            # hardware snapshot, since free memory at attach time is what any FUTURE
+            # advisor consult in this terminal would see.
+            local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
+            printf '%s - ATTACHED to already-running server (state=%s)\n' "$ts" "$loaded_state" >> "$MLX_LOG_FILE"
+            log_hardware_profile
+            flush_context_warning
             return 0
         fi
 
@@ -968,7 +988,18 @@ ensure_mlx_running() {
         launch_cmd=("$MLX_PYTHON" -m "$MLX_SERVER_MODULE" "${mlx_args[@]}")
     fi
 
-    "${launch_cmd[@]}" > "$MLX_LOG_FILE" 2>&1 &
+    # Fresh launch coming up: reset the log ONCE here (not at script start -- an
+    # attach to an already-healthy server returns above without reaching this, and
+    # truncating then would have destroyed the running server's own log), then
+    # record this run's hardware profile and launch decision before the engine
+    # starts appending, so context/kv-bits/backend/drafter/APC/concurrency are
+    # always reconstructable from the log alone.
+    start_run_log
+    log_hardware_profile
+    flush_context_warning
+    log_launch_config "${launch_cmd[@]}"
+
+    "${launch_cmd[@]}" >> "$MLX_LOG_FILE" 2>&1 &
     MLX_PID=$!
 
     if ! wait_for_url "http://$MLX_HOST:$MLX_PORT/health" 600 "$MLX_PID"; then
@@ -993,11 +1024,84 @@ ensure_mlx_running() {
 # ---------------------------------------------------------------------------
 DASHBOARD_START_TS=$(date +%s)
 MEM_ABORT_STREAK=0
+MEM_CRITICAL_STREAK=0
 TEARDOWN_REASON=""
+CONTEXT_WARNING_PENDING=""
+
+# Appends a timestamped line to the server log so a teardown's REASON survives after
+# the terminal is gone -- previously full_teardown only echoed to the terminal, so an
+# unattended memory-backstop stop left the log ending in a bare uvicorn "Shutting down"
+# with no explanation (real incident: had to reconstruct the cause from sysctls/log show).
+log_teardown() {
+    local reason="$1"
+    [[ -z "$reason" ]] && return 0
+    local ts pct pressure level sw rss
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    pct="$(get_percent_free 2>/dev/null)"
+    pressure="$(get_pressure_level 2>/dev/null)"
+    level="$(pressure_level_name "${pressure:-0}")"
+    sw="$(sysctl -n vm.swapusage 2>/dev/null | sed -n 's/.*used = \([0-9.]*M\).*/\1/p')"
+    rss="$(get_mlx_rss_gb "${MLX_PID:-}" 2>/dev/null)"
+    printf '%s - TEARDOWN: %s (free=%s%% pressure=%s swap_used=%s MLX_RSS=%sGB)\n' \
+        "$ts" "$reason" "${pct:-?}" "${level:-unknown}" "${sw:-?}" "${rss:-?}" >> "$MLX_LOG_FILE"
+}
+
+# Records the hardware profile that model_advisor.py evaluated every model against, so
+# a later bad recommendation (context too large, model wrongly excluded) can be traced
+# back to the inputs: which chip, total RAM, how much was considered "used"/"free", and
+# the current kernel free%/pressure. Pulled from `model_advisor.py --list-json` (the one
+# command that computes all of these consistently) rather than re-deriving them in bash.
+# Appends, so it's safe whether or not the engine has written to the log yet.
+log_hardware_profile() {
+    [[ -x "$MLX_PYTHON" ]] || return 0
+    local ts info
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    info="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-json 2>/dev/null \
+        | "$MLX_PYTHON" -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print("chip=%s gpu_cores=%s total_ram=%sGB used=%sGB free=%sGB" % (
+    d.get("chip"), d.get("gpu_cores"),
+    round(d["total_ram_gb"], 1) if d.get("total_ram_gb") else "?",
+    round(d["current_wired_gb"], 2) if d.get("current_wired_gb") is not None else "?",
+    round(d["free_wired_gb"], 2) if d.get("free_wired_gb") is not None else "?",
+))
+' 2>/dev/null)" || true
+    [[ -z "$info" ]] && info="(hardware profile unavailable)"
+    local pct pressure
+    pct="$(get_percent_free 2>/dev/null)"
+    pressure="$(pressure_level_name "$(get_pressure_level 2>/dev/null || echo 0)")"
+    printf '%s - HARDWARE PROFILE: %s | kernel_free=%s%% pressure=%s\n' \
+        "$ts" "$info" "${pct:-?}" "${pressure:-unknown}" >> "$MLX_LOG_FILE"
+}
+
+# Records what was selected and the EXACT argv the engine was launched with -- the one
+# place to see, after the fact, how context size / kv-bits / backend / drafter / APC /
+# concurrency actually resolved for this run. Appended just before launch.
+log_launch_config() {
+    local ts
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    {
+        printf '%s - SELECTED MODEL: %s (%s)  backend=%s  context=%s  kv_bits=%s  concurrency=%s\n' \
+            "$ts" "${LOCAL_MODEL:-?}" "${MLX_MODEL:-?}" "${MLX_BACKEND:-mlx_vlm}" \
+            "${CONTEXT_WINDOW:-?}" "${KV_BITS:-unquantized}" "${CONCURRENCY:-?}"
+        local drafter="${MLX_DRAFTER:-${MLX_DRAFT_MODEL:-}}"
+        local mode="${MLX_DSPARK_MODE:-}"
+        printf '%s - SPECULATION: drafter=%s  mode=%s  draft_kind=%s  draft_block_size=%s\n' \
+            "$ts" "${drafter:-none}" "${mode:-none}" "${MLX_DRAFT_KIND:-none}" "${MLX_DRAFT_BLOCK_SIZE:-none}"
+        printf '%s - APC: enabled=%s  num_blocks=%s  disk_path=%s  disk_max_gb=%s\n' \
+            "$ts" "${APC_ENABLED:-0}" "${APC_NUM_BLOCKS:-?}" "${APC_DISK_PATH:-?}" "${APC_DISK_MAX_GB:-?}"
+        printf '%s - LAUNCH ARGV: %s\n' "$ts" "$*"
+    } >> "$MLX_LOG_FILE"
+}
 
 full_teardown() {
     local reason="${1:-}"
     [[ -n "$reason" ]] && echo -e "\n[!] Stopping: $reason"
+    log_teardown "$reason"
     stty sane 2>/dev/null || true
     wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 20 || true
     rm -f "$MLX_STATE_FILE"
@@ -1136,11 +1240,24 @@ W = 90
 def line(s=""):
     s = s[:W - 4]
     print("│ " + s.ljust(W - 4) + " │")
+def wrap_line(s="", indent="                "):
+    # For free-text that must not be lost (teardown reasons): wraps onto as many
+    # boxed lines as needed instead of line()'s silent hard truncation.
+    width = W - 4
+    if not s:
+        line("")
+        return
+    first = True
+    while s:
+        avail = width - (0 if first else len(indent))
+        chunk, s = s[:avail], s[avail:]
+        line(chunk if first else indent + chunk)
+        first = False
 def rule(ch="─"):
     print("├" + ch * (W - 2) + "┤")
 
 print("┌" + "─" * (W - 2) + "┐")
-line(f"bushpilot  {model}  up {uptime}   [mlx-dspark]")
+line(f"BushPilot  {model}  up {uptime}   [mlx-dspark]")
 line(f"API endpoint  http://{host}:{port}/v1   (OpenAI-compatible -- point any tool here)")
 line(f"context {context}   concurrency {concurrency}")
 rule()
@@ -1169,7 +1286,7 @@ rule()
 line("last error: none")
 if teardown_reason:
     rule()
-    line(f"⚠ {teardown_reason}")
+    wrap_line(f"⚠ {teardown_reason}", indent="  ")
 print("└" + "─" * (W - 2) + "┘")
 print(f"  To connect a tool: open another terminal and run {launch_cmd}")
 print("  Ctrl-C / q : stop everything")
@@ -1205,13 +1322,27 @@ W = 90
 def line(s=""):
     s = s[:W - 4]
     print("│ " + s.ljust(W - 4) + " │")
+def wrap_line(s="", indent="                "):
+    # For free-text that must not be lost (error messages, teardown reasons): wraps
+    # onto as many boxed lines as needed instead of line()'s silent hard truncation.
+    # Continuation lines are prefixed with `indent` to line up under the value column.
+    width = W - 4
+    if not s:
+        line("")
+        return
+    first = True
+    while s:
+        avail = width - (0 if first else len(indent))
+        chunk, s = s[:avail], s[avail:]
+        line(chunk if first else indent + chunk)
+        first = False
 def rule(ch="─"):
     print("├" + ch * (W - 2) + "┤")
 def gb(v):
     return f"{v/1e9:.1f}" if isinstance(v, (int, float)) else "—"
 
 print("┌" + "─" * (W - 2) + "┐")
-line(f"bushpilot  {model}  up {uptime}")
+line(f"BushPilot  {model}  up {uptime}")
 line(f"API endpoint  http://{host}:{port}/v1   (OpenAI-compatible -- point any tool here)")
 line(f"context {context}   concurrency {concurrency}   APC: {'on' if apc_on == '1' else 'off'}")
 rule()
@@ -1241,10 +1372,10 @@ rule()
 line(f"CONNECTED       {connected if connected else 'no tool connected yet'}")
 rule()
 err = summary.get("last_error") or "none"
-line(f"last error: {err}")
+wrap_line(f"last error: {err}", indent="            ")
 if teardown_reason:
     rule()
-    line(f"⚠ {teardown_reason}")
+    wrap_line(f"⚠ {teardown_reason}", indent="  ")
 print("└" + "─" * (W - 2) + "┘")
 print(f"  To connect a tool: open another terminal and run {launch_cmd}")
 print("  Ctrl-C / q : stop everything")
@@ -1260,8 +1391,13 @@ check_memory_backstop() {
     pressure="$(get_pressure_level)"
 
     if [[ -n "$pressure" && "$pressure" -eq 4 ]]; then
-        TEARDOWN_REASON="Memory pressure CRITICAL — stopping to protect the machine."
-        return 1
+        MEM_CRITICAL_STREAK=$((MEM_CRITICAL_STREAK + 1))
+        if [[ "$MEM_CRITICAL_STREAK" -ge "$MEM_CRITICAL_CONSECUTIVE_POLLS" ]]; then
+            TEARDOWN_REASON="Memory pressure CRITICAL for ${MEM_CRITICAL_STREAK} consecutive checks — stopping to protect the machine."
+            return 1
+        fi
+    else
+        MEM_CRITICAL_STREAK=0
     fi
 
     if [[ -n "$pct_free" ]] && awk -v p="$pct_free" -v a="$MEM_ABORT_BELOW_PCT" 'BEGIN{exit !(p<a)}'; then
@@ -1274,6 +1410,51 @@ check_memory_backstop() {
         MEM_ABORT_STREAK=0
     fi
     return 0
+}
+
+warn_if_context_exceeds_recommendation() {
+    # Only meaningful in the fixed-model form (interactive mode derived CONTEXT_WINDOW
+    # FROM the advisor, so it can't exceed it). No LOCAL_MODEL id means we can't look
+    # the model up; no advisor/python yet means skip silently rather than block launch.
+    [[ "$INTERACTIVE" == "true" ]] && return 0
+    [[ -z "$LOCAL_MODEL" ]] && return 0
+    [[ -x "$MLX_PYTHON" ]] || return 0
+
+    local recommended
+    recommended="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --resolve "$LOCAL_MODEL" 2>/dev/null \
+        | "$MLX_PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('recommended_context') or '')" 2>/dev/null)" || true
+    # Advisor exits non-zero (and prints nothing) when the model doesn't fit at all --
+    # that's exactly the case worth warning about, so don't bail on empty here.
+    if [[ -z "$recommended" ]]; then
+        log_error "⚠ Context check: model_advisor.py reports '$LOCAL_MODEL' does not fit this machine's free memory at any context."
+        log_error "  You requested ${CONTEXT_WINDOW} tokens. Continuing because this is the explicit fixed-model form, but the memory backstop may stop the server."
+        _log_context_warning "$LOCAL_MODEL" "$CONTEXT_WINDOW" "does_not_fit"
+        return 0
+    fi
+
+    if [[ "$CONTEXT_WINDOW" -gt "$recommended" ]]; then
+        log_error "⚠ Context check: you requested ${CONTEXT_WINDOW} tokens, but model_advisor.py recommends at most ${recommended} for $LOCAL_MODEL on this machine's free memory."
+        log_error "  A larger context grows the KV cache and can trip the memory backstop mid-session. Continuing since you asked explicitly."
+        _log_context_warning "$LOCAL_MODEL" "$CONTEXT_WINDOW" "$recommended"
+    fi
+}
+
+_log_context_warning() {
+    # BUFFERS instead of appending: the fresh-launch path truncates the log in
+    # ensure_mlx_running AFTER this runs (warn happens early in main(), before a
+    # potentially long model download -- the terminal warning must not wait for
+    # that), so an immediate append would be erased by start_run_log. flush_context_
+    # warning() writes the buffered line(s) after the truncation point; on the
+    # attach path (no truncation) they're flushed there instead.
+    local model="$1" requested="$2" recommended="$3"
+    local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    CONTEXT_WARNING_PENDING+="${CONTEXT_WARNING_PENDING:+$'\n'}${ts} - CONTEXT WARNING: requested=${requested} recommended=${recommended} model=${model} (fixed-model CLI form bypasses model_advisor.py)"
+}
+
+flush_context_warning() {
+    [[ -n "${CONTEXT_WARNING_PENDING:-}" ]] || return 0
+    printf '%s\n' "$CONTEXT_WARNING_PENDING" >> "$MLX_LOG_FILE"
+    CONTEXT_WARNING_PENDING=""
 }
 
 run_dashboard() {
@@ -1316,6 +1497,16 @@ main() {
     # mlx-vlm install still has to happen before that, since model_advisor.py's picker
     # itself needs them regardless of which backend gets selected.
     resolve_serving_config
+
+    # Fixed-model CLI form: the 3rd positional arg sets CONTEXT_WINDOW directly and
+    # never consults model_advisor.py (see the ARGS[2] default near the top). That's a
+    # deliberate escape hatch, but it silently allows a context far above what this
+    # machine can hold -- a real incident: `... <id> <hf-id> 262144` on a 24GB Mac put
+    # the KV cache at ~10GB and tripped the memory backstop. Warn (and log the same
+    # line into the server log) when the requested context exceeds the advisor's own
+    # memory-fit recommendation for this model; never override the user's choice.
+    warn_if_context_exceeds_recommendation
+
     ensure_backend_installed
 
     log_info "Local model server starting with $LOCAL_MODEL ($MLX_MODEL), context ${CONTEXT_WINDOW} tokens"
