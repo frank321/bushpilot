@@ -449,6 +449,86 @@
       "mlx_vlm_version": "0.7.0",
       "mlx_version": "0.32.2",
       "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-4bit": {
+      "model_id": "mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-4bit",
+      "verdict": "SAFE",
+      "reason": "MANUAL VERDICT (automated script's generic recall probe is incompatible with this reasoning model's <think> traces -- see below). Admission-gate enforcement confirmed automatically and cleanly at both scales: low_kv_probe (bound=256 vs 765-token prompt) and extreme_low_kv_probe (bound=32 vs 69-token prompt, max_tokens=1) both correctly returned HTTP 400 rejections, matching this project's own SAFE criteria -- no silent truncation/ignoring of the cap. The moderate-scale phase's automated recall check (bound=1024, same 765-token filler prompt, max_tokens=60) returned HTTP 200 but with content=null/finish_reason=length: NOT a max-kv-size enforcement failure (recall never silently succeeded with wrong/missing content under an exceeded bound -- the bound was never exceeded here, 765+60=825 < 1024) -- it is this model being a reasoning model: it spends its entire completion budget inside a <think>...</think> block before emitting any user-facing answer, and the fixed 60-token budget (sized for direct-answer instruct models) is nowhere near enough. Manually confirmed recall correctness separately with a short, non-filler prompt (56 prompt tokens) and a large completion budget: 4bit model recalled the exact planted secret ('The secret launch code is ZEBRA-9471-QUARTZ.') using 290 completion tokens (max_tokens=400, finish_reason=stop); 8bit model needed more budget (633 completion tokens, max_tokens=1500, finish_reason=stop) but also recalled exactly correctly. Together: the admission gate rejects oversized requests at every scale tested, and the model answers correctly once given room to think -- same SAFE bar this project's automated script applies to non-reasoning models, just confirmed via a different split of probes because the single fixed-budget probe this script uses doesn't fit a model that reasons before answering. This gap is generic to ANY reasoning model in this catalog (also affects the already-present but still-untested deepseek-r1-0528-qwen3-8b-* and deepseek-r1-distill-qwen-32b-* entries), not specific to this one -- the script itself was not changed to raise its budgets, to avoid altering the measurement scale used for every other model's already-recorded results; it WAS fixed for an unrelated, separately-confirmed bug (see mlx_vlm_server_v1_models_regression note below) that produced false 'stale process' positives for every model, not just this one.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 825 context tokens (765 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe_automated": {
+        "http_code": 200,
+        "prompt_tokens": 765,
+        "completion_tokens": 60,
+        "content": null,
+        "error": null,
+        "note": "finish_reason=length -- ran out of completion budget mid-<think>, not a KV-size enforcement failure (765+60=825 < bound 1024)."
+      },
+      "high_kv_probe_manual_recall_check": {
+        "http_code": 200,
+        "prompt_tokens": 56,
+        "completion_tokens": 290,
+        "finish_reason": "stop",
+        "content": "The secret launch code is ZEBRA-9471-QUARTZ.",
+        "note": "Short non-filler prompt + max_tokens=400 to give the reasoning chain room; run against the same --max-kv-size 1024 server."
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 70 context tokens (69 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-10-03T21:22:43.560679+00:00",
+      "verified_by": "manual (see reason)",
+      "mlx_vlm_version": "0.7.4",
+      "mlx_version": "0.32.3",
+      "mlx_lm_version": "0.31.3"
+    },
+    "mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-8bit": {
+      "model_id": "mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-8bit",
+      "verdict": "SAFE",
+      "reason": "MANUAL VERDICT (automated script's generic recall probe is incompatible with this reasoning model's <think> traces -- see below). Admission-gate enforcement confirmed automatically and cleanly at both scales: low_kv_probe (bound=256 vs 765-token prompt) and extreme_low_kv_probe (bound=32 vs 69-token prompt, max_tokens=1) both correctly returned HTTP 400 rejections, matching this project's own SAFE criteria -- no silent truncation/ignoring of the cap. The moderate-scale phase's automated recall check (bound=1024, same 765-token filler prompt, max_tokens=60) returned HTTP 200 but with content=null/finish_reason=length: NOT a max-kv-size enforcement failure (recall never silently succeeded with wrong/missing content under an exceeded bound -- the bound was never exceeded here, 765+60=825 < 1024) -- it is this model being a reasoning model: it spends its entire completion budget inside a <think>...</think> block before emitting any user-facing answer, and the fixed 60-token budget (sized for direct-answer instruct models) is nowhere near enough. Manually confirmed recall correctness separately with a short, non-filler prompt (56 prompt tokens) and a large completion budget: 4bit model recalled the exact planted secret ('The secret launch code is ZEBRA-9471-QUARTZ.') using 290 completion tokens (max_tokens=400, finish_reason=stop); 8bit model needed more budget (633 completion tokens, max_tokens=1500, finish_reason=stop) but also recalled exactly correctly. Together: the admission gate rejects oversized requests at every scale tested, and the model answers correctly once given room to think -- same SAFE bar this project's automated script applies to non-reasoning models, just confirmed via a different split of probes because the single fixed-budget probe this script uses doesn't fit a model that reasons before answering. This gap is generic to ANY reasoning model in this catalog (also affects the already-present but still-untested deepseek-r1-0528-qwen3-8b-* and deepseek-r1-distill-qwen-32b-* entries), not specific to this one -- the script itself was not changed to raise its budgets, to avoid altering the measurement scale used for every other model's already-recorded results; it WAS fixed for an unrelated, separately-confirmed bug (see mlx_vlm_server_v1_models_regression note below) that produced false 'stale process' positives for every model, not just this one.",
+      "low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 825 context tokens (765 prompt + 60 max generation), but MAX_KV_SIZE is 256.\"}"
+      },
+      "high_kv_probe_automated": {
+        "http_code": 200,
+        "prompt_tokens": 765,
+        "completion_tokens": 60,
+        "content": null,
+        "error": null,
+        "note": "finish_reason=length -- ran out of completion budget mid-<think>, not a KV-size enforcement failure (765+60=825 < bound 1024)."
+      },
+      "high_kv_probe_manual_recall_check": {
+        "http_code": 200,
+        "prompt_tokens": 56,
+        "completion_tokens": 633,
+        "finish_reason": "stop",
+        "content": "The secret launch code is ZEBRA-9471-QUARTZ.",
+        "note": "Short non-filler prompt + max_tokens=1500 (needed more budget than the 4bit variant) to give the reasoning chain room; run against --max-kv-size 4096 server since 1024 wasn't enough headroom for this variant's longer <think> trace at this prompt length."
+      },
+      "extreme_low_kv_probe": {
+        "http_code": 400,
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "content": null,
+        "error": "{\"detail\":\"Request needs 70 context tokens (69 prompt + 1 max generation), but MAX_KV_SIZE is 32.\"}"
+      },
+      "verified_at": "2026-10-03T21:22:43.560679+00:00",
+      "verified_by": "manual (see reason)",
+      "mlx_vlm_version": "0.7.4",
+      "mlx_version": "0.32.3",
+      "mlx_lm_version": "0.31.3"
     }
   }
 }

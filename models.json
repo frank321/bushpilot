@@ -3732,6 +3732,78 @@
                 "num_hidden_layers": 40,
                 "sliding_window": null
             }
+        },
+        {
+            "id": "deepseek-r1-distill-qwen-1.5b-4bit",
+            "huggingface": "mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-4bit",
+            "size_gb": 0.94,
+            "architecture": "qwen2",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-01",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "Dense model, 0.94 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "max-kv-size admission gate verified SAFE (see verification.notes for the reasoning-model-specific methodology). Tool-calling has NOT been live-tested yet -- status stays 'untested' until that's done too, per this catalog's own 'tested' criteria. The original DeepSeek-R1-Distill series (as opposed to the newer R1-0528 generation already in this catalog) is widely reported as weak at structured tool calls; this is a prediction, not a confirmed result, until a live /v1/chat/completions request with a tool schema is actually run.",
+                "size_label": "0.94 GB",
+                "max_context_label": "131,072 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 2,
+                "head_dim": 128,
+                "num_hidden_layers": 28,
+                "sliding_window": null
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-10-03T21:21:00Z",
+                "mlx_vlm_version": "0.7.4",
+                "notes": "verify_max_kv_size.sh confirmed clean HTTP 400 admission-gate rejection at both the moderate scale (bound=256 vs a 765-token prompt) and the extreme scale matching upstream mlx_vlm PR #1995's own reproduction (bound=32 vs a 69-token prompt, max_tokens=1) -- no silent truncation/ignoring of --max-kv-size. The script's automated moderate-scale RECALL check could not run to completion for this reasoning model (its fixed 60-token completion budget is spent entirely inside a <think> block, never reaching a final answer -- finish_reason=length, not an enforcement failure: 765+60=825 tokens stayed under the 1024 bound the whole time). Recall correctness was confirmed manually instead with a short prompt and a completion budget large enough for the reasoning chain to finish (this entry: 400-token budget, 290 used, exact correct recall, finish_reason=stop) against the same --max-kv-size 1024 server. Full probe JSON for both the automated and manual checks is in mlx_verification_results.json. Also fixed, while running this: verify_max_kv_size.sh's own health check had a latent bug (unrelated to this model) where /v1/models on this project's mlx_vlm 0.7.4 lists the WHOLE on-disk HF cache rather than just the loaded model (an apparent behavior change since the script was last validated against mlx_vlm 0.7.0, per its own header comment) -- the script read data[0] assuming it was always the just-started model, which produced a false 'stale process' error for every model, not just this one. Script now matches by id + loaded:true instead of array position. Full writeup: PHASE_PLAN.md, \"Research: DeepSeek-R1-Distill-Qwen-1.5B added...\" (2026-10-03)."
+            }
+        },
+        {
+            "id": "deepseek-r1-distill-qwen-1.5b-8bit",
+            "huggingface": "mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-8bit",
+            "size_gb": 1.77,
+            "architecture": "qwen2",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-01",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "Dense model, 1.77 GB — untested",
+                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
+                "usage_examples": [],
+                "known_issues": "max-kv-size admission gate verified SAFE (see verification.notes for the reasoning-model-specific methodology). Tool-calling has NOT been live-tested yet -- status stays 'untested' until that's done too, per this catalog's own 'tested' criteria. The original DeepSeek-R1-Distill series (as opposed to the newer R1-0528 generation already in this catalog) is widely reported as weak at structured tool calls; this is a prediction, not a confirmed result, until a live /v1/chat/completions request with a tool schema is actually run.",
+                "size_label": "1.77 GB",
+                "max_context_label": "131,072 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 2,
+                "head_dim": 128,
+                "num_hidden_layers": 28,
+                "sliding_window": null
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-10-03T21:21:00Z",
+                "mlx_vlm_version": "0.7.4",
+                "notes": "verify_max_kv_size.sh confirmed clean HTTP 400 admission-gate rejection at both the moderate scale (bound=256 vs a 765-token prompt) and the extreme scale matching upstream mlx_vlm PR #1995's own reproduction (bound=32 vs a 69-token prompt, max_tokens=1) -- no silent truncation/ignoring of --max-kv-size. The script's automated moderate-scale RECALL check could not run to completion for this reasoning model (its fixed 60-token completion budget is spent entirely inside a <think> block, never reaching a final answer -- finish_reason=length, not an enforcement failure: 765+60=825 tokens stayed under the 1024 bound the whole time). Recall correctness was confirmed manually instead with a short prompt and a completion budget large enough for the reasoning chain to finish (this entry: 400-token budget, 290 used, exact correct recall, finish_reason=stop) against the same --max-kv-size 1024 server. Full probe JSON for both the automated and manual checks is in mlx_verification_results.json. Also fixed, while running this: verify_max_kv_size.sh's own health check had a latent bug (unrelated to this model) where /v1/models on this project's mlx_vlm 0.7.4 lists the WHOLE on-disk HF cache rather than just the loaded model (an apparent behavior change since the script was last validated against mlx_vlm 0.7.0, per its own header comment) -- the script read data[0] assuming it was always the just-started model, which produced a false 'stale process' error for every model, not just this one. Script now matches by id + loaded:true instead of array position. Full writeup: PHASE_PLAN.md, \"Research: DeepSeek-R1-Distill-Qwen-1.5B added...\" (2026-10-03)."
+            }
         }
     ]
 }

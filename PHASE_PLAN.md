@@ -1282,3 +1282,79 @@ preload size. Left unchanged this session for lack of a concrete case needing it
 revisit with a specific smaller number and a reason, not just "a tool's preload turned
 out small."
 
+## Research: DeepSeek-R1-Distill-Qwen-1.5B added; verify_max_kv_size.sh's reasoning-model gap and an upstream mlx_vlm regression fixed (2026-10-03)
+
+Started from a question about whether `DeepSeek-R1-Distill-Qwen-7B` was missing from
+the catalog and worth adding. It genuinely is on `mlx-community`, but adding it would
+have been redundant: the catalog already has `deepseek-r1-0528-qwen3-8b-*` (3 quants),
+DeepSeek's own newer-generation, better-reasoning replacement for the whole original
+R1-Distill-Qwen line at essentially the same size, plus `deepseek-r1-distill-qwen-32b-*`
+(2 quants) at the large end. The real gap was *below* 4.3GB — no reasoning-capable
+model existed under that size (`qwen3.5-0.8b-4bit` is smaller but not a reasoning
+model at all). `mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-{4bit,8bit}` fills that gap
+cleanly (0.94GB / 1.77GB) and both exist upstream, so both were added via `add_model.py`
+rather than the 7B.
+
+### Bug found and fixed: `verify_max_kv_size.sh`'s health check, broken for every model on this project's current mlx_vlm
+
+Running the script against the new 4bit entry failed immediately with "likely a stale
+process still bound to port 8295" — on a port confirmed via `lsof`/`netstat` to have
+nothing else listening, and reproduced identically on a brand-new port (8296) that had
+never been used before. Root-caused by hand-starting the server and inspecting
+`/v1/models` directly: on this project's `mlx_vlm 0.7.4`, `/v1/models` returns every
+model in the on-disk HF cache (21 on this machine), not just the one this server
+process has loaded — each entry does carry its own correct `"loaded": true/false`, but
+the array isn't sorted with the active model first. The script's health check read
+`data[0].id` and compared it to `$MODEL_ID`, assuming position 0 was always the
+just-started model — true, apparently, on `mlx_vlm 0.7.0` (the version the script's own
+header comment says it was validated against), not on 0.7.4. In practice `data[0]` was
+`incoai/Qwen3.8-27B-DFlash2` (an old speculative-decoding drafter from earlier
+`mlx-dspark` testing, alphabetically first) every single time, regardless of which
+model was actually requested or which port was used — meaning **every** model
+verification run on this machine would have hit the same false "stale process" error,
+not just this one. Fixed in `verify_max_kv_size.sh` to search `data[]` for an entry
+matching `MODEL_ID` with `loaded: true`, rather than trusting array position.
+
+### A second, model-class-specific gap: the recall probe's fixed completion budget doesn't fit reasoning models
+
+With the health-check bug fixed, `--max-kv-size` admission-gate enforcement verified
+cleanly at both tested scales for both new entries — moderate (`bound=256` vs a
+765-token prompt) and the extreme scale matching upstream mlx_vlm PR #1995's own
+reproduction (`bound=32` vs a 69-token prompt, `max_tokens=1`) both correctly returned
+HTTP 400. But the script's overall verdict still came back `INCONCLUSIVE`, because the
+moderate-scale phase's *recall* check (same 765-token prompt, `max_tokens=60`, bound
+1024 — comfortably un-exceeded) returned HTTP 200 with `content: null`,
+`finish_reason: length`. Confirmed by hand this is not an enforcement failure at all:
+DeepSeek-R1 models spend their completion budget inside a `<think>...</think>` block
+before emitting any user-facing answer, and 60 tokens isn't remotely enough — raising
+the probe's budget to the most the fixed `HIGH_KV_SIZE=1024` design has room for (250,
+since the prompt alone is 765) still wasn't enough (the 1.5B model still hit
+`finish_reason: length` mid-think). This is a structural mismatch between the script's
+fixed-budget design (sized for direct-answer instruct models) and any reasoning model,
+not something a small constant tweak fixes without also changing `HIGH_KV_SIZE` itself
+— which would shift the measurement scale used for every other model's already-recorded
+results. **Decided not to change the script's constants.** Instead, verified recall
+correctness manually, out of band: a short, non-filler 56-token prompt against the same
+`--max-kv-size`-bounded server, with a large enough `max_tokens` for the reasoning
+chain to actually finish. The 4bit variant needed 290 completion tokens
+(`max_tokens=400`, `finish_reason=stop`) to produce the exact planted secret
+("The secret launch code is ZEBRA-9471-QUARTZ."); the 8bit variant needed noticeably
+more (633 completion tokens, `max_tokens=1500`, run against `--max-kv-size 4096` since
+1024 didn't leave enough headroom at that budget) but also recalled it exactly.
+
+**Verdict: `SAFE` for both `deepseek-r1-distill-qwen-1.5b-4bit` and
+`deepseek-r1-distill-qwen-1.5b-8bit`**, recorded manually in
+`mlx_verification_results.json` (full probe JSON for both the automated and manual
+checks) and in each entry's `models.json` `verification` block, with the full
+methodology above in `verification.notes` so it doesn't need re-deriving. `status`
+stays `"untested"` for both — this catalog's own rule is that `tested` requires *both*
+a `verify_max_kv_size.sh` pass and a live tool-calling check, and tool-calling hasn't
+been run yet for either. Worth flagging before anyone picks these for agentic work:
+the original R1-Distill-Qwen series (unlike the newer R1-0528 generation already in
+this catalog) is widely reported elsewhere as weak at structured tool calls — noted in
+`known_issues` as a prediction, not yet a confirmed live result. This same
+fixed-budget-recall-probe gap applies to every other reasoning model already in the
+catalog (`deepseek-r1-0528-qwen3-8b-*`, `deepseek-r1-distill-qwen-32b-*`) — all five are
+still `"untested"` and would hit the identical false `INCONCLUSIVE` if run through the
+script unchanged; the same manual-recall workaround would apply to them too.
+
