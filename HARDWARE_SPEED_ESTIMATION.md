@@ -1405,4 +1405,83 @@ curve rather than assuming the shape from `compute_bonus_concurrency`'s own reco
    `build_short_decode_prompt` rather than inventing a new short prompt that could reintroduce the
    same problem.
 
+## 21. `gpt-oss-20b-mxfp4-q8` tool-calling is broken on this project's `mlx_vlm` 0.7.4 — root-caused
+##     live; `llama.cpp` has dedicated gpt-oss/harmony tool-call support instead (not independently
+##     verified by this project — see caveat below)
+
+Prompted by a user report that gpt-oss-20b "seems like tool calls ... don't work." Reproduced live
+and root-caused (recorded in full in `models.json`'s `tool_calling` block for this model; summarized
+here with the follow-up research on whether a different serving stack would fix it):
+
+- **Live-tested, `mlx_vlm.server` 0.7.4**: a real `/v1/chat/completions` request with a `web_search`
+  tool schema, `temperature=0`, reproduced identically across two unrelated prompts/tools
+  (`web_search` and a `read_file` tool). Both: `finish_reason=stop`, `tool_calls=null`, but
+  `reasoning_content` correctly shows the model deciding to call the tool (e.g. "We need to search
+  the web. Use web_search."). Four plausible one-line workarounds were tried live and none helped:
+  `stream: true` (same failure, now visible token-by-token), `reasoning_effort: "none"` (shorter
+  reasoning, same failure), `tool_choice: "required"` (no change), `max_tokens: 1000` (no change —
+  `completion_tokens` stays ~40 regardless, so it is not a length cap being hit).
+- **Root cause, not just observed**: bypassing `mlx_vlm.server` entirely and calling
+  `mlx_lm.generate()` directly on the same model/prompt/tools produced a complete, correctly
+  formatted harmony tool call (`<|channel|>commentary to=functions.web_search <|constrain|>json
+  <|message|>{"query":"..."}`) followed by the model's own `<|call|>` stop token — proving the MODEL
+  itself is fine. `mlx_vlm.tools.registry._infer_tool_parser` was also confirmed, live, to correctly
+  select the `harmony` parser for this model's real tokenizer (both its required template markers,
+  `<|channel|>commentary` and `<|call|>`, are present). So the bug is specific to
+  `mlx_vlm.server`'s generation loop: it stops right after the harmony "analysis" channel's closing
+  `<|end|>` token (id 200007) and never continues into the "commentary" channel where the tool call
+  lives — even though `<|end|>` is NOT one of the model's own registered `eos_token_id` values
+  (`generation_config.json`: 200002 `<|return|>`, 199999 `<|endoftext|>`, 200012 `<|call|>`,
+  confirmed via `tokenizer.decode` on this exact model). Likely proximate cause (not traced to the
+  exact line): `mlx_vlm/models/gpt_oss/processing_gpt_oss.py`'s `HARMONY_RESPONSE_TEMPLATE` marks
+  the merged analysis/commentary `reasoning_content` field `"close": ["<|end|>"], "repeats": True`,
+  and the server's response-template state machine (`mlx_vlm/server/responses_state.py`) appears to
+  end generation after the first repeat instead of continuing for the tool call that should follow.
+- **This is a gap in `mlx_vlm`'s own gpt-oss support, not something a request parameter can route
+  around.** [PR #2329](https://github.com/Blaizzy/mlx-vlm/pull/2329) ("gpt-oss: parse harmony
+  channels into reasoning and content", merged 2026-09-24, included in the installed 0.7.4) is what
+  added gpt-oss harmony parsing at all — but its own before/after example is a plain Q&A with no
+  tools involved; it was never exercised against an actual tool call.
+- **Recorded as `NOT_SUPPORTED` in `models.json`** with this full writeup in the `tool_calling.notes`
+  field, same style as the existing `qwen2.5-coder-*-instruct`/`phi-4-mini-instruct-4bit` entries.
+
+### Follow-up: would `llama.cpp` instead of `mlx_vlm` fix this? (research only — NOT independently
+### verified by this project; this project is MLX-only and has no `llama.cpp` integration)
+
+Asked directly, since this project exists specifically to avoid exactly this class of serving-stack
+gap. Web/GitHub research (no live test — explicitly out of scope for this session) found:
+
+- `llama.cpp` has a **dedicated, purpose-built harmony parser** for gpt-oss
+  ([ggml-org/llama.cpp#15181](https://github.com/ggml-org/llama.cpp/pull/15181), merged Aug 2025) —
+  architecturally different from `mlx_vlm`'s generic response-template split. It uses GBNF
+  grammar-constrained decoding: once the model emits the `<|channel|>commentary to=` trigger
+  pattern, `llama.cpp` locks the grammar onto a schema built from the request's actual tool
+  definitions, forcing valid JSON rather than free-generating and regex-extracting afterward. This
+  directly targets the failure class found above (generation not reliably reaching the commentary
+  channel) with a mechanism `mlx_vlm` does not have.
+- **Current reliability as of this research (Oct 2026)**: no currently-open `llama.cpp` issue says
+  gpt-oss tool-calling is broken; it is reported in daily production agentic use. One well-explained
+  edge case was found and closed —
+  [ggml-org/llama.cpp#27720](https://github.com/ggml-org/llama.cpp/issues/27720): ~1-3% of turns at
+  `temperature=1.0` could emit a malformed channel header that made the strict parser reject an
+  otherwise-valid trailing tool call. Root-caused by a maintainer to the **client** not round-tripping
+  `reasoning_content` back on prior assistant tool-call messages across multi-turn conversations —
+  not a `llama.cpp` parser bug. Fixing that client-side dropped the failure rate from ~6% to near 0%
+  in the reporter's own controlled 120-turn test.
+- Recommendations from that research, if this is ever revisited: use `--jinja` with the stock chat
+  template from `ggml-org/gpt-oss-20b-GGUF` (not a repacked/third-party template — several reports
+  pair template modifications with parser issues); avoid combining `tools` with
+  `response_format`/`json_schema` in the same request (unmerged/untested as of early Oct 2026,
+  [ggml-org/llama.cpp#25454](https://github.com/ggml-org/llama.cpp/pull/25454)); whatever client is
+  used would need to echo `reasoning_content` back on tool-call turns, given the one failure mode
+  found above traces to exactly that.
+- **Caveat, stated plainly**: none of this was independently verified against a real `llama.cpp`
+  instance on this project's own hardware — it is secondhand research, not a live-tested result like
+  everything else in this file. `llama.cpp` is also not integrated into this project at all
+  (`start_mlx_server.sh` is explicitly MLX-only); using it would mean stepping outside this project's
+  current scope (separate install, separate GGUF download, separate OpenCode provider config)
+  rather than a `models.json`/`model_advisor.py` change. Treat the "likely works, with one
+  documented and avoidable edge case" conclusion above as a reason to consider trying it, not as a
+  verified fact on par with this file's other sections.
+
 
