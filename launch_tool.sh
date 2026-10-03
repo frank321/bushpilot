@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# launch_tool.sh — attaches a coding tool (Claude Code / OpenCode) to the already-
-# running MLX supervisor (start_mlx_server.sh). See PHASE_PLAN.md Phase 3.
+# launch_tool.sh — attaches a coding tool (Claude Code / OpenCode / Aider / Cline) to
+# the already-running MLX supervisor (start_mlx_server.sh). See PHASE_PLAN.md Phase 3.
 #
 # This script does NOT start or manage the model server itself -- that's
 # start_mlx_server.sh's job, and its dashboard is the thing keeping the shared
@@ -16,9 +16,17 @@ set -euo pipefail
 #   launch_tool.sh                    → fzf tool picker (plain menu if fzf is missing)
 #   launch_tool.sh claude   [args...] → skip the picker, launch Claude Code directly
 #   launch_tool.sh opencode [args...] → skip the picker, launch OpenCode directly
+#   launch_tool.sh aider    [args...] → skip the picker, launch Aider directly
+#   launch_tool.sh cline    [args...] → skip the picker, launch Cline directly
 #
 # Antigravity is deliberately not offered here -- already researched and confirmed
-# there's no way to point it at a custom local endpoint (see PHASE_PLAN.md).
+# there's no way to point it at a custom local endpoint (see PHASE_PLAN.md). "Tau" and
+# "Flash CLI" were also looked at and deliberately left out: neither name maps to a
+# single established, reputable coding-agent CLI (searched npm/GitHub/PyPI -- the
+# closest matches are either one-person projects with a few hundred downloads and no
+# custom-endpoint support at all, or unrelated tools entirely -- e.g. the npm package
+# literally named "flash-cli" is a terminal flashcards app, not an AI coding agent).
+# Revisit if the user points at a specific repo for either name.
 
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
@@ -33,7 +41,12 @@ BUSHPILOT_CONFIG_FILE="$BUSHPILOT_HOME/config.json"
 CONFIG_HOST=""
 CONFIG_PORT=""
 if [[ -f "$BUSHPILOT_CONFIG_FILE" ]]; then
-    eval "$(python3 - "$BUSHPILOT_CONFIG_FILE" <<'PYEOF'
+    # Same two-step pattern as register_opencode_model/_v2 below (write the heredoc to a
+    # temp file by itself, then run it as a separate command with no heredoc inside the
+    # $(...)) -- see the comment there for why combining a heredoc with $(...) in one
+    # statement is unsafe on the stock macOS /bin/bash (3.2.57).
+    _config_reader_py="$(mktemp)"
+    cat <<'PYEOF' > "$_config_reader_py"
 import json, shlex, sys
 try:
     with open(sys.argv[1]) as f:
@@ -45,7 +58,8 @@ for var, key in (("CONFIG_HOST", "host"), ("CONFIG_PORT", "port")):
     if val is not None:
         print(f"{var}={shlex.quote(str(val))}")
 PYEOF
-)"
+    eval "$(python3 "$_config_reader_py" "$BUSHPILOT_CONFIG_FILE")"
+    rm -f "$_config_reader_py"
 fi
 MLX_HOST="${MLX_HOST:-${CONFIG_HOST:-127.0.0.1}}"
 MLX_PORT="${MLX_PORT:-${CONFIG_PORT:-38472}}"
@@ -65,7 +79,7 @@ MIN_USABLE_CONTEXT=12288
 # PromptTooLongError that live test hit.
 CLAUDE_OUTPUT_TOKENS_RESERVE=32000
 
-TOOLS=(claude opencode)
+TOOLS=(claude opencode aider cline)
 
 log_info() { echo "[INFO] $*"; }
 log_error() { echo "[ERROR] $*" >&2; }
@@ -77,6 +91,8 @@ tool_display_name() {
     case "$1" in
         claude) echo "Claude Code" ;;
         opencode) echo "OpenCode" ;;
+        aider) echo "Aider" ;;
+        cline) echo "Cline" ;;
         *) echo "$1" ;;
     esac
 }
@@ -85,6 +101,8 @@ tool_command() {
     case "$1" in
         claude) echo claude ;;
         opencode) echo opencode ;;
+        aider) echo aider ;;
+        cline) echo cline ;;
     esac
 }
 
@@ -92,6 +110,8 @@ tool_install_hint() {
     case "$1" in
         claude) echo "npm install -g @anthropic-ai/claude-code   (or see https://claude.com/download)" ;;
         opencode) echo "curl -fsSL https://opencode.ai/install | bash   (or see https://opencode.ai)" ;;
+        aider) echo "python -m pip install aider-install && aider-install   (or see https://aider.chat/docs/install.html)" ;;
+        cline) echo "npm install -g cline   (or see https://cline.bot)" ;;
     esac
 }
 
@@ -249,6 +269,67 @@ launch_claude() {
     exec claude --model "$MLX_MODEL" "$@"
 }
 
+# Aider (aider.chat / github.com/Aider-AI/aider) connects to any OpenAI-compatible
+# endpoint via two env vars (OPENAI_API_BASE + OPENAI_API_KEY, both read by the
+# litellm layer aider is built on -- see aider.chat/docs/llms/openai-compat.html) plus
+# a --model flag prefixed "openai/" to select that provider path (aider also has a
+# separate ollama_chat/ path, not used here since the MLX server speaks plain OpenAI,
+# not Ollama's API). OPENAI_API_KEY must be non-empty -- litellm checks for its mere
+# presence client-side before ever making a request -- but its value is never
+# validated against the local server, so any dummy string works.
+#
+# Aider never enforces context-window limits itself (it only relays whatever error the
+# provider returns), so this would still run with no further setup. The
+# --model-metadata-file below is purely to avoid aider's generic "unknown model, cost
+# unknown" warning and to give its own token-budget UI (shown via /tokens) accurate
+# numbers, by registering this exact model's real architectural context size.
+AIDER_OUTPUT_TOKENS_RESERVE=8192
+
+launch_aider() {
+    export OPENAI_API_BASE="http://$MLX_HOST:$MLX_PORT/v1"
+    export OPENAI_API_KEY="sk-mlx-direct-local"
+
+    local usable_context=$(( CONTEXT_WINDOW - AIDER_OUTPUT_TOKENS_RESERVE ))
+    (( usable_context < MIN_USABLE_CONTEXT )) && usable_context=$MIN_USABLE_CONTEXT
+    local metadata_file
+    metadata_file="$(mktemp)"
+    "$MLX_PYTHON" -c '
+import json, sys
+model_id, max_input, max_output = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+with open(sys.argv[4], "w") as f:
+    json.dump({f"openai/{model_id}": {
+        "max_tokens": max_output,
+        "max_input_tokens": max_input,
+        "max_output_tokens": max_output,
+        "litellm_provider": "openai",
+        "mode": "chat",
+    }}, f)
+' "$MLX_MODEL" "$usable_context" "$AIDER_OUTPUT_TOKENS_RESERVE" "$metadata_file"
+
+    log_success "Launching Aider against openai/$MLX_MODEL (context cap ${usable_context} tokens, reserving ${AIDER_OUTPUT_TOKENS_RESERVE} for output)"
+    exec aider --model "openai/$MLX_MODEL" --model-metadata-file "$metadata_file" "$@"
+}
+
+# Cline (cline.bot / github.com/cline/cline) CLI persists provider credentials via a
+# `cline auth` subcommand rather than reading connection env vars directly -- confirmed
+# live against the documented example in apps/cli/README.md:
+#   cline auth --provider openai-native --apikey sk-... --modelid gpt-5 --baseurl https://api.example.com/v1
+# "openai-native" is the provider id for a plain OpenAI-compatible endpoint (as
+# opposed to "openai-codex", which is OAuth-only against the real ChatGPT subscription
+# backend). Like Claude/OpenCode, this needs some API key value even for a keyless
+# local server -- forwarded as the Authorization header, never validated against our
+# side. Re-running `cline auth` with the same values on every launch is harmless
+# (overwrites the same provider entry with identical data) and avoids depending on
+# "last used provider" state the way a bare `cline` invocation would.
+launch_cline() {
+    local base_url="http://$MLX_HOST:$MLX_PORT/v1"
+    cline auth --provider openai-native --apikey sk-mlx-direct-local \
+        --modelid "$MLX_MODEL" --baseurl "$base_url" > /dev/null
+
+    log_success "Launching Cline against $MLX_MODEL (openai-native provider, baseURL $base_url)"
+    exec cline -P openai-native -m "$MLX_MODEL" -k sk-mlx-direct-local "$@"
+}
+
 # OpenCode v2 (a separate, parallel install track -- npm package @opencode/cli vs the
 # 1.x line's opencode-ai; see opencode.ai/v2) dropped --model from the bare/default
 # launch command entirely -- confirmed live against v2.0.22's own --help, which only
@@ -291,8 +372,24 @@ register_opencode_model() {
     mkdir -p "$(dirname "$opencode_config")"
     log_info "Checking OpenCode's mlx-direct provider registration ($opencode_config)..."
 
-    local result
-    result="$("$MLX_PYTHON" - "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" <<'PYEOF'
+    local result pyscript
+    pyscript="$(mktemp)"
+    # Written to a temp file FIRST, as its own plain `cat <<'PYEOF' > "$pyscript"` with no
+    # surrounding $(...) -- never fed to python directly inside a command-substitution
+    # heredoc (i.e. never `x="$(cmd <<'EOF' ... EOF)"`). Confirmed live on the stock macOS
+    # /bin/bash (3.2.57, the last GPLv2 release -- Apple has shipped this exact build for
+    # over a decade and will not update it): that combination has a real bug where finding
+    # the matching ")" for the $(...) scans straight through the heredocs own body for
+    # bare parentheses, even though the heredocs delimiter is quoted and the body is
+    # supposed to be fully literal. On a long, comment-heavy Python payload like this one
+    # (parens in comments, in dict literals, in regexes) that scan can lose track and
+    # consume way more of the real script than the heredoc itself, running fragments of
+    # register_opencode_model_v2 below as literal shell commands instead of feeding this
+    # script to python. Splitting "write the heredoc" and "run the command" into two
+    # separate statements (neither of which combines a heredoc with $(...) in the same
+    # statement) sidesteps the bug entirely rather than relying on any fragile balance of
+    # characters inside the payload below.
+    cat <<'PYEOF' > "$pyscript"
 import json
 import re
 import sys
@@ -306,21 +403,21 @@ MLX_DIRECT_PROVIDER_NAME = "BushPilot"
 MLX_DIRECT_MODEL_NAME = lambda mid: mid
 
 
-# Live-tested bug fix: without this, OpenCode's custom-provider model entries have no
-# way to know a model accepts images, so it silently never encodes drag-and-dropped /
-# -f attached images into the request at all -- the mlx_vlm.server backend and the
-# model itself handle images perfectly fine (confirmed live via a raw /v1/chat/completions
+# Live-tested bug fix: without this, OpenCode custom-provider model entries have no way
+# to know a model accepts images, so it silently never encodes drag-and-dropped / -f
+# attached images into the request at all -- the mlx_vlm.server backend and the model
+# itself handle images perfectly fine (confirmed live via a raw /v1/chat/completions
 # request with an image_url, which came back with a correct description), but OpenCode
 # never sends the image bytes because the model lacks the "attachment"/"modalities"
 # capability flags its own config schema (opencode.ai/config.json) exposes for exactly
-# this. Reproduced live: identical request through `opencode run -f <image> ...` against
+# this. Reproduced live: identical request through "opencode run -f <image> ..." against
 # a vision-capable model registered WITHOUT these flags got "I cannot process image
 # input"; the IDENTICAL request after adding attachment:true + modalities.input
-# containing "image" got a correct description, and the server's own request log
-# confirmed images=1 only in the fixed case (images=0 before). Mirrors
-# model_advisor.py's own model_input_label(): serving.multimodal_capable=False (every
-# mlx_dspark/DFlash-text-only entry) narrows to text-only even if the underlying model
-# has a vision tower; otherwise use the model's own `modalities` list.
+# containing "image" got a correct description, and the request log on the server side
+# confirmed images=1 only in the fixed case (images=0 before). Mirrors the
+# model_input_label() helper in model_advisor.py: serving.multimodal_capable=False
+# (every mlx_dspark/DFlash-text-only entry) narrows to text-only even if the underlying
+# model has a vision tower; otherwise use that models "modalities" list directly.
 def image_capable_modalities(models_json_path, hf_id):
     try:
         with open(models_json_path) as f:
@@ -331,8 +428,8 @@ def image_capable_modalities(models_json_path, hf_id):
     if not entries:
         return None
     # Known limitation: this script only has the resolved huggingface id, not the
-    # catalog's own local model id for whichever serving mode is actually running --
-    # the state file written by start_mlx_server.sh does not carry it. Several
+    # local model id the catalog itself uses for whichever serving mode is actually
+    # running -- the state file written by start_mlx_server.sh does not carry it. Several
     # catalog entries share one huggingface id across serving modes with DIFFERENT
     # multimodal capability (e.g. gemma-4-12b-it-4bit vs its mlx-dspark "dflash"
     # text-only sibling, which silently drops the vision tower). When those entries
@@ -456,8 +553,8 @@ models[model_id] = {
     "name": MLX_DIRECT_MODEL_NAME(model_id),
     "limit": {"context": context_window, "output": 4096},
 }
+models[model_id]["attachment"] = ATTACHMENT_MODALITIES is not None
 if ATTACHMENT_MODALITIES is not None:
-    models[model_id]["attachment"] = True
     models[model_id]["modalities"] = {"input": ATTACHMENT_MODALITIES, "output": ["text"]}
 
 with open(config_path, "w") as f:
@@ -465,7 +562,8 @@ with open(config_path, "w") as f:
     f.write("\n")
 print("REGISTERED")
 PYEOF
-    )" || true
+    result="$("$MLX_PYTHON" "$pyscript" "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json")" || true
+    rm -f "$pyscript"
 
     case "$result" in
         ALREADY_REGISTERED)
@@ -500,8 +598,14 @@ register_opencode_model_v2() {
     mkdir -p "$(dirname "$opencode_config")"
     log_info "Checking OpenCode's mlx-direct provider registration ($opencode_config)..."
 
-    local result
-    result="$("$MLX_PYTHON" - "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" <<'PYEOF'
+    local result pyscript
+    pyscript="$(mktemp)"
+    # See the matching comment in register_opencode_model above: this heredoc is written
+    # to a temp file by itself (no $(...) wrapping it) and then run as a separate, plain
+    # command substitution with no heredoc inside it -- never combine the two in one
+    # statement here, or stock macOS /bin/bash (3.2.57) can lose track of this heredocs
+    # own boundary while scanning for the $(...)'s closing paren.
+    cat <<'PYEOF' > "$pyscript"
 import json
 import re
 import sys
@@ -652,8 +756,8 @@ models[model_id] = {
     "modelID": model_id,
     "limit": {"context": context_window, "output": 4096},
 }
+models[model_id]["attachment"] = ATTACHMENT_MODALITIES is not None
 if ATTACHMENT_MODALITIES is not None:
-    models[model_id]["attachment"] = True
     models[model_id]["modalities"] = {"input": ATTACHMENT_MODALITIES, "output": ["text"]}
 parsed["model"] = MLX_DIRECT_MODEL_STRING
 
@@ -662,7 +766,8 @@ with open(config_path, "w") as f:
     f.write("\n")
 print("REGISTERED")
 PYEOF
-    )" || true
+    result="$("$MLX_PYTHON" "$pyscript" "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json")" || true
+    rm -f "$pyscript"
 
     case "$result" in
         ALREADY_REGISTERED)
@@ -704,7 +809,7 @@ main() {
     fi
 
     case "$tool" in
-        claude|opencode) ;;
+        claude|opencode|aider|cline) ;;
         *)
             log_error "Unknown tool '$tool'. Supported: ${TOOLS[*]}"
             exit 1
@@ -723,6 +828,8 @@ main() {
     case "$tool" in
         claude) launch_claude "$@" ;;
         opencode) launch_opencode "$@" ;;
+        aider) launch_aider "$@" ;;
+        cline) launch_cline "$@" ;;
     esac
 }
 

@@ -3633,6 +3633,71 @@
                 "num_hidden_layers": 48,
                 "sliding_window": null
             }
+        },
+        {
+            "id": "mimo-v2.6-distill-qwen-9b-optiq-4bit",
+            "huggingface": "mlx-community/MiMo-V2.6-Distill-Qwen-9B-OptiQ-4bit",
+            "size_gb": 6.63,
+            "architecture": "qwen3_5",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "_modalities_note": "add_model.py's generic heuristic flagged 'video' from video_token_id being present in config.json, but this repo (unlike the catalog's other qwen3_5 entries, e.g. qwen3.5-9b-mlx-8bit) has no vision_config block at all -- confirmed by diffing config.json against mlx-community/Qwen3.5-9B-MLX-8bit's. The OptiQ quantization block only lists language_model.* tensors, no vision_tower.*, so the vision encoder was dropped during this specific MLX conversion even though the XiaomiMiMo base checkpoint is multimodal (Image-Text-to-Text). Corrected to text-only by hand; see PROJECT_STATUS.md-style precedent of no other entry in this file having ('text','video') without 'image'.",
+            "released": "2026-09",
+            "max_context_architectural": 262144,
+            "display": {
+                "tagline": "9B agentic distill of Qwen3.5, 4-bit mixed-precision — untested",
+                "good_for": "Not yet verified on this project's mlx_vlm version. Published by Xiaomi MiMo as an SFT distillation of Qwen/Qwen3.5-9B targeting coding/agentic/tool-use tasks (reports higher SWE-bench Verified and Terminal-Bench 2.1 scores than the Qwen3.5-9B base in Xiaomi's own technical report); the already-tested qwen3.5-9b-mlx-8bit/4bit entries share this exact architecture and layer geometry (same kv_config), which is a good sign for memory-fit and serving compatibility, but tool-calling behavior has not been independently confirmed for this fine-tune.",
+                "usage_examples": [],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. This specific OptiQ quant's per-layer 4-bit/8-bit allocation was transferred from mlx-community/Qwen3.5-9B-OptiQ-4bit's calibration (same architecture/shapes) rather than measured on this fine-tune directly -- see that repo's model card. The vision tower was dropped in this conversion (text-only), unlike other qwen3_5 entries in this catalog.",
+                "size_label": "6.63 GB",
+                "max_context_label": "262,144 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED"
+            },
+            "kv_config": {
+                "num_key_value_heads": 4,
+                "head_dim": 256,
+                "num_hidden_layers": 32,
+                "layer_types": [
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"
+                ],
+                "sliding_window": null
+            }
         }
     ]
 }

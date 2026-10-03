@@ -59,7 +59,7 @@ that don't currently fit, with the reason why), and lets you pick one. It then:
    `mlx-lm`/`mlx-vlm>=0.7.0`)
 2. Pre-downloads the model if it isn't cached yet (so a killed download can resume,
    unlike `mlx_vlm.server`'s own lazy on-demand fetch)
-3. Starts `mlx_vlm.server` on port 11435 with Automatic Prefix Caching always on
+3. Starts `mlx_vlm.server` on port 38472 with Automatic Prefix Caching always on
 4. Runs a startup smoke check against `/v1/messages`, `/metrics`, and
    `/v1/cache/stats` before declaring itself ready
 5. Takes over the terminal with a live dashboard (requests, token throughput, APC hit
@@ -71,10 +71,11 @@ Leave that terminal open. In a **different** terminal:
 ./launch_tool.sh
 ```
 
-This runs `launch_tool.sh`'s own tool picker (Claude Code / OpenCode), checks that the
-server from step above is actually healthy, checks that the picked tool's own context
-preload still leaves enough room in whatever context size you chose, and then `exec`s
-straight into `claude` or `opencode` with all the right environment variables set.
+This runs `launch_tool.sh`'s own tool picker (Claude Code / OpenCode / Aider / Cline),
+checks that the server from step above is actually healthy, checks that the picked
+tool's own context preload still leaves enough room in whatever context size you
+chose, and then `exec`s straight into `claude`, `opencode`, `aider`, or `cline` with
+all the right environment variables (or, for Cline, provider config) set.
 
 ### Skipping the pickers
 
@@ -82,6 +83,8 @@ straight into `claude` or `opencode` with all the right environment variables se
 ./start_mlx_server.sh qwen3.5-9b-mlx-8bit mlx-community/Qwen3.5-9B-MLX-8bit 131072
 ./launch_tool.sh claude
 ./launch_tool.sh opencode
+./launch_tool.sh aider
+./launch_tool.sh cline
 ```
 
 ---
@@ -103,7 +106,7 @@ you're not looking — see `MONITORING_ARCHITECTURE.md`.)
 
 ### `start_mlx_server.sh`
 
-- **MLX server** (port 11435, `127.0.0.1` only) — the only background process this
+- **MLX server** (port 38472, `127.0.0.1` only) — the only background process this
   project runs. No PostgreSQL, no LiteLLM.
 - **Single home**: `~/.bushpilot/{venv,models,state,logs,apc-cache}/`
 - **State file**: `~/.bushpilot/state/mlx-loaded.txt` —
@@ -111,7 +114,7 @@ you're not looking — see `MONITORING_ARCHITECTURE.md`.)
   what's actually running.
 - **Reliability checks carried over from the old script**: a real (not just `/health`)
   one-token inference probe before declaring the server ready, detection of a foreign
-  process squatting on port 11435, and the "different model already running, replace
+  process squatting on port 38472, and the "different model already running, replace
   it?" confirmation prompt.
 
 ### `launch_tool.sh`
@@ -131,6 +134,14 @@ you're not looking — see `MONITORING_ARCHITECTURE.md`.)
   literal Hugging Face repo id (what actually goes on the wire) with a hardcoded
   `baseURL` pointed at the MLX server's `/v1` — no LiteLLM provider entry is written
   or read anymore
+- **Aider**: sets `OPENAI_API_BASE`/`OPENAI_API_KEY` (aider is built on litellm, which
+  reads those two directly), launches with `--model openai/<model>` (the `openai/`
+  prefix selects that provider path), and writes a `--model-metadata-file` registering
+  this model's real context size so aider doesn't warn about an unknown model
+- **Cline**: runs `cline auth --provider openai-native --apikey ... --modelid ...
+  --baseurl <server>/v1` to persist the connection (Cline's CLI has no env-var path for
+  this — see `apps/cli/README.md` in the `cline/cline` repo), then launches with
+  `-P openai-native -m <model>`
 
 If the server isn't running when `launch_tool.sh` starts, it asks to confirm, then
 `exec`s `start_mlx_server.sh` directly in that same terminal (replacing itself, not
@@ -147,7 +158,7 @@ alive. Once it's up, run `launch_tool.sh` again in a **different** terminal.
 
 ### "No healthy local model server detected"
 
-`launch_tool.sh` couldn't reach `http://127.0.0.1:11435/health` or found no state
+`launch_tool.sh` couldn't reach `http://127.0.0.1:38472/health` or found no state
 file. Start (or check) `start_mlx_server.sh` in its own terminal first.
 
 ### "Cannot import mlx_vlm" / package errors

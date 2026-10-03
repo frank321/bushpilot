@@ -8,14 +8,14 @@
 
 New models, frameworks, and inference tricks appear every week, and the tutorials you read six months ago are already out of date. Getting a local LLM running on a Mac usually means digging through instructions, learning a new framework, and guessing which model and context size won't crash your machine.
 
-Bushpilot skips that. It ships a curated catalog of models that have been tested on Apple Silicon (`models.json`), serves them with Apple's MLX (`mlx_vlm`, plus mlx-dspark for speculative decoding), and attaches Claude Code or OpenCode to the result.
+Bushpilot skips that. It ships a curated catalog of models that have been tested on Apple Silicon (`models.json`), serves them with Apple's MLX (`mlx_vlm`, plus mlx-dspark for speculative decoding), and attaches Claude Code, OpenCode, Aider, or Cline to the result.
 
 ## What it does
 
 - **Curated, tested models:** pick from a catalog where each entry has verified memory and long-context behavior, instead of researching models yourself.
 - **Hardware-aware picker:** detects your chip and free memory, greys out models that won't fit, and computes a safe context size and estimated tok/s for each.
 - **Memory backstop:** a live dashboard watches memory, and the server is torn down automatically if free memory drops below 10% or pressure hits CRITICAL.
-- **One shared server:** attach Claude Code and OpenCode (from as many terminals as you like) to the same running model.
+- **One shared server:** attach Claude Code, OpenCode, Aider, and/or Cline (from as many terminals as you like) to the same running model.
 - **Speculative decoding:** optional speedup variants for supported models.
 - **Self-contained:** everything (venv, weights, logs, state) lives under `~/.bushpilot/`. Delete that directory for a full reset, or run `./uninstall.sh` to remove it along with the OpenCode provider registration, PATH symlinks, and this project folder.
 
@@ -23,7 +23,7 @@ Bushpilot skips that. It ships a curated catalog of models that have been tested
 
 - Mac with Apple Silicon (M1 or later), macOS
 - [Homebrew](https://brew.sh) and Python 3.10+
-- Claude Code and/or OpenCode
+- Claude Code, OpenCode, Aider, and/or Cline
 - `fzf` (optional, for nicer pickers): `brew install fzf`
 
 ## Quick start
@@ -54,7 +54,7 @@ Skip the pickers for scripting:
 | File | Purpose |
 |---|---|
 | `start_mlx_server.sh` | Brings up the model server, shows the dashboard, enforces the memory backstop |
-| `launch_tool.sh` | Attaches Claude Code or OpenCode to the running server |
+| `launch_tool.sh` | Attaches Claude Code, OpenCode, Aider, or Cline to the running server |
 | `model_advisor.py` | Hardware detection and per-model context/speed recommendations |
 | `models.json` | The curated model catalog |
 | `uninstall.sh` | Removes the running server, `~/.bushpilot`, the OpenCode provider registration, PATH symlinks, and this project folder |
