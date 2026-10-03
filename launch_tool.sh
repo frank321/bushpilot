@@ -292,18 +292,72 @@ register_opencode_model() {
     log_info "Checking OpenCode's mlx-direct provider registration ($opencode_config)..."
 
     local result
-    result="$("$MLX_PYTHON" - "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" <<'PYEOF'
+    result="$("$MLX_PYTHON" - "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" <<'PYEOF'
 import json
 import re
 import sys
 
-config_path, model_id, context_window, base_url = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+config_path, model_id, context_window, base_url, models_json_path = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
 
 # Display strings for the OpenCode model picker. Provider name is the project name;
 # the model name is just its id (see the note at the assignment site for why the old
 # "(no LiteLLM)" suffixes were removed).
 MLX_DIRECT_PROVIDER_NAME = "BushPilot"
 MLX_DIRECT_MODEL_NAME = lambda mid: mid
+
+
+# Live-tested bug fix: without this, OpenCode's custom-provider model entries have no
+# way to know a model accepts images, so it silently never encodes drag-and-dropped /
+# -f attached images into the request at all -- the mlx_vlm.server backend and the
+# model itself handle images perfectly fine (confirmed live via a raw /v1/chat/completions
+# request with an image_url, which came back with a correct description), but OpenCode
+# never sends the image bytes because the model lacks the "attachment"/"modalities"
+# capability flags its own config schema (opencode.ai/config.json) exposes for exactly
+# this. Reproduced live: identical request through `opencode run -f <image> ...` against
+# a vision-capable model registered WITHOUT these flags got "I cannot process image
+# input"; the IDENTICAL request after adding attachment:true + modalities.input
+# containing "image" got a correct description, and the server's own request log
+# confirmed images=1 only in the fixed case (images=0 before). Mirrors
+# model_advisor.py's own model_input_label(): serving.multimodal_capable=False (every
+# mlx_dspark/DFlash-text-only entry) narrows to text-only even if the underlying model
+# has a vision tower; otherwise use the model's own `modalities` list.
+def image_capable_modalities(models_json_path, hf_id):
+    try:
+        with open(models_json_path) as f:
+            catalog = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    entries = [m for m in catalog.get("models", []) if m.get("huggingface") == hf_id]
+    if not entries:
+        return None
+    # Known limitation: this script only has the resolved huggingface id, not the
+    # catalog's own local model id for whichever serving mode is actually running --
+    # the state file written by start_mlx_server.sh does not carry it. Several
+    # catalog entries share one huggingface id across serving modes with DIFFERENT
+    # multimodal capability (e.g. gemma-4-12b-it-4bit vs its mlx-dspark "dflash"
+    # text-only sibling, which silently drops the vision tower). When those entries
+    # disagree, guessing wrong in the image-capable direction would be worse than
+    # todays no-image-support status quo -- OpenCode would then happily try to send
+    # an image that the dflash backend silently ignores, a confusing new failure mode
+    # instead of todays understood one. So: require unanimous agreement across every
+    # matching entry before turning this on at all.
+    capable_votes = set()
+    all_mods = set()
+    for entry in entries:
+        if (entry.get("serving") or {}).get("multimodal_capable") is False:
+            capable_votes.add(False)
+        else:
+            capable_votes.add(True)
+            all_mods |= set(entry.get("modalities") or ["text"])
+    if capable_votes != {True}:
+        return None
+    extra = [m for m in ("image", "video") if m in all_mods]
+    if not extra:
+        return None
+    return ["text"] + extra
+
+
+ATTACHMENT_MODALITIES = image_capable_modalities(models_json_path, model_id)
 
 
 def strip_jsonc(s):
@@ -365,13 +419,16 @@ existing = provider.get("mlx-direct", {})
 # provider name and model name together, so a stale/duplicated name would otherwise be
 # left in place forever (the earlier "...(direct, no LiteLLM)" + "MLX direct (no
 # LiteLLM)" pair concatenated into a stutter that this check never corrected).
+existing_model = existing.get("models", {}).get(model_id, {})
 already_correct = (
     not had_litellm
     and existing.get("options", {}).get("baseURL") == base_url
     and existing.get("name") == MLX_DIRECT_PROVIDER_NAME
     and model_id in existing.get("models", {})
-    and existing["models"][model_id].get("name") == MLX_DIRECT_MODEL_NAME(model_id)
-    and existing["models"][model_id].get("limit", {}).get("context") == context_window
+    and existing_model.get("name") == MLX_DIRECT_MODEL_NAME(model_id)
+    and existing_model.get("limit", {}).get("context") == context_window
+    and existing_model.get("attachment") == (ATTACHMENT_MODALITIES is not None)
+    and existing_model.get("modalities", {}).get("input") == ATTACHMENT_MODALITIES
 )
 if already_correct:
     print("ALREADY_REGISTERED")
@@ -399,6 +456,9 @@ models[model_id] = {
     "name": MLX_DIRECT_MODEL_NAME(model_id),
     "limit": {"context": context_window, "output": 4096},
 }
+if ATTACHMENT_MODALITIES is not None:
+    models[model_id]["attachment"] = True
+    models[model_id]["modalities"] = {"input": ATTACHMENT_MODALITIES, "output": ["text"]}
 
 with open(config_path, "w") as f:
     json.dump(parsed, f, indent=2)
@@ -441,16 +501,55 @@ register_opencode_model_v2() {
     log_info "Checking OpenCode's mlx-direct provider registration ($opencode_config)..."
 
     local result
-    result="$("$MLX_PYTHON" - "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" <<'PYEOF'
+    result="$("$MLX_PYTHON" - "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" <<'PYEOF'
 import json
 import re
 import sys
 
-config_path, model_id, context_window, base_url = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+config_path, model_id, context_window, base_url, models_json_path = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
 
 MLX_DIRECT_PROVIDER_NAME = "BushPilot"
 MLX_DIRECT_PACKAGE = "@opencode/ai/providers/openai-compatible"
 MLX_DIRECT_MODEL_STRING = f"mlx-direct/{model_id}"
+
+
+def image_capable_modalities(models_json_path, hf_id):
+    try:
+        with open(models_json_path) as f:
+            catalog = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    entries = [m for m in catalog.get("models", []) if m.get("huggingface") == hf_id]
+    if not entries:
+        return None
+    # Known limitation: this script only has the resolved huggingface id, not the
+    # catalog's own local model id for whichever serving mode is actually running --
+    # the state file written by start_mlx_server.sh does not carry it. Several
+    # catalog entries share one huggingface id across serving modes with DIFFERENT
+    # multimodal capability (e.g. gemma-4-12b-it-4bit vs its mlx-dspark "dflash"
+    # text-only sibling, which silently drops the vision tower). When those entries
+    # disagree, guessing wrong in the image-capable direction would be worse than
+    # todays no-image-support status quo -- OpenCode would then happily try to send
+    # an image that the dflash backend silently ignores, a confusing new failure mode
+    # instead of todays understood one. So: require unanimous agreement across every
+    # matching entry before turning this on at all.
+    capable_votes = set()
+    all_mods = set()
+    for entry in entries:
+        if (entry.get("serving") or {}).get("multimodal_capable") is False:
+            capable_votes.add(False)
+        else:
+            capable_votes.add(True)
+            all_mods |= set(entry.get("modalities") or ["text"])
+    if capable_votes != {True}:
+        return None
+    extra = [m for m in ("image", "video") if m in all_mods]
+    if not extra:
+        return None
+    return ["text"] + extra
+
+
+ATTACHMENT_MODALITIES = image_capable_modalities(models_json_path, model_id)
 
 
 # Same comment-stripping approach as the v1 register_opencode_model, kept in sync
@@ -526,6 +625,7 @@ if had_v1_default_model:
 
 providers = parsed.setdefault("providers", {})
 existing = providers.get("mlx-direct", {})
+existing_model = existing.get("models", {}).get(model_id, {})
 already_correct = (
     not had_v1_mlx_direct
     and not had_v1_default_model
@@ -533,8 +633,10 @@ already_correct = (
     and existing.get("package") == MLX_DIRECT_PACKAGE
     and existing.get("settings", {}).get("baseURL") == base_url
     and model_id in existing.get("models", {})
-    and existing["models"][model_id].get("modelID") == model_id
-    and existing["models"][model_id].get("limit", {}).get("context") == context_window
+    and existing_model.get("modelID") == model_id
+    and existing_model.get("limit", {}).get("context") == context_window
+    and existing_model.get("attachment") == (ATTACHMENT_MODALITIES is not None)
+    and existing_model.get("modalities", {}).get("input") == ATTACHMENT_MODALITIES
     and parsed.get("model") == MLX_DIRECT_MODEL_STRING
 )
 if already_correct:
@@ -550,6 +652,9 @@ models[model_id] = {
     "modelID": model_id,
     "limit": {"context": context_window, "output": 4096},
 }
+if ATTACHMENT_MODALITIES is not None:
+    models[model_id]["attachment"] = True
+    models[model_id]["modalities"] = {"input": ATTACHMENT_MODALITIES, "output": ["text"]}
 parsed["model"] = MLX_DIRECT_MODEL_STRING
 
 with open(config_path, "w") as f:
