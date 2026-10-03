@@ -249,6 +249,31 @@ launch_claude() {
     exec claude --model "$MLX_MODEL" "$@"
 }
 
+# OpenCode v2 (a separate, parallel install track -- npm package @opencode/cli vs the
+# 1.x line's opencode-ai; see opencode.ai/v2) dropped --model from the bare/default
+# launch command entirely -- confirmed live against v2.0.22's own --help, which only
+# documents --model under `opencode run`, never for the bare command (which just
+# dumps top-level usage if you pass it anyway, rather than erroring). It also uses a
+# different config schema: "providers" (plural, package-based) instead of v1's
+# "provider" (singular, npm-based), and a root "model" field instead of
+# "default_model". Detected by major version number from `--version` (v1 prints bare
+# "1.18.34"; v2 prints "opencode v2.0.22" -- note the differing prefix); if that
+# somehow fails to parse, falls back to what --help actually advertises for the bare
+# command rather than guessing.
+opencode_cli_is_v2() {
+    local version major
+    version="$(opencode --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    major="${version%%.*}"
+    if [[ "$major" =~ ^[0-9]+$ ]]; then
+        [[ "$major" -ge 2 ]]
+        return
+    fi
+    if opencode --help 2>&1 | grep -qE '(^|[[:space:]])(-m|--model)([[:space:]]|,|$)'; then
+        return 1
+    fi
+    return 0
+}
+
 # Ports the old ensure_opencode_model_registered() to the mlx-direct provider block
 # instead of the now-dead litellm one -- confirmed live that OpenCode still requires
 # the model registered in opencode.jsonc even with LiteLLM removed (Provider.getModel
@@ -258,6 +283,8 @@ launch_claude() {
 # robust for that than brace-depth-scanning a deletion. The only comment this can lose
 # is the litellm block's own now-moot rollback note -- everything else in the file
 # survives, just reformatted.
+#
+# OpenCode v1 only -- see register_opencode_model_v2 for the v2 schema.
 register_opencode_model() {
     local base_url="$1"
     local opencode_config="$HOME/.config/opencode/opencode.jsonc"
@@ -395,10 +422,168 @@ PYEOF
     esac
 }
 
+# v2 schema counterpart to register_opencode_model -- confirmed live against v2.0.22
+# (see opencode_cli_is_v2): "providers" (plural) instead of "provider", a "package"
+# field instead of "npm" (and a different package name: @opencode/ai/providers/
+# openai-compatible, not @ai-sdk/openai-compatible), and each model entry needs its
+# own "modelID" rather than using the dict key as the id directly. Critically, this
+# ALSO sets the root "model" field -- v2 has no CLI flag to pick a model for a bare
+# launch (only `opencode run --model`), so the only way to launch straight into our
+# model is to make it the configured default (verified live: `opencode run` with no
+# --model at all correctly picked up this field and attempted to reach our model).
+# That default persists in opencode.jsonc after this script exits, unlike v1's
+# --model flag which only ever affected the one launch -- see uninstall.sh, which
+# already clears both the v1 and v2 shapes of this on removal.
+register_opencode_model_v2() {
+    local base_url="$1"
+    local opencode_config="$HOME/.config/opencode/opencode.jsonc"
+    mkdir -p "$(dirname "$opencode_config")"
+    log_info "Checking OpenCode's mlx-direct provider registration ($opencode_config)..."
+
+    local result
+    result="$("$MLX_PYTHON" - "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" <<'PYEOF'
+import json
+import re
+import sys
+
+config_path, model_id, context_window, base_url = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+
+MLX_DIRECT_PROVIDER_NAME = "BushPilot"
+MLX_DIRECT_PACKAGE = "@opencode/ai/providers/openai-compatible"
+MLX_DIRECT_MODEL_STRING = f"mlx-direct/{model_id}"
+
+
+# Same comment-stripping approach as the v1 register_opencode_model, kept in sync
+# deliberately -- both edit the same jsonc file and must agree on how it's parsed.
+def strip_jsonc(s):
+    out = []
+    i = 0
+    n = len(s)
+    in_string = False
+    while i < n:
+        c = s[i]
+        if in_string:
+            out.append(c)
+            if c == '\\' and i + 1 < n:
+                out.append(s[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_string = False
+            i += 1
+            continue
+        if c == '"':
+            in_string = True
+            out.append(c)
+            i += 1
+            continue
+        if c == '/' and i + 1 < n and s[i + 1] == '/':
+            while i < n and s[i] != '\n':
+                i += 1
+            continue
+        if c == '/' and i + 1 < n and s[i + 1] == '*':
+            i += 2
+            while i + 1 < n and not (s[i] == '*' and s[i + 1] == '/'):
+                i += 1
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    result = ''.join(out)
+    result = re.sub(r',(\s*[}\]])', r'\1', result)
+    return result
+
+
+try:
+    with open(config_path) as f:
+        raw = f.read()
+except FileNotFoundError:
+    raw = '{"$schema": "https://opencode.ai/config.json", "providers": {}}'
+
+try:
+    parsed = json.loads(strip_jsonc(raw))
+except Exception as e:
+    print(f"PARSE_ERROR: {e}")
+    sys.exit(2)
+
+# v1-schema leftovers, if this machine was ever set up against the 1.x line. Only
+# clean up what THIS script owns -- its own old "mlx-direct" entry under the OLD
+# singular "provider" key, and "default_model" if it specifically pointed there --
+# never touch any OTHER provider the user configured under "provider" (confirmed live
+# this matters: a real opencode.jsonc on this project's own dev machine has an
+# unrelated "amazon-bedrock" entry sitting right next to mlx-direct under that same
+# key). v2 doesn't read "provider"/"default_model" at all, so anything left behind
+# here is inert either way -- but inert-and-preserved beats deleted-without-asking.
+old_provider = parsed.get("provider") or {}
+had_v1_mlx_direct = "mlx-direct" in old_provider
+if had_v1_mlx_direct:
+    del old_provider["mlx-direct"]
+    if not old_provider:
+        parsed.pop("provider", None)
+had_v1_default_model = str(parsed.get("default_model", "")).startswith("mlx-direct/")
+if had_v1_default_model:
+    parsed.pop("default_model", None)
+
+providers = parsed.setdefault("providers", {})
+existing = providers.get("mlx-direct", {})
+already_correct = (
+    not had_v1_mlx_direct
+    and not had_v1_default_model
+    and existing.get("name") == MLX_DIRECT_PROVIDER_NAME
+    and existing.get("package") == MLX_DIRECT_PACKAGE
+    and existing.get("settings", {}).get("baseURL") == base_url
+    and model_id in existing.get("models", {})
+    and existing["models"][model_id].get("modelID") == model_id
+    and existing["models"][model_id].get("limit", {}).get("context") == context_window
+    and parsed.get("model") == MLX_DIRECT_MODEL_STRING
+)
+if already_correct:
+    print("ALREADY_REGISTERED")
+    sys.exit(0)
+
+mlx_direct = providers.setdefault("mlx-direct", {})
+mlx_direct["name"] = MLX_DIRECT_PROVIDER_NAME
+mlx_direct["package"] = MLX_DIRECT_PACKAGE
+mlx_direct["settings"] = {"baseURL": base_url, "apiKey": "sk-mlx-direct-local"}
+models = mlx_direct.setdefault("models", {})
+models[model_id] = {
+    "modelID": model_id,
+    "limit": {"context": context_window, "output": 4096},
+}
+parsed["model"] = MLX_DIRECT_MODEL_STRING
+
+with open(config_path, "w") as f:
+    json.dump(parsed, f, indent=2)
+    f.write("\n")
+print("REGISTERED")
+PYEOF
+    )" || true
+
+    case "$result" in
+        ALREADY_REGISTERED)
+            log_success "$MLX_MODEL already registered under mlx-direct -- no changes needed"
+            ;;
+        REGISTERED)
+            log_success "Registered $MLX_MODEL in opencode.jsonc's mlx-direct provider and set it as your default model (v2 has no --model flag for a direct launch -- see $opencode_config to change the default back)"
+            ;;
+        *)
+            log_error "Could not auto-register $MLX_MODEL in opencode.jsonc ($result)"
+            log_error "Add it manually under providers.\"mlx-direct\".models and set root \"model\" to \"mlx-direct/$MLX_MODEL\", or OpenCode will fail with 'Model not found'."
+            exit 1
+            ;;
+    esac
+}
+
 launch_opencode() {
     local base_url="http://$MLX_HOST:$MLX_PORT/v1"
-    register_opencode_model "$base_url"
 
+    if opencode_cli_is_v2; then
+        register_opencode_model_v2 "$base_url"
+        log_success "Launching OpenCode against mlx-direct/$MLX_MODEL (context: ${CONTEXT_WINDOW} tokens)"
+        exec opencode "$@"
+    fi
+
+    register_opencode_model "$base_url"
     log_success "Launching OpenCode against mlx-direct/$MLX_MODEL (context: ${CONTEXT_WINDOW} tokens)"
     exec opencode --model "mlx-direct/$MLX_MODEL" "$@"
 }

@@ -56,6 +56,18 @@ Everything this project manages (downloaded model weights, its Python
 environment, logs, and state) lives under `~/.bushpilot/` — remove that
 one directory for a full reset.
 
+## Uninstalling
+
+```bash
+./uninstall.sh
+```
+
+This stops the model server if it's running, removes the `mlx-direct` provider
+OpenCode registered, removes any PATH symlinks `start_mlx_server.sh`/
+`launch_tool.sh` created, deletes `~/.bushpilot` (all downloaded models, logs,
+and state), and finally deletes this folder. Pass `-y`/`--yes` to skip the
+confirmation prompt.
+
 ## More
 
 This is the packaged runtime bundle. For the full source, development notes, and

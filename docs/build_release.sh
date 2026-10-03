@@ -20,6 +20,7 @@ RUNTIME_FILES=(
     launch_tool.sh
     model_advisor.py
     models.json
+    uninstall.sh
 )
 
 for f in "${RUNTIME_FILES[@]}"; do
@@ -38,7 +39,7 @@ for f in "${RUNTIME_FILES[@]}"; do
     cp "$REPO_ROOT/$f" "$BUNDLE_DIR/"
 done
 cp "$SCRIPT_DIR/release-README.md" "$BUNDLE_DIR/README.md"
-chmod +x "$BUNDLE_DIR/start_mlx_server.sh" "$BUNDLE_DIR/launch_tool.sh"
+chmod +x "$BUNDLE_DIR/start_mlx_server.sh" "$BUNDLE_DIR/launch_tool.sh" "$BUNDLE_DIR/uninstall.sh"
 
 rm -f "$ZIP_PATH"
 (cd "$WORKDIR" && zip -rq "$ZIP_PATH" "bushpilot")

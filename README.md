@@ -17,7 +17,7 @@ Bushpilot skips that. It ships a curated catalog of models that have been tested
 - **Memory backstop:** a live dashboard watches memory, and the server is torn down automatically if free memory drops below 10% or pressure hits CRITICAL.
 - **One shared server:** attach Claude Code and OpenCode (from as many terminals as you like) to the same running model.
 - **Speculative decoding:** optional speedup variants for supported models.
-- **Self-contained:** everything (venv, weights, logs, state) lives under `~/.bushpilot/`. Delete that directory for a full reset.
+- **Self-contained:** everything (venv, weights, logs, state) lives under `~/.bushpilot/`. Delete that directory for a full reset, or run `./uninstall.sh` to remove it along with the OpenCode provider registration, PATH symlinks, and this project folder.
 
 ## Requirements
 
@@ -57,9 +57,22 @@ Skip the pickers for scripting:
 | `launch_tool.sh` | Attaches Claude Code or OpenCode to the running server |
 | `model_advisor.py` | Hardware detection and per-model context/speed recommendations |
 | `models.json` | The curated model catalog |
+| `uninstall.sh` | Removes the running server, `~/.bushpilot`, the OpenCode provider registration, PATH symlinks, and this project folder |
 | `add_model.py` | Generates an untested `models.json` entry from a Hugging Face repo id, URL, or model name (`--write` to append) |
 | `verify_max_kv_size.sh`, `verify_long_context_memory.sh` | Verification tools behind the catalog's tested data |
 | `docs/` | GitHub Pages site and release bundle build |
+| `tests/` | Unit tests for `model_advisor.py`'s recommendation math and picker layout (see Tests below) |
+
+## Tests
+
+`tests/` covers `model_advisor.py`'s pure logic -- the memory/context/speed recommendation math, the picker's terminal-width-aware column layout, and its sort state machine -- with synthetic chip/memory inputs, no real Apple Silicon required:
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+This is deliberately separate from `verify_max_kv_size.sh` / `verify_long_context_memory.sh`, which check things no unit test can (whether `mlx_vlm.server` itself enforces its own flags on real hardware) and need a real Mac + a downloaded model to run.
 
 ## More documentation
 

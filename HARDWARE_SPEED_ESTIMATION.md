@@ -1260,3 +1260,107 @@ than what's documented above.
    (and whether it measurably helps `gemma-4-26b-a4b-it-4bit` specifically, which was not in its
    benchmark table) next time this project upgrades `mlx-vlm` past 0.7.4.
 
+## 20. Per-(chip, model) sweep harness (`sweep_model.py`) — a real, independent re-measurement on
+##     this M5 Pro, closing several §17/§19 open items with live data instead of just a plan
+
+Added 2026-10-02, implementing the plan in `NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md` (that file has
+the full spec/schema/gotchas — this section records what actually came back from running it, same
+spirit as §12/§13/§18/§19 above). `sweep_model.py` is a standalone harness that manages its own
+short-lived `mlx_vlm.server` subprocess(es) and measures: the prefill-step-size TTFT sweep (§12's
+own axis, extended to a genuinely deep 16,384-token real-code prompt instead of §12's filler-only
+7,200-token one), a decode-speed-vs-context-depth curve, the KV-bits decode-speed cost AT LONG
+CONTEXT (§17 item #6/#13's sharpest named gap), an APC hit-rate/correctness check (§13 extended),
+tool-calling/multimodal re-verification, and concurrency throughput. Results land in
+`~/.bushpilot/calibration/sweeps/<chip>__<model>.sweep.json` (rich diagnostics) and get condensed
+into the existing lightweight `~/.bushpilot/calibration/<chip>__<model>.json` file via
+`model_advisor.save_calibration()`'s two new optional fields (`prefill_step_size`,
+`kv_bits_safe_at_long_context`), read back by the new `recommend_prefill_step_size()` and wired into
+`start_mlx_server.sh` next to where `KV_BITS` is already resolved from `model_advisor.py`'s output.
+
+### Real results: `gemma-4-e4b-it-4bit` and `gemma-4-12b-it-4bit`, this machine (Apple M5 Pro)
+
+**Prefill-step-size winner shifted with depth — a real finding, not noise:**
+
+| Model | Winner @ ~7,200 tokens (§12, filler prompt) | Winner @ 16,384 tokens (this sweep, real-code prompt) |
+|---|---|---|
+| `gemma-4-e4b-it-4bit` | 2048 | **2048** (confirmed again: 4.70s vs 5.09s/5.10s) |
+| `gemma-4-12b-it-4bit` | 2048 (barely — 512 was "within noise") | **512** (clearly, not noise: 20.13s vs 23.97s/24.72s) |
+
+e4b reconfirms §12 exactly, on a deeper, differently-shaped prompt. 12b does NOT — at 16,384 tokens
+the gap between 512 and 2048 is a real ~19% TTFT difference, not the "within noise" call §12 made at
+7,200 tokens. **This means the prefill-step-size optimum is not even a fixed per-(chip, model)
+property — it can shift with context depth itself**, a dimension neither §12 nor the original sweep
+plan accounted for. `recommend_prefill_step_size()` still only stores one value per (chip, model) —
+flagged here as a real, now-confirmed gap in that function's own model, not fixed in this pass.
+
+**KV-bits decode-speed cost at long context — §17 item #6/#13's gap, finally closed with real data,
+and the answer is model-dependent:**
+
+| Model | Short-context slowdown (§10/§12, ≤1% floor) | Long-context slowdown (this sweep) |
+|---|---|---|
+| `gemma-4-e4b-it-4bit` | 0.87% | **~-1.1%** (quantized measured slightly FASTER at 16,384 tokens — noise-level either way) |
+| `gemma-4-12b-it-4bit` | 0.16% | **~6.7%** (62.9→30.7 vs 32.9 tok/s at 8,192 tokens — a real, non-noise cost) |
+
+The short-context "≤1% floor" does NOT reliably extend to long context — e4b stays at noise level,
+12b shows a real ~6.7% cost once memory pressure actually engages the quantized path harder. Both
+measured under `KV_BITS_LONG_CONTEXT_SAFE_SLOWDOWN_PCT=10.0`'s threshold (so both currently save as
+`kv_bits_safe_at_long_context: true`), but 12b is the first real data point showing this ISN'T
+automatically noise-level everywhere — closing the gap with a nuanced "it depends on the model, not
+always safe to assume" answer rather than the clean universal floor §10/§12 alone would suggest.
+
+**`speed_correction_factor` re-derived independently, both landed within ~1% of §12's original
+numbers:** e4b 1.29 → **1.281** (fresh short-context decode measurement, same chip, different
+harness/prompt shape); 12b 0.75 → **0.756**. Populated into `models.json` for both entries. This is
+a genuine independent reconfirmation, not a repeat of the same measurement — real evidence the
+original §12 numbers were a stable property of these models on this chip, not noise from that one
+measurement session.
+
+**APC reconfirmed on both models, including the `--kv-bits` + sliding-window combination
+(mlx-vlm#1559) on the single-request path:** e4b 1.10s→0.025s cold/warm TTFT (97.7% reduction, same
+figure §13 originally found); 12b 5.07s→0.044s (99.1% reduction). Both with `output_matches_cold_
+exactly: true` and `hit_rate≈0.9998`. The `--kv-bits 8` + APC combination (model_advisor.py's
+`kv_bits_apc_caveat`) was also exercised live on both models via a single serial request — no
+error, same clean hit rate — **but this does NOT clear mlx-vlm#1559**, which is specifically about
+the *batched/concurrent* request path; this sweep's APC test is always one request at a time.
+
+**Tool-calling reverified SUPPORTED on both models**, matching `models.json`'s existing verdicts.
+
+**Concurrency throughput, `gemma-4-e4b-it-4bit`, 1/2/4 concurrent requests at 100 tokens of
+context:** aggregate 50.2 → 80.8 → 111.1 tok/s; per-request 81.6 → 75.5 → 64.5 tok/s. Real,
+monotonic evidence of the expected continuous-batching tradeoff (more aggregate throughput, less
+per-stream speed, as concurrency rises) — the first time this project has actually measured that
+curve rather than assuming the shape from `compute_bonus_concurrency`'s own recommended slot count.
+
+### Real gotchas found building and running this (recorded so they aren't rediscovered)
+
+1. **APC's disk tier (§13) persists across completely separate server processes AND survives
+   repeated identical requests within one process** — confirmed live: reusing byte-identical prompt
+   content (a) across a warmup-then-measured loop's own iterations, and (b) across two separate
+   sweep runs against the same model, both silently turned a "cold" TTFT measurement into a cache
+   hit (observed as low as 0.03s TTFT at 16,384 tokens of context, versus the multi-second figure
+   this section's own table reports once fixed). `/v1/cache/reset` does NOT clear the disk tier
+   (confirmed from `mlx_vlm/apc.py`'s own `clear()`, which only touches the in-memory pool) — the
+   only real fix is giving every "cold" measurement request genuinely unique content (a nonce
+   placed at the very START of the prompt, so it lands in APC's first hash block and invalidates
+   reuse of every block after it too).
+2. **`peak_memory` (both the `/metrics` field and each request's own `timings.peak_memory`) is
+   MLX's own process-lifetime high-water mark (`mx.get_peak_memory()`), not a per-request figure** —
+   confirmed from `mlx_vlm/server/generation.py`'s own source, which never calls the matching
+   `mx.reset_peak_memory()`. A small request run after a large one in the SAME process silently
+   reports the large one's stale peak. Only a fresh process (or testing in strictly ascending memory
+   order within one process) gets a meaningful reading from this field — not something either
+   `mlx_vlm` or this project's own tooling corrects for.
+3. **A 1x1 PNG crashes `mlx_vlm`'s image preprocessor** (`TypeError: Cannot handle this data type:
+   (1, 1, 1), |u1`) — confirmed live. An 8x8 solid-color PNG works fine. Whatever the real minimum
+   is, it's bigger than 1x1; any future minimal-test-image needs doesn't need to care precisely how
+   much bigger, just not use 1x1.
+4. **A prompt tuned for a quick/short reply (e.g. "Reply with just the word done.") makes
+   `predicted_per_second` unreliable as a decode-speed measurement** — the model obliges literally,
+   generating a handful of tokens before EOS, and the resulting rate ends up dominated by one-time
+   per-request overhead rather than steady-state decode. §12's own original short-context prompt
+   ("Write a 200-word short story...", `max_tokens=150`, reliably hits the cap rather than EOS) is
+   the one that actually produces a trustworthy number — reused verbatim in this sweep's own
+   `build_short_decode_prompt` rather than inventing a new short prompt that could reintroduce the
+   same problem.
+
+

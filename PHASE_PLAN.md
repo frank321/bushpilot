@@ -942,3 +942,93 @@ combos, the `mlx-dspark` minimum-version pin (`MLX_DSPARK_MIN_VERSION`), and the
 keys) were all completed in same-day follow-up sessions. The only still-open
 publishing step is rebuilding the release zip via `docs/build_release.sh` and pushing
 to the remote (the zip's file list picks up all of this automatically on rebuild).
+
+### Phase 9 — Per-(chip, model) calibration + prefill-step-size sweep (`sweep_model.py`)
+
+Added 2026-10-02. `start_mlx_server.sh`'s `PREFILL_STEP_SIZE=2048` was a single hardcoded
+global constant, derived from sweeping exactly 2 Gemma-4 models on exactly 1 machine
+(`HARDWARE_SPEED_ESTIMATION.md` §12) — flagged in that doc's own §17 item #8 as too narrow to
+trust generally. Rather than ship a bigger version of the same manual sweep, this phase built a
+self-calibrating per-(chip, model) measurement, with the hardcoded constant kept as the fallback
+default for any pair that hasn't been calibrated yet. Full spec, schema, and rationale captured in
+`NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md` before implementation; full real results and gotchas in
+`HARDWARE_SPEED_ESTIMATION.md` §20 after it.
+
+**Calibration-file infrastructure (`model_advisor.py`):** `CALIBRATION_DIR`
+(`~/.bushpilot/calibration/`) + `save_calibration()`/`load_calibration()`, atomic-write,
+last-write-wins, per-(chip, model) JSON files. `estimate_speed_tok_s()` checks a saved
+calibration first and reports "measured on this machine" instead of "estimated" when one exists.
+`start_mlx_server.sh`'s `save_calibration_snapshot()` (called from `full_teardown()`, best-effort
+throughout) curls `/metrics` one last time before the server dies and records whatever that
+session actually did. `models.json`'s new optional `speed_correction_factor` field lets a single
+model override the global `SPEED_CORRECTION_FACTOR` constant, which is already confirmed not to
+hold across architecture families (0.86-0.97 for Qwen vs. 0.75-1.29 for Gemma-4, in opposite
+directions — a 4x-wider spread than one global number can represent).
+`recommend_kv_bits_and_context()` also gained `kv_bits_apc_caveat`, flagging the real,
+upstream-confirmed `--kv-bits` + APC + sliding-window gap (mlx-vlm#1559) non-blockingly in the
+picker/launch log/JSON selection contract whenever the quantized KV fallback is actually used on a
+model with sliding-window layers.
+
+**The sweep harness itself (`sweep_model.py`, new, standalone):** manages its own short-lived
+`mlx_vlm.server` subprocess(es) directly (not a mode of `start_mlx_server.sh` — unavoidable for
+the step-size axis specifically, since `--prefill-step-size` is a launch flag, not a per-request
+parameter, so sweeping it means relaunching with each candidate value) and measures, maximizing
+what's collected per expensive model-load: the prefill-step-size TTFT sweep (extended to a real
+16,384-token source-code prompt, not just §12's filler-only 7,200-token one — closing part of §17
+item #8's "different prompt content could shift the sweet spot" caveat); a decode-speed-vs-context
+curve; the KV-bits decode-speed cost **at long context** (§17 item #6/#13's sharpest named gap —
+previously only ever measured at short context); an Automatic Prefix Caching hit-rate/correctness
+check, including the `--kv-bits` + APC + sliding-window combination live; tool-calling/multimodal
+re-verification; and concurrency throughput across 1/2/4 simultaneous requests. Results land in a
+new `~/.bushpilot/calibration/sweeps/<chip>__<model>.sweep.json` (rich diagnostics, written
+incrementally after each tier so a crash mid-sweep doesn't lose everything already measured) and
+get condensed into the existing lightweight calibration file via two new optional
+`save_calibration()` fields (`prefill_step_size`, `kv_bits_safe_at_long_context`) — additive only,
+so the plain teardown-time save path is untouched. A new `recommend_prefill_step_size()` reads it
+back, mirroring `recommend_kv_bits_and_context`'s own try-the-calibrated-value/safety-check/
+fall-back-to-default structure (checked against current free memory with a documented margin for
+the real, measured-but-modest memory cost larger step sizes carry), wired into
+`start_mlx_server.sh` right next to where `KV_BITS` is already resolved from the advisor's JSON
+output.
+
+**Real bugs found and fixed by actually running it against real hardware** (confirmed live, not
+anticipated ahead of time): the step-size sweep's own test depth was accidentally shallow enough
+that no candidate step size ever had to chunk the prompt at all, making the "winner" meaningless;
+Automatic Prefix Caching's disk tier (survives process restarts) silently turned repeated
+"cold" TTFT measurements into cache hits, both within one warmup-then-measured loop and across
+separate sweep runs — fixed by giving every cold-measurement request a unique nonce at the very
+start of the prompt; a 1x1 test PNG crashes `mlx_vlm`'s image preprocessor outright (switched to
+8x8); `peak_memory` turned out to be MLX's own process-lifetime high-water mark
+(`mx.get_peak_memory()`, never reset by `mlx_vlm`'s server code), not a true per-request figure,
+so tier ordering was changed to measure the cheap tiers before the deep ones inflate it; a
+"reply with just the word done" filler instruction made decode-rate measurements unreliable via
+premature EOS, fixed by reusing §12's own real story prompt for the one measurement that needs a
+guaranteed-length completion; and the harness had no signal handling, risking an orphaned
+`mlx_vlm.server` process if the sweep itself were killed mid-run — fixed with a tracked-server
+registry and SIGINT/SIGTERM handlers.
+
+**Real results, both on this machine (Apple M5 Pro):** `gemma-4-e4b-it-4bit` reconfirmed §12's
+2048 step-size winner even at the new, deeper 16,384-token depth and a different prompt shape, and
+showed noise-level (~1%) KV-bits cost even at long context. `gemma-4-12b-it-4bit` did NOT
+reconfirm §12 — at 16,384 tokens, 512 clearly beats 2048 (a real ~19% TTFT difference, not the
+"within noise" call §12 made at 7,200 tokens), and showed a real, non-noise ~6.7% KV-bits decode
+cost at long context — meaning the long-context KV-bits "safe" floor is model-dependent, not
+universal, and the step-size optimum itself can shift with context depth, a dimension neither §12
+nor the original sweep plan accounted for. Both models' `speed_correction_factor` was independently
+re-derived from this session's own fresh measurements (1.281 and 0.756) and landed within ~1% of
+§12's original numbers (1.29, 0.75) — a real reconfirmation, not a guess — and both are now
+populated in `models.json`. Full tables and raw numbers in `HARDWARE_SPEED_ESTIMATION.md` §20.
+
+**Testing:** 40 new tests (pure logic only — prompt builders, averaging, step-size/kv-bits
+derivation, memory guards with chip/RAM detection monkeypatched — no real MLX runtime required),
+on top of the pre-existing suite; 147 total passing. The live-hardware behavior above was verified
+by actually running the harness against real downloaded models on this machine, not inferred from
+the unit tests alone.
+
+**Remaining work**: `recommend_prefill_step_size()` still stores one step-size value per (chip,
+model), not per context depth — flagged above as a real, now-confirmed gap in that function's own
+model, not fixed in this pass. The APC + `--kv-bits` + sliding-window test only exercises the
+single-serial-request path; mlx-vlm#1559 is specifically about the batched/concurrent path, which
+this sweep's concurrency tier doesn't currently combine with `--kv-bits`. Only 2 of the catalog's
+19 models have been swept so far.
+

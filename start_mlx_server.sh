@@ -75,6 +75,13 @@ export HF_HOME="$BUSHPILOT_HOME/models"
 mkdir -p "$BUSHPILOT_VENV" "$BUSHPILOT_STATE_DIR" "$BUSHPILOT_LOG_DIR" "$BUSHPILOT_APC_DIR" "$HF_HOME"
 
 MLX_STATE_FILE="$BUSHPILOT_STATE_DIR/mlx-loaded.txt"
+# Written best-effort after every FRESH launch (never on an attach-to-already-healthy
+# path, which never calls wait_for_url at all) with the measured process-start → first-
+# healthy-response seconds -- "load time" per NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md's
+# Tier 1 metrics table ("not tracked anywhere today" before this). sweep_model.py reads
+# this file (if freshly written) to fill its own "load.load_time_s" field without
+# needing to manage this script's own process lifecycle -- see that script's docstring.
+MLX_LOAD_TIME_FILE="$BUSHPILOT_STATE_DIR/mlx-load-time.txt"
 MLX_LOG_FILE="$BUSHPILOT_LOG_DIR/mlx-server.log"
 # The log is truncated ONCE per run by start_run_log() (called from main), then every
 # writer--this script's own profile/launch/teardown lines AND the engine's redirected
@@ -178,6 +185,14 @@ MLX_DSPARK_MIN_VERSION="0.20.1"
 
 KV_GROUP_SIZE=64
 QUANTIZED_KV_START=0
+# Static fallback for the fixed-model path and for any (chip, model) pair with no
+# sweep calibration yet. The --interactive path overrides this per-launch with
+# model_advisor.py's recommend_prefill_step_size() -- a real measurement from
+# sweep_model.py's per-(chip, model) sweep when one exists on this machine, falling
+# back to this same global default otherwise. See
+# NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md for why a single hardcoded global constant
+# here (derived from 2 Gemma-4 models on this one M5 Pro) doesn't generalize across
+# chip architectures, and `python3 sweep_model.py --model-id <id>` to calibrate one.
 PREFILL_STEP_SIZE=2048
 
 # Automatic Prefix Caching (APC) — see HARDWARE_SPEED_ESTIMATION.md §13.
@@ -612,6 +627,17 @@ run_fzf_model_picker() {
     # system_profiler prints a hw.cpufamily line to stderr on every call; fzf would show it.
     preview_cmd+=" 2>/dev/null"
 
+    # Our own best-effort guess at the terminal width, used only for the single frame
+    # between this script's own list-generating call below and fzf's `start` event (see
+    # the "start:reload" bind) replacing it with fzf's own, authoritative $FZF_COLUMNS --
+    # `tput cols`/$COLUMNS can't always be trusted (wrapped/embedded terminals, no real
+    # tty on stdout, etc.), so this is deliberately a placeholder, not the source of
+    # truth. Falls back to 80 if neither COLUMNS nor `tput cols` resolves to a number.
+    local term_width
+    term_width="${COLUMNS:-$(tput cols 2>/dev/null)}"
+    [[ "$term_width" =~ ^[0-9]+$ ]] || term_width=80
+    term_width=$((term_width - 4))
+
     # Shell-quoted list command for fzf's reload bindings (no banner: the banner goes
     # to stderr and would scribble over fzf's screen).
     local list_cmd
@@ -619,6 +645,17 @@ run_fzf_model_picker() {
     # column twice (key or header click) reverses it.
     local sort_state="$BUSHPILOT_STATE_DIR/picker-sort.state"
     list_cmd="$(printf '%q ' "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact --no-banner --sort-state "$sort_state" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"})"
+    # Deliberately NOT inside the %q-escaped block above: ${FZF_COLUMNS:-...} must stay a
+    # literal, unexpanded shell parameter reference in list_cmd's value, so that both the
+    # `start` event (fires the instant fzf launches -- corrects for $term_width above
+    # possibly being wrong) and the `resize` event (fires on every terminal resize while
+    # the picker is open, exactly like the live-adjusting --detail preview pane below)
+    # re-run this with whatever width is current AT THAT MOMENT. $FZF_COLUMNS is exported
+    # by fzf to every reload/bind command it runs and is authoritative -- it's what the
+    # preview pane's own live wrapping is based on -- so it's used ahead of our own
+    # guessed $term_width, which only backstops the one invocation below that runs before
+    # fzf exists (and gets immediately superseded by the `start` reload anyway).
+    list_cmd+="--term-width \"\${FZF_COLUMNS:-$term_width}\""
 
     local header_text=$'Models fit, context size and speed are calculated live for your hardware (chip + free memory); speed is an estimate.\n↑↓ move · type to filter · Enter select · Esc cancel\nSort: click a column header (again to reverse), or ^R newest · ^S fastest · ^T largest · ^O name\ngreen = fits as-is · yellow = KV-quantized to fit · dim = does not fit · ✓ tested · ○ untested'
     # The column-header row sits right below fzf's --header lines; a click-header event
@@ -627,9 +664,11 @@ run_fzf_model_picker() {
 
     while true; do
         : > "$sort_state"   # every (re)opened picker starts from the default sort
-        selection="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact --sort-state "$sort_state" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} | fzf \
+        selection="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact --term-width "$term_width" --sort-state "$sort_state" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} | fzf \
             --delimiter=$'\t' --with-nth=2 \
             --preview "$preview_cmd" --preview-window down:50%:wrap \
+            --bind "start:reload($list_cmd 2>/dev/null)" \
+            --bind "resize:reload($list_cmd 2>/dev/null)" \
             --bind "ctrl-r:reload($list_cmd --sort released 2>/dev/null)" \
             --bind "ctrl-s:reload($list_cmd --sort speed 2>/dev/null)" \
             --bind "ctrl-t:reload($list_cmd --sort size 2>/dev/null)" \
@@ -680,7 +719,18 @@ run_interactive_selection() {
     LOCAL_MODEL=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['id'])" "$advisor_output")
     CONTEXT_WINDOW=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['recommended_context'])" "$advisor_output")
     KV_BITS=$("$MLX_PYTHON" -c "import json,sys; v=json.loads(sys.argv[1])['kv_bits']; print(v if v is not None else '')" "$advisor_output")
+    KV_BITS_APC_CAVEAT=$("$MLX_PYTHON" -c "import json,sys; print('1' if json.loads(sys.argv[1])['kv_bits_apc_caveat'] else '')" "$advisor_output")
     CONCURRENCY=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['concurrency'])" "$advisor_output")
+    # Overrides this script's own static PREFILL_STEP_SIZE=2048 default (set near the
+    # top of this file) with model_advisor.py's recommend_prefill_step_size() decision
+    # -- a real per-(chip, model) sweep measurement when one exists on this machine
+    # (see NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md / sweep_model.py), the SAME global
+    # default otherwise. Only the --interactive path goes through model_advisor.py at
+    # all, so the fixed-model form (scripting/restarts) keeps today's static default
+    # unchanged, exactly like KV_BITS above.
+    local prefill_step_size_val
+    prefill_step_size_val=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['prefill_step_size'])" "$advisor_output" 2>/dev/null) || prefill_step_size_val=""
+    [[ -n "$prefill_step_size_val" ]] && PREFILL_STEP_SIZE="$prefill_step_size_val"
 
     local kv_bits_log="unquantized (full decode speed — recommended context already fits free memory)"
     if [[ -n "$KV_BITS" ]]; then
@@ -690,8 +740,19 @@ run_interactive_selection() {
     [[ -n "$CONFIG_MAX_CONTEXT" ]] && ctx_source_log+=" and capped by config.json's max_context_tokens (rounds down to the nearest tier)"
     log_success "Selected $LOCAL_MODEL ($MLX_MODEL) — context set to ${CONTEXT_WINDOW} tokens ($ctx_source_log)"
     log_success "KV cache: $kv_bits_log"
+    if [[ "$PREFILL_STEP_SIZE" != "2048" ]]; then
+        log_success "Prefill step size: $PREFILL_STEP_SIZE (measured on this machine for this model — see ~/.bushpilot/calibration)"
+    fi
+    if [[ -n "$KV_BITS_APC_CAVEAT" ]]; then
+        # Real, upstream-confirmed gap (mlx-vlm issue #1559, "APC + kv-bits full
+        # batch/SWA coverage") -- see model_advisor.py's recommend_kv_bits_and_context
+        # docstring. Non-blocking: prefix reuse still works per upstream's own smoke
+        # note, this is a heads-up, not a reason this launch was refused.
+        log_info "⚠ This model's sliding-window layers + quantized KV cache + prefix caching (APC, always on) is a known upstream gap (mlx-vlm #1559) — sliding layers likely won't cache on concurrent requests until it's fixed. Prefix reuse itself still works."
+    fi
     if [[ "$CONCURRENCY" -gt 1 ]]; then
         log_success "Concurrency: $CONCURRENCY slots (free bonus from tier-rounding leftover, or your config.json override)"
+
     fi
 }
 
@@ -1001,12 +1062,17 @@ ensure_mlx_running() {
 
     "${launch_cmd[@]}" >> "$MLX_LOG_FILE" 2>&1 &
     MLX_PID=$!
+    local load_start_ts; load_start_ts=$(date +%s)
 
     if ! wait_for_url "http://$MLX_HOST:$MLX_PORT/health" 600 "$MLX_PID"; then
         log_error "MLX server failed to start. Check $MLX_LOG_FILE"
         tail -20 "$MLX_LOG_FILE" >&2
         exit 1
     fi
+    # Best-effort, never blocks the launch -- a stale or missing file just means
+    # sweep_model.py's "load.load_time_s" field reports null, same as if this script
+    # predated the feature entirely.
+    printf '%s\n' "$(( $(date +%s) - load_start_ts ))" > "$MLX_LOAD_TIME_FILE" 2>/dev/null || true
 
     if ! run_startup_smoke_check; then
         log_error "Startup smoke check failed — tearing down. Check $MLX_LOG_FILE"
@@ -1098,10 +1164,77 @@ log_launch_config() {
     } >> "$MLX_LOG_FILE"
 }
 
+# Best-effort: write this session's real decode speed/TTFT/peak-memory to
+# model_advisor.py's calibration store (~/.bushpilot/calibration/) so a FUTURE launch
+# of this exact model on this exact chip can report a MEASURED tok/s instead of
+# estimate_speed_tok_s's physics-based guess -- see model_advisor.py's
+# save_calibration docstring, and the conversation history behind this feature: one
+# global SPEED_CORRECTION_FACTOR is already confirmed wrong by up to ~1.7x across
+# model families (HARDWARE_SPEED_ESTIMATION.md §17 item #2), so a real per-model,
+# per-chip measurement is strictly more trustworthy than the formula once one exists.
+#
+# Deliberately never allowed to block or fail teardown: a curl timeout, a server
+# that's already dead, a parse error, or model_advisor.py itself erroring all just
+# mean "nothing saved this time" -- every step below is `|| true`/`2>/dev/null`'d, and
+# the whole function is called with `|| true` at its one call site in full_teardown.
+# Called BEFORE wait_for_process_gone kills the server, since it needs the server
+# alive to answer one last /metrics poll.
+save_calibration_snapshot() {
+    [[ -z "${LOCAL_MODEL:-}" ]] && return 0
+
+    local metrics_json
+    metrics_json="$(curl -fsS --max-time 3 "http://$MLX_HOST:$MLX_PORT/metrics" 2>/dev/null)" || return 0
+    [[ -z "$metrics_json" ]] && return 0
+
+    local parsed decode_tok_s context_tokens ttft_s peak_mem_gb
+    parsed="$("$MLX_PYTHON" - "$MLX_BACKEND" "$metrics_json" "${CONTEXT_WINDOW:-}" <<'PYEOF' 2>/dev/null
+import json, sys
+
+backend, metrics_raw, context_window = sys.argv[1:4]
+
+def safe_json(s):
+    try:
+        return json.loads(s)
+    except Exception:
+        return {}
+
+def num(v):
+    return v if isinstance(v, (int, float)) else ""
+
+m = safe_json(metrics_raw)
+if backend == "mlx_dspark":
+    decode_tok_s = num(m.get("mean_decode_tokens_per_sec"))
+    ttft_s = ""  # mlx-dspark does not report TTFT in its own /metrics
+    peak_bytes = m.get("memory", {}).get("peak_bytes")
+    peak_mem_gb = num(peak_bytes / 1e9) if isinstance(peak_bytes, (int, float)) else ""
+else:
+    decode_tok_s = num(m.get("summary", {}).get("avg_decode_tok_s"))
+    ttft_s = num(m.get("latest", {}).get("ttft_s"))
+    peak_mem_gb = num(m.get("latest", {}).get("peak_memory_gb"))
+
+print(decode_tok_s)
+print(context_window)
+print(ttft_s)
+print(peak_mem_gb)
+PYEOF
+)" || return 0
+
+    { read -r decode_tok_s; read -r context_tokens; read -r ttft_s; read -r peak_mem_gb; } <<<"$parsed"
+    [[ -z "$decode_tok_s" ]] && return 0
+
+    local save_args=(--save-calibration "$LOCAL_MODEL" --decode-tok-s "$decode_tok_s")
+    [[ -n "$context_tokens" ]] && save_args+=(--context-tokens "$context_tokens")
+    [[ -n "$ttft_s" ]] && save_args+=(--ttft-s "$ttft_s")
+    [[ -n "$peak_mem_gb" ]] && save_args+=(--peak-memory-gb "$peak_mem_gb")
+
+    "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" "${save_args[@]}" 2>/dev/null || true
+}
+
 full_teardown() {
     local reason="${1:-}"
     [[ -n "$reason" ]] && echo -e "\n[!] Stopping: $reason"
     log_teardown "$reason"
+    save_calibration_snapshot || true
     stty sane 2>/dev/null || true
     wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 20 || true
     rm -f "$MLX_STATE_FILE"
