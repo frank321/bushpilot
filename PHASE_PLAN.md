@@ -1032,3 +1032,96 @@ single-serial-request path; mlx-vlm#1559 is specifically about the batched/concu
 this sweep's concurrency tier doesn't currently combine with `--kv-bits`. Only 2 of the catalog's
 19 models have been swept so far.
 
+## Research: lightweight-tool context floor, and candidate agentic CLIs beyond Aider/Cline (2026-10-03)
+
+Started from a 24GB MacBook Air M3 question and ended up touching two separate open
+items: whether `MIN_USABLE_CONTEXT` should stay one global constant now that Aider
+exists, and which other reputable lightweight coding CLIs are worth adding alongside
+it. Neither change has been made yet — this is the research/decision record for
+when that work happens, so it isn't redone.
+
+### `MIN_USABLE_CONTEXT` is one constant doing two different jobs
+
+`model_advisor.py`'s `MIN_USABLE_CONTEXT = 12288` gates two different things:
+
+1. A model's **raw memory-computed context**, before any tool preload is considered
+   (`computed_context_too_small_to_be_useful` in `recommend_kv_bits_and_context`).
+2. The **headroom left after a specific tool's preload** is subtracted
+   (`insufficient_context_after_tool_preload` in `_apply_preload`).
+
+This matters because of a real rejection it already caused: evaluating
+`moonshotai/Moonlight-16B-A3B-Instruct` (16B total / 3B active MoE, `deepseek_v3`
+architecture — a new family for this catalog, trained with the Muon optimizer, beats
+same-size dense models and DeepSeek-V2-Lite on MMLU/HumanEval/GSM8K per its own
+published numbers) as a catalog candidate (recorded tersely in commit `745b571`'s
+message, not previously in any doc). It has a hard **8,192-token architectural max
+context** — not a conservative default, the model was never trained/tuned beyond
+that. 8,192 < 12,288, so it's excluded by check #1 **regardless of which tool you'd
+use it with** — Aider's own preload was never even reached. Separately, it would also
+be a brand-new `deepseek_v3` architecture integration (unlike the Qwen3-30B-A3B
+sibling added the same session, which reused an already-verified `qwen3_moe`
+tool-parser) and its tool-calling support was never checked. Rejected on the context
+floor alone was sufficient; the architecture risk and unverified tool-calling are
+independent, additional reasons it wouldn't be a good catalog addition even if the
+floor were lowered.
+
+The real finding worth keeping: **Aider has no measured preload baseline today.**
+`TOOL_BASELINE_PRELOAD_TOKENS` only has `claude` (18,900) and `opencode` (6,400)
+entries, measured 2026-09-29 via a bare `-p "Say hello."` request read back from the
+server's own reported prompt tokens (see that constant's own comment). Any other
+tool — `aider`, `cline`, and now `pi` once added — silently defaults to `0` in
+`estimate_preload_overhead()`. That's not a confirmed-small number, it's an
+unmeasured one: `launch_tool.sh`'s `check_preload_fit` currently does essentially
+nothing for Aider/Cline, not because their preload was measured to be negligible.
+
+**Decision: measure before changing the floor.** Rather than lowering
+`MIN_USABLE_CONTEXT` globally (which would loosen check #1 for every tool, including
+Claude Code/OpenCode, not just lean ones), the next step is running the same
+bare-request methodology used for `claude`/`opencode` against `aider`, `cline`, and
+`pi` once installed, to get real baseline numbers before deciding whether/how to
+split the "raw floor" and "headroom-after-preload" roles of the constant apart.
+**Not done yet** — attempted this session, but `pi` isn't installed on this machine
+and the MLX server wasn't running (`~/.bushpilot/state/mlx-loaded.txt` absent), so
+there was nothing to measure against. Needs a session with the server up and all
+three tools installed.
+
+### Candidate lightweight agentic CLIs beyond Aider/Cline
+
+Live-checked via GitHub's API (stars, archived status) and each project's own docs
+(not secondhand claims) on 2026-10-03:
+
+| Tool | Repo | Stars | Backer | Custom local-endpoint mechanism |
+|---|---|---|---|---|
+| **Pi** | `earendil-works/pi` (pi.dev) | 112,085 | Independent | `~/.pi/agent/models.json` — `{"providers": {"<name>": {"baseUrl", "api": "openai-completions", "apiKey", "models": [{"id": ...}]}}}`. Same provider-registration shape this project already uses for OpenCode. Explicitly marketed as a minimal/hackable terminal agent. |
+| **Goose** | `aaif-goose/goose` (moved off `block/goose` to the Agentic AI Foundation; redirect confirmed live) | 54,905 | AAIF (ex-Block/Square) | Plain env vars on the built-in OpenAI provider: `OPENAI_HOST` + `OPENAI_API_KEY` (`OPENAI_BASE_PATH` defaults to `v1/chat/completions`, matching this project's server with zero extra config). A richer custom-provider JSON (`~/.config/goose/custom_providers/*.json`, `engine: "openai"`) also exists, with a per-model `context_limit` field — same role as Aider's `--model-metadata-file`. |
+| **Crush** | `charmbracelet/crush` | 28,474 | Charm (Bubbletea/Glow/Gum) | A `crushrc` config file (Crush's own bash-like DSL): `provider add <name> --type openai-compat --base-url ... --api-key ...` then `model add <name>/<id> --context-window <n> --default-max-tokens <n>`. Also has literal `--type llamacpp`/`lmstudio`/`ollama` with model **auto-discovery**. Only one of the three with context-window as a first-class, explicit config field. |
+
+**Decision: add Pi next** (highest stars, simplest config path, explicitly
+positioned as lightweight — matches the reason this search started). Goose and Crush
+are both real, reputable, and confirmed to support this project's local-server model
+without cloud lock-in; recorded here as viable future additions rather than
+implemented now, so this research doesn't need repeating.
+
+**Checked and rejected** (not lightweight, despite being reputable/popular):
+
+- **Qwen Code** (`QwenLM/qwen-code`, 28,286 stars, Apache-2.0, originally forked from
+  Google's Gemini CLI) — does support local/custom OpenAI-compatible endpoints
+  (confirmed in its own README: "Any third-party provider or local model (Ollama /
+  vLLM)"), but it's explicitly built for "feature parity with Claude Code" (subagents,
+  hooks, LSP integration, computer use, daemon mode). That's this project's
+  Claude-Code/OpenCode weight class already, not a lean alternative — adding it
+  wouldn't help the small-context-window use case that motivated this search.
+- **OpenHands** (`OpenHands/OpenHands`, formerly `All-Hands-AI/OpenHands`, 89,892
+  stars) — very reputable, but its architecture spins up a sandboxed Docker runtime
+  per session rather than attaching a plain CLI client to an existing server. Same
+  reasoning that already excluded Antigravity from `launch_tool.sh`'s tool list:
+  doesn't fit this project's "point a lightweight terminal client at the local
+  server" model.
+
+**Not implemented this session**: `pi` isn't installed on this development machine
+(`which pi` → not found), so adding it to `launch_tool.sh` (new `TOOLS` entry,
+`launch_pi()` following the Aider/Cline pattern, `~/.pi/agent/models.json`
+registration analogous to `register_opencode_model()`) and then measuring its real
+preload baseline both remain open work for a session where it can actually be
+installed and run against the live server.
+
