@@ -172,19 +172,31 @@ start_server() {
     fi
 
     # Defense in depth against the same class of bug wait_for_port_free guards against:
-    # confirm /v1/models actually reports MODEL_ID, not a stale process from a prior
-    # phase that happened to still be listening on this port.
+    # confirm /v1/models actually reports MODEL_ID as loaded, not a stale process from a
+    # prior phase that happened to still be listening on this port. NOTE: as of mlx_vlm
+    # 0.7.4, /v1/models returns every model in the on-disk HF cache (not just the one
+    # this process has loaded), unsorted — data[0] is NOT reliably the just-started
+    # model (confirmed live: an old speculative-decoding drafter alphabetically sorted
+    # first). Must find MODEL_ID by id and check its own "loaded" flag instead of
+    # trusting array position (this script was validated against mlx_vlm 0.7.0, whose
+    # /v1/models apparently only listed the active model — see header comment).
     local served_model
     served_model=$(curl -fsS "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null | "$MLX_PYTHON" -c "
 import json,sys
 try:
     d=json.load(sys.stdin)
-    print(d.get('data',[{}])[0].get('id',''))
+    want='$MODEL_ID'
+    for m in d.get('data', []):
+        if m.get('id') == want and m.get('loaded'):
+            print(want)
+            break
+    else:
+        print('')
 except Exception:
     print('')
 " 2>/dev/null)
     if [[ "$served_model" != "$MODEL_ID" ]]; then
-        log "ERROR: health check answered but /v1/models reports '$served_model', expected '$MODEL_ID' — likely a stale process still bound to port $PORT."
+        log "ERROR: health check answered but /v1/models does not report '$MODEL_ID' as loaded — likely a stale process still bound to port $PORT."
         return 1
     fi
 
