@@ -3698,6 +3698,40 @@
                 ],
                 "sliding_window": null
             }
+        },
+        {
+            "id": "mistral-small-3.2-24b-instruct-2506-4bit",
+            "huggingface": "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit",
+            "size_gb": 12.37,
+            "architecture": "mistral3",
+            "type": "dense",
+            "status": "untested",
+            "modalities": [
+                "text"
+            ],
+            "released": "2025-06",
+            "max_context_architectural": 131072,
+            "display": {
+                "tagline": "General-purpose 24B chat model — likely no agentic tool-calling (see known_issues)",
+                "good_for": "Plain chat/reasoning and general knowledge tasks at a 24B-dense quality level, not agentic coding work — see the tool-calling caveat below before picking this for OpenCode/Claude Code/Aider/Cline/Pi work that needs file-edit/bash tool calls.",
+                "usage_examples": [
+                    "\"Explain the tradeoffs between X and Y\" — general reasoning/explanation, no tool use required",
+                    "\"Summarize this document\" — paste text directly in the prompt rather than relying on a read-file tool call"
+                ],
+                "known_issues": "Untested: not yet run through verify_max_kv_size.sh on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed. SEPARATELY, static inspection of this exact repo's own chat_template.jinja (not a live test — see tool_calling.verdict/notes below for why this isn't a formal verdict) found zero tool-calling support: only user/system/assistant roles are handled, it raises an exception for anything else, and it has none of the [AVAILABLE_TOOLS]/[TOOL_CALLS] markers mlx_vlm's \"mistral\" tool parser (mlx_vlm/tools/registry.py) looks for — unlike this catalog's Devstral entries (same mistral3 architecture family), whose template has both. The mlx-community conversion used here also drops the vision tower entirely (text-only modalities below) despite the base model being multimodal upstream — a lmstudio-community conversion exists that keeps it, not used here to stay consistent with every other entry in this catalog using mlx-community.",
+                "size_label": "12.37 GB",
+                "max_context_label": "131,072 tokens (architectural max)"
+            },
+            "tool_calling": {
+                "verdict": "UNTESTED",
+                "notes": "Not live-tested yet (no real /v1/chat/completions request with a tool schema attached has been run against this model) — per this file's own _schema_notes.tool_calling, a verdict requires that, not static template inspection alone, since the two can disagree in either direction for other models in this catalog. That said, static inspection of this repo's chat_template.jinja (see known_issues above) found no tool-call syntax defined anywhere in it, which would need the model to work entirely outside what its own template renders if a live test were to pass — worth running before relying on this entry for anything agentic."
+            },
+            "kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "num_hidden_layers": 40,
+                "sliding_window": null
+            }
         }
     ]
 }
