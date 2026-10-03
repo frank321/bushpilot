@@ -1235,3 +1235,50 @@ enough (tens of thousands of tokens — a chunky multi-MCP agentic client, say) 
 headroom check effectively becomes unreachable for small-context models that are
 otherwise fine; none of the five tools measured here are anywhere near that.
 
+### Follow-up Q&A: "Pi's preload is tiny, shouldn't the floor come down?" (2026-10-03)
+
+Natural question once Pi's real 1,600-token preload was in hand — worth recording the
+answer since it isn't obvious from the numbers alone.
+
+**The raw-context check (#1) can't be nudged into giving Pi anything, because of the
+tier rounding it runs on.** `recommend_max_context` always rounds its memory-computed
+context DOWN to one of `4096, 8192, 16384, 32768, 65536, 131072, 262144` before
+comparing to `MIN_USABLE_CONTEXT`. 12,288 sits between the `8192` and `16384` tiers,
+so this check only ever has two outcomes — reject at `≤8192`, or pass at `≥16384` —
+with no tier in between to move the floor into. Lowering it to e.g. 8,000 would change
+nothing: the tier is still 8192, still gets compared against whatever the new number
+is, same binary result.
+
+**The headroom check (#2) already gives Pi the break — automatically, with the
+constant unchanged.** Walking a model that lands on the `16384` tier through each
+tool's real preload (`tier - preload >= 12288`):
+
+| Tool | preload | headroom at the 16384 tier | passes? |
+|---|---|---|---|
+| pi | 1,600 | 14,784 | yes |
+| cline | 5,500 | 10,884 | no — needs the 32768 tier |
+| aider | 6,700 | 9,684 | no — needs the 32768 tier |
+| opencode | 6,400 | 9,984 | no — needs the 32768 tier |
+| claude | 18,900 | -2,516 | no — needs the 65536 tier |
+
+A model too small for every other tool at the 16384 tier is already usable with Pi
+today, with zero code changes — subtracting a tool-specific preload from the SAME
+12,288-token bar is exactly what makes the effective required context differ per tool
+(≈13,888 total for Pi vs. ≈31,188 for Claude Code, as already noted above). Pi's small
+preload doesn't argue for moving the constant; it's already the thing that makes the
+constant produce a smaller real-world requirement for Pi than for the heavier tools.
+
+**What moving the shared constant down would actually do instead:** unlock smaller
+tiers for whichever tool's preload is closest to whatever the new number is — today
+that's Cline/Aider/OpenCode (5,500-6,700), not specifically Pi, since Pi already
+clears the current bar at the 16384 tier. It's not a per-tool lever at all: `_apply_preload`
+reads one shared `MIN_USABLE_CONTEXT`, so changing it changes the usability bar for
+every tool's headroom at once, Claude Code included. Doing that would be answering a
+different question than "Pi's preload is small" — it would be "is 12,288 tokens of
+real post-preload conversation room more conservative than necessary, for everyone" —
+and that's a judgment call about what a model can usefully do in that remaining room
+(read a file, hold a short exchange), not something derivable from any tool's
+preload size. Left unchanged this session for lack of a concrete case needing it;
+revisit with a specific smaller number and a reason, not just "a tool's preload turned
+out small."
+
