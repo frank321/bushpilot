@@ -109,6 +109,36 @@ MIN_USABLE_CONTEXT = 12288   # below this, a context window isn't really usable 
 # a bare "say hello"). A same-methodology Read-tool-call re-test this session measured
 # ~24,000 total, consistent with the ~22,406 bare figure here, not the ~39-44K one —
 # that earlier figure could not be reproduced and is treated as superseded.
+#
+# aider/cline/pi added 2026-10-03 (PHASE_PLAN.md's lightweight-tool-CLI research
+# session), same ground-truth method (server's own /metrics prompt_tokens for a bare,
+# no-edit "say hello"-equivalent request through launch_tool.sh), but with NO skills
+# subtraction for any of the three — confirmed live that none of them were loading
+# this machine's ~3,518-token Claude-Code-style global skill listing in the first
+# place: Aider has no skill/plugin-discovery mechanism at all; Cline has its own
+# unrelated one (`cline skill` → `npx skills`) with zero skills installed on this
+# machine; Pi has its own too (`~/.pi/agent/skills/`, confirmed in its docs) but it was
+# a fresh install with that directory not even existing yet. So each tool's raw
+# measured total already IS the clean baseline — nothing to subtract, unlike
+# claude/opencode above where this machine's global Claude-Code skills happened to load
+# through both of them.
+#   aider: --message "Say hello." --yes-always --exit (run against a scratch copy of
+#     this repo, not the live checkout — aider's "whole edit format" means a model
+#     reply containing anything that looks like code gets auto-applied AND
+#     auto-committed with --yes-always; this bit on the first attempt at this exact
+#     measurement, which is why the scratch-copy precaution exists here, not for
+#     claude/opencode above). Aider always builds a repo-map (confirmed: "Repo-map:
+#     using 4096 tokens, auto refresh" in its own startup banner) regardless of the
+#     prompt, so this total is inherently repo-shape-dependent, not a pure
+#     system-prompt baseline — real for THIS repo's 36 tracked files, not necessarily
+#     portable to a differently-sized repo. 6,721 measured total - ~3 (user msg) ≈
+#     6,718.
+#   cline: a bare `cline "Say hello." --timeout 30` (its default act-mode,
+#     auto-approve=true). 5,457 measured total - ~3 (user msg) ≈ 5,454.
+#   pi: `pi --provider mlx-direct --model <id> --print "Say hello." --no-session`.
+#     1,611 measured total - ~3 (user msg) ≈ 1,608 — by far the smallest of the five
+#     tools measured so far, consistent with it being explicitly marketed as a
+#     minimal/hackable terminal agent (see PHASE_PLAN.md's research section).
 TOOL_BASELINE_PRELOAD_TOKENS = {
     "claude": 18900,
     "opencode": 6400,   # bare-install figure (~0 MCP; global skills subtracted back
@@ -116,6 +146,10 @@ TOOL_BASELINE_PRELOAD_TOKENS = {
                          # configured run higher; see measure_skills_preload's
                          # docstring for why that growth isn't modeled for OpenCode
                          # specifically.
+    "aider": 6700,       # includes this repo's own repo-map cost (see above) — not a
+                         # repo-independent figure the way the others are.
+    "cline": 5500,
+    "pi": 1600,
 }
 
 # Rough, clearly-approximate per-server token cost — public reports range from ~800

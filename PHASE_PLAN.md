@@ -1125,3 +1125,113 @@ registration analogous to `register_opencode_model()`) and then measuring its re
 preload baseline both remain open work for a session where it can actually be
 installed and run against the live server.
 
+## Follow-up: Pi added, real preload baselines measured, MIN_USABLE_CONTEXT kept as one constant (2026-10-03)
+
+Picked up the two items the research above left open. `pi` is now installed
+(`curl -fsSL https://pi.dev/install.sh | sh` → 1.0.1, confirmed with `pi --version`),
+added to `launch_tool.sh` (`TOOLS` array, `tool_display_name`/`tool_command`/
+`tool_install_hint`, `register_pi_model()` + `launch_pi()` following the
+`register_opencode_model()` pattern — `~/.pi/agent/models.json`'s `{"providers":
+{"mlx-direct": {"baseUrl", "api": "openai-completions", "apiKey", "models": [{"id":
+...}]}}}` shape, confirmed live against `pi.dev/docs/latest/models` and by actually
+registering it and running `pi --list-models mlx` / a real request through it), and
+documented in MLX_SERVER_USAGE.md/README.md/QUICK_START.md/docs/release-README.md
+alongside the existing Aider/Cline mentions.
+
+### Real preload baselines for aider, cline, and pi
+
+Measured live with the MLX server running `qwen3.5-9b-mlx-4bit` (an already-tested
+catalog entry) at 131,072 context, same ground-truth method as the existing
+claude/opencode entries: a bare, single-turn, no-edit "say hello"-equivalent request
+through `launch_tool.sh`, reading the server's own `/metrics` `prompt_tokens` as truth
+for the local model's real tokenizer.
+
+**A real near-miss worth recording**: the first `aider` measurement attempt used
+`--message "Say hello." --yes-always --exit` directly against this actual repo
+checkout. The exact same wording on a second run got a different model completion
+that looked enough like code for Aider's "whole edit format" to treat it as a
+SEARCH/REPLACE edit, auto-apply it, and auto-commit it with `--yes-always` — it
+created `say_hello.py` and committed it to this project's real git history
+(`29b20ed`, caught and `git reset --hard`-ed away immediately, confirmed clean after).
+Unlike Claude Code/OpenCode's bare `-p`/`run` request (confirmed no-tool-call by
+construction), Aider has no mode that separates "chat reply" from "apply this as a
+code edit" other than the model's own output shape — a small quantized model
+replying with anything code-shaped is a real, reproducible risk, not a hypothetical
+one. Fix: ran the actual measurement against a throwaway `rsync` copy of this repo
+(`/tmp/bushpilot_aider_test`, full git history intact so Aider's repo-map detection
+behaves identically) instead of the live checkout, so a repeat of the same failure
+mode has nothing real to damage. Cline (`--auto-approve true` by default, same class
+of risk) got the same throwaway-copy treatment as a precaution, even though its
+"Say hello."-equivalent run didn't trigger any file changes in testing.
+
+Also checked, before assuming the same subtraction the claude/opencode entries
+needed: whether any of aider/cline/pi load this machine's global skill listing the
+same way Claude Code does (which is what made the claude/opencode baselines need a
+~3,518-token subtraction to isolate the pure tool overhead). None of them did, for
+three different reasons — Aider has no skill/plugin-discovery mechanism at all;
+Cline has its own (`cline skill` → `npx skills`) with zero skills installed on this
+machine; Pi has its own too (`~/.pi/agent/skills/`, confirmed in `pi.dev/docs/latest/
+configuration`) but it was a fresh install with that directory not yet existing. So
+no subtraction was needed for any of the three — each tool's raw measured total
+(minus the ~3-token user message) is already the clean baseline:
+
+| Tool | Measured total | Baseline added to `TOOL_BASELINE_PRELOAD_TOKENS` |
+|---|---|---|
+| pi | 1,611 | 1,600 |
+| cline | 5,457 | 5,500 |
+| aider | 6,721 | 6,700 |
+| opencode (existing) | 9,906 | 6,400 |
+| claude (existing) | 22,406 | 18,900 |
+
+Pi really is the leanest of the five, by a wide margin — consistent with it being
+explicitly marketed as a minimal/hackable terminal agent (the reason it was picked
+over Goose/Crush in the research above). Aider's figure is real but repo-shape
+-dependent, not a portable constant the way the others are: Aider always builds a
+repo-map (confirmed in its own startup banner, "Repo-map: using 4096 tokens, auto
+refresh") regardless of the prompt, and that cost scales with the number of files
+Aider's git integration sees — 6,700 is what this specific 36-tracked-file repo costs
+today, not a repo-independent system-prompt figure. Flagged in
+`TOOL_BASELINE_PRELOAD_TOKENS`'s own comment so this doesn't get mistaken for a fixed
+constant later.
+
+### MIN_USABLE_CONTEXT: kept as one constant, not split
+
+With real numbers now in hand for every tool `estimate_preload_overhead` can target
+(1,600–18,900 tokens — an ~11.8x spread), revisited whether `MIN_USABLE_CONTEXT`'s two
+roles (raw architectural-context floor in `recommend_kv_bits_and_context`'s
+`computed_context_too_small_to_be_useful` check vs. post-preload headroom floor in
+`_apply_preload`'s `insufficient_context_after_tool_preload` check) should become two
+separate constants.
+
+**Decision: no split, no value change.** The two checks already do genuinely
+different jobs sharing one coincidentally-equal number, and nothing in the real
+measurements argues for prying them apart:
+
+- The raw-context check runs before any tool is even chosen (it gates catalog
+  entries like Moonlight-16B's hard 8,192-token architectural ceiling, discussed
+  above). It's deliberately a *weaker, necessary-but-not-sufficient* pre-filter: even
+  against Pi's new real 1,600-token floor — the smallest of any tool measured — an
+  8,192-token model would still only clear 6,592 tokens of headroom, well under
+  12,288. Lowering the raw-context floor on its own would let strictly-worse-than-today
+  models reach the picker, then get rejected by the headroom check anyway (for every
+  tool, including Pi) — it wouldn't unlock anything, just move where the rejection
+  happens.
+- The headroom check is the real per-tool gate, and it already produces very
+  different effective minimum-context requirements per tool from the ONE shared
+  number, which is exactly the point of subtracting a tool-specific preload before
+  comparing against it: Claude Code now needs ≈31,188 total context to clear the same
+  12,288-token headroom bar Pi clears at ≈13,888. That ~2.2x difference is the real,
+  measured cost of Claude Code's heavier preload — the floor doesn't need to move for
+  this to show up correctly; subtracting a bigger number from the same context already
+  does it.
+
+Both checks reduce to the same underlying judgment — "under ~12,288 tokens of real
+usable room isn't worth it" — just applied at two different points in the pipeline
+(before vs. after a specific tool's preload is known). Splitting them into two
+different numbers would need an actual argument for why that judgment should differ
+depending on which point you check it at, and none emerged from measuring five real
+tools spanning an 11.8x preload range. Revisit if a future tool's preload is heavy
+enough (tens of thousands of tokens — a chunky multi-MCP agentic client, say) that the
+headroom check effectively becomes unreachable for small-context models that are
+otherwise fine; none of the five tools measured here are anywhere near that.
+
