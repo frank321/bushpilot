@@ -1239,6 +1239,42 @@ than what's documented above.
     with no vision tower," was also found but is unrelated to caching — a construction-crash fix
     for a custom trimmed checkpoint with `vision_config: null`.)
 
+### Follow-up (2026-10-02): a real correctness bug on the Gemma-4 continuous-batching path, not yet tracked upstream
+
+Prompted by a direct question about whether checkpoint-mode caching on Gemma-4 "doesn't work at
+all" — it doesn't fail universally (the growing-conversation hash-instability bug this project
+would have hit is already fixed, see below), but a real, separate, **unresolved** bug was found:
+
+- **The specific "doesn't cache at all" failure mode this project's own §13/§20 testing would have
+  hit, if it still existed, is already fixed upstream.** [Issue #999](https://github.com/Blaizzy/mlx-vlm/issues/999)
+  (opened 2026-04-09) reproduced, live, on `mlx-vlm 0.6.3` with a real Gemma-4 31B 8-bit server: a
+  growing multi-turn conversation got **0 cached tokens on every turn** (only a byte-identical
+  full-prompt repeat ever hit). Root-caused by a contributor comment to `BatchGenerator._apc_extra_hash`
+  folding `inputs_embeds`/`attention_mask` into the cache key — tensors that change shape every time
+  the conversation grows, so the key never matches twice. Fixed by [PR #1713](https://github.com/Blaizzy/mlx-vlm/pull/1713),
+  "Preserve APC prefix reuse for growing prepared prompts," **merged 2026-08-11** — before this
+  project's pinned `mlx-vlm` 0.7.4 (released 2026-09-28). Confirmed directly against the installed
+  0.7.4 package (`mlx_vlm/generate/ar.py`'s `_apc_extra_hash`) that the fixed code is what's actually
+  running here, consistent with this project's own clean §13/§20 measurements (hit_rate≈0.9998).
+- **A different, real, currently-unmerged bug remains**: [PR #2389](https://github.com/Blaizzy/mlx-vlm/pull/2389),
+  "Batched prefill: keep one token-type row per request," opened and closed the same day
+  (2026-09-28) — not because it was wrong, but because the maintainer asked for an issue to be filed
+  first; **no corresponding issue has been opened as of this check**, so this is not yet tracked or
+  scheduled upstream. The bug it fixes: mixing a text-only request with image requests in the same
+  continuous-batching window crashes with a 500 (3+ rows) or, worse, **silently broadcasts the wrong
+  attention mask onto the text-only row — a wrong answer with no error** (2 rows) — because
+  `_merge_prefill_prompt_kwargs`/`_build_mixed_prompt_batch` stack per-row kwargs only from the rows
+  that carry them, so a text-only row's missing `mm_token_type_ids` short-circuits the row count.
+  Reproduced live by the PR author on `gemma-4-26b-a4b-it-4bit`: concurrent text-only + two-image
+  requests returned 200s with the fix, 500s without it. **This project has not independently
+  reproduced this** — flagged here from the upstream PR body, not from this project's own testing.
+- **Scope, for this project specifically**: both this item and §17/§20's `kv-bits` + APC gap
+  (mlx-vlm#1559) are about the **concurrent/batched multi-request path**. Every APC test this
+  project has run (§13, §20) was sequential, one request at a time — the path these bugs live in
+  has never actually been exercised here. Low priority for a single local interactive user; real
+  risk only if `start_mlx_server.sh` is ever used to serve genuinely concurrent requests (e.g. a
+  team server) mixing modalities on a Gemma-4 entry.
+
 ### Open items specific to this section
 
 1. **All speedup/latency numbers above are single-machine (this M5 Pro), single-prompt-pair
@@ -1259,6 +1295,12 @@ than what's documented above.
 5. **PR #2356's restored-row memory/speed fix is unmerged** — worth re-checking whether it landed
    (and whether it measurably helps `gemma-4-26b-a4b-it-4bit` specifically, which was not in its
    benchmark table) next time this project upgrades `mlx-vlm` past 0.7.4.
+6. **A real correctness bug on the continuous-batching path (mixed text-only + image requests on
+   Gemma-4, see "Follow-up (2026-10-02)" above) is fixed by an unmerged PR (mlx-vlm#2389) with no
+   tracking issue open yet** — not independently reproduced by this project (this project's own
+   APC testing has never run concurrent requests). Worth a real test, and worth re-checking whether
+   an issue/fix has landed, before this project ever serves genuinely concurrent multimodal+text
+   requests against a Gemma-4 entry.
 
 ## 20. Per-(chip, model) sweep harness (`sweep_model.py`) — a real, independent re-measurement on
 ##     this M5 Pro, closing several §17/§19 open items with live data instead of just a plan

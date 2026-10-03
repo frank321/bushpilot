@@ -236,7 +236,7 @@ def test_sort_key_for_click_skips_columns_dropped_for_width(sample_rows):
 # subset; see format_model_compact_row's own comment on this)
 
 def test_color_highlights_context_and_kv_green_when_unquantized(dense_model, monkeypatch):
-    monkeypatch.setattr(ma, "use_color", lambda: True)
+    monkeypatch.setattr(ma, "use_color", lambda force=False: True)
     rows = ma.build_recommendations([dense_model], free_wired_gb=24, chip_name="Apple M3 Max", gpu_cores=40)
     widths = ma.compact_row_widths(rows)
     cols = list(range(ma.COL_LAST))
@@ -247,7 +247,7 @@ def test_color_highlights_context_and_kv_green_when_unquantized(dense_model, mon
 
 
 def test_color_highlights_context_and_kv_yellow_when_kv_quantized(dense_model, monkeypatch):
-    monkeypatch.setattr(ma, "use_color", lambda: True)
+    monkeypatch.setattr(ma, "use_color", lambda force=False: True)
     # free_wired_gb=9.34 is the verified fallback-to-8bit-KV case from
     # test_recommendation_math.py.
     rows = ma.build_recommendations([dense_model], free_wired_gb=9.34, chip_name="Apple M3 Max", gpu_cores=40)
@@ -259,7 +259,7 @@ def test_color_highlights_context_and_kv_yellow_when_kv_quantized(dense_model, m
 
 
 def test_color_dims_the_entire_line_when_model_does_not_fit(dense_model, monkeypatch):
-    monkeypatch.setattr(ma, "use_color", lambda: True)
+    monkeypatch.setattr(ma, "use_color", lambda force=False: True)
     rows = ma.build_recommendations([dense_model], free_wired_gb=1, chip_name="Apple M3 Max", gpu_cores=40)
     widths = ma.compact_row_widths(rows)
     cols = list(range(ma.COL_LAST))
@@ -273,11 +273,44 @@ def test_color_dims_the_entire_line_when_model_does_not_fit(dense_model, monkeyp
 def test_color_highlighting_does_not_crash_when_context_kv_engine_are_dropped(dense_model, monkeypatch):
     # The actual regression: COL_CTX/COL_KV/COL_ENGINE may not be in `cols` at all on
     # a narrow terminal -- highlighting must skip them gracefully, not KeyError.
-    monkeypatch.setattr(ma, "use_color", lambda: True)
+    monkeypatch.setattr(ma, "use_color", lambda force=False: True)
     rows = ma.build_recommendations([dense_model], free_wired_gb=24, chip_name="Apple M3 Max", gpu_cores=40)
     widths = ma.compact_row_widths(rows)
     narrow_cols = [ma.COL_NAME, ma.COL_SIZE, ma.COL_CTX, ma.COL_KV, ma.COL_SPEED]
     line = ma.format_model_compact_row(rows[0], widths, narrow_cols, None)  # must not raise
     assert ma.DIM not in line.split("\t")[1].replace(f"{ma.DIM}×4 concurrent{ma.RESET}", "")
     assert f"{ma.GREEN}262K tok" in line
+
+
+# --- use_color: force=True (--color) must not depend on stderr's own isatty status ----
+# (the real bug: start_mlx_server.sh's fzf reload/bind commands all redirect this
+# process's stderr to /dev/null to swallow system_profiler's unrelated noise, which
+# makes sys.stderr.isatty() False on every single reload, on every machine -- not just
+# a user's one-off non-tty invocation. --color/force=True is the fix: it must restore
+# color even when stderr is provably not a terminal.)
+
+def test_use_color_auto_detect_follows_stderr_isatty_when_not_forced(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(ma.sys.stderr, "isatty", lambda: False)
+    assert ma.use_color() is False
+    monkeypatch.setattr(ma.sys.stderr, "isatty", lambda: True)
+    assert ma.use_color() is True
+
+
+def test_use_color_force_true_wins_even_when_stderr_is_not_a_tty(monkeypatch):
+    # This is exactly start_mlx_server.sh's reload-bind scenario: stderr redirected to
+    # /dev/null, so isatty() is False, but --color was passed because the caller knows
+    # the output is headed into fzf's --ansi screen regardless.
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(ma.sys.stderr, "isatty", lambda: False)
+    assert ma.use_color(force=True) is True
+
+
+def test_use_color_no_color_env_wins_even_when_forced(monkeypatch):
+    # NO_COLOR is an explicit user accessibility opt-out, not a detection heuristic --
+    # --color must never override it.
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(ma.sys.stderr, "isatty", lambda: True)
+    assert ma.use_color(force=True) is False
+    assert ma.use_color() is False
 

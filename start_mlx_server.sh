@@ -644,7 +644,14 @@ run_fzf_model_picker() {
     # --sort-state remembers the current sort between reloads so asking for the same
     # column twice (key or header click) reverses it.
     local sort_state="$BUSHPILOT_STATE_DIR/picker-sort.state"
-    list_cmd="$(printf '%q ' "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact --no-banner --sort-state "$sort_state" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"})"
+    # --color: this process's own stderr-isatty color auto-detection (model_advisor.py's
+    # use_color()) can't be trusted here -- every reload/bind command below redirects
+    # this process's stderr to /dev/null to swallow system_profiler's unrelated
+    # hw.cpufamily noise, which defeats that auto-detection on every single reload, on
+    # every machine (not just a lower-memory one -- it's just far more NOTICEABLE there,
+    # since that's where rows actually need to be dimmed). We know for certain this is
+    # headed into fzf's --ansi screen below, so assert it explicitly instead.
+    list_cmd="$(printf '%q ' "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact --color --no-banner --sort-state "$sort_state" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"})"
     # Deliberately NOT inside the %q-escaped block above: ${FZF_COLUMNS:-...} must stay a
     # literal, unexpanded shell parameter reference in list_cmd's value, so that both the
     # `start` event (fires the instant fzf launches -- corrects for $term_width above
@@ -664,7 +671,7 @@ run_fzf_model_picker() {
 
     while true; do
         : > "$sort_state"   # every (re)opened picker starts from the default sort
-        selection="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact --term-width "$term_width" --sort-state "$sort_state" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} | fzf \
+        selection="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact --color --term-width "$term_width" --sort-state "$sort_state" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} | fzf \
             --delimiter=$'\t' --with-nth=2 \
             --preview "$preview_cmd" --preview-window down:50%:wrap \
             --bind "start:reload($list_cmd 2>/dev/null)" \

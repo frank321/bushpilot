@@ -936,10 +936,24 @@ GREEN = "\033[32m"
 YELLOW = "\033[33m"
 
 
-def use_color():
+def use_color(force=False):
     """Color only on a real terminal and when NO_COLOR isn't set. stdout is a pipe into
-    fzf here, so the TTY check is on stderr (where the banner is painted)."""
-    return "NO_COLOR" not in os.environ and sys.stderr.isatty()
+    fzf here, so the TTY check is on stderr (where the banner is painted).
+
+    `force=True` (--color) skips the stderr-isatty check entirely -- for the
+    --list-compact picker path specifically, stderr isn't a reliable signal: every
+    fzf reload/bind command in start_mlx_server.sh redirects this process's stderr to
+    /dev/null (to swallow system_profiler's unrelated hw.cpufamily noise), which makes
+    sys.stderr.isatty() False on every single reload after the picker's first instant
+    -- not just on some other machine, on EVERY machine, every launch. The caller
+    already knows this output is headed into fzf's --ansi-enabled screen, so it passes
+    --color to assert that rather than relying on a TTY check that --color's own
+    plumbing defeats. NO_COLOR is still honored even when forced -- that's an explicit
+    user accessibility opt-out, not a detection heuristic, so it should never be
+    overridden."""
+    if "NO_COLOR" in os.environ:
+        return False
+    return True if force else sys.stderr.isatty()
 
 
 def print_preload_banner(preload):
@@ -1206,14 +1220,16 @@ def _truncate_cell(text, width):
     return text[: width - 1] + "…"
 
 
-def format_compact_header_row(widths, cols, sort_key=None, descending=False):
+def format_compact_header_row(widths, cols, sort_key=None, descending=False, force_color=False):
     """First line of --list-compact, consumed by fzf's --header-lines=1: same
     `id<TAB>display<TAB>reason` shape as a data row (so --with-nth applies to it
     identically and the columns line up), id left as a placeholder. The column the list
     is currently sorted by gets a ▼ (high to low / newest first) or ▲ (low to high / A-Z).
     `cols` is the ordered subset of columns visible_columns() decided fits the terminal;
     a column dropped for width still keeps its sort-arrow label logic correct for the
-    columns that remain."""
+    columns that remain. `force_color` is --list-compact's --color flag, forwarded to
+    use_color() -- see its docstring for why stderr's own isatty status can't be trusted
+    here."""
     labels = list(COMPACT_HEADERS)
     if sort_key in COLUMN_SORT_KEYS:
         k = COLUMN_SORT_KEYS.index(sort_key)
@@ -1221,10 +1237,10 @@ def format_compact_header_row(widths, cols, sort_key=None, descending=False):
     padded = [labels[k].rjust(widths[k]) if k in COMPACT_RIGHT_ALIGNED else labels[k].ljust(widths[k])
               for k in cols]
     line = "  ".join(padded + [labels[COL_LAST]])
-    return f"-\t{BOLD + line + RESET if use_color() else line}\t"
+    return f"-\t{BOLD + line + RESET if use_color(force_color) else line}\t"
 
 
-def format_model_compact_row(r, widths=None, cols=None, reason=None, term_width=None):
+def format_model_compact_row(r, widths=None, cols=None, reason=None, term_width=None, force_color=False):
     """One row for --list-compact: `id<TAB>display<TAB>reason`. Field 1 (id) is used
     internally (fzf's {1} for the preview command, `cut -f1` for the final --resolve
     call); field 2 is what fzf shows and matches against (the caller hides the others
@@ -1255,7 +1271,7 @@ def format_model_compact_row(r, widths=None, cols=None, reason=None, term_width=
         elif len(notes) > room:
             notes = (notes[: room - 1] + "…") if room > 1 else "…"
     line = "  ".join(padded + [notes])
-    if use_color():
+    if use_color(force_color):
         if not r["fits"]:
             line = f"{DIM}{line}{RESET}"
         else:
@@ -1368,7 +1384,7 @@ def next_sort(requested_key, state_path):
 
 def print_list_compact(rows, chip_name, gpu_cores, total_ram_gb, free_wired_gb, preload=None,
                        sort_key=None, banner=True, sort_col=None, sort_state=None,
-                       term_width=None):
+                       term_width=None, force_color=False):
     """--list-compact: the fzf-facing presentation mode. Every catalog model is listed;
     the ones that don't fit your free memory are dimmed and carry the reason, so you can
     see what a bigger machine would unlock. Rows go to stdout (fzf's list input); the
@@ -1381,7 +1397,12 @@ def print_list_compact(rows, chip_name, gpu_cores, total_ram_gb, free_wired_gb, 
     same key reverses it. `term_width` (the caller's actual terminal width --
     start_mlx_server.sh passes fzf's own $FZF_COLUMNS) is what keeps the line from
     running off the right edge of a narrower window or terminal; None means render every
-    column at full width, as before."""
+    column at full width, as before. `force_color` is --color -- see use_color()'s
+    docstring: start_mlx_server.sh's fzf reload/bind commands all redirect this
+    process's stderr to /dev/null to swallow system_profiler's noise, which defeats the
+    stderr-isatty auto-detection on every single reload, on every machine -- not just
+    the picker's first frame. The caller passes --color because it already knows this
+    output is going into fzf's --ansi-enabled screen."""
     fitting_count = sum(1 for r in rows if r["fits"])
     if banner:
         log(f"  Local Model Advisor — {chip_name or 'unknown chip'}   "
@@ -1396,10 +1417,11 @@ def print_list_compact(rows, chip_name, gpu_cores, total_ram_gb, free_wired_gb, 
     requested = sort_key_for_click(sort_col, widths, cols) if sort_col is not None else sort_key
     sort_key, reverse = next_sort(requested, sort_state)
     rows, descending = sort_rows(rows, sort_key, reverse)
-    print(format_compact_header_row(widths, cols, sort_key, descending))
+    print(format_compact_header_row(widths, cols, sort_key, descending, force_color=force_color))
     for r in rows:
         reason = None if r["fits"] else short_unavailable_reason(r, free_wired_gb, preload)
-        print(format_model_compact_row(r, widths, cols, reason, term_width=term_width))
+        print(format_model_compact_row(r, widths, cols, reason, term_width=term_width,
+                                        force_color=force_color))
     return [r for r in rows if r["fits"]]
 
 
@@ -1642,7 +1664,7 @@ def main():
                            sort_key=sort_key, banner="--no-banner" not in argv,
                            sort_col=int(sort_col) if sort_col and sort_col.isdigit() else None,
                            sort_state=_flag_value(argv, "--sort-state"),
-                           term_width=term_width)
+                           term_width=term_width, force_color="--color" in argv)
         return
 
     if list_json:
