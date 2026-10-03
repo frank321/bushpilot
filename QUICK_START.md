@@ -1,6 +1,6 @@
 # Quick Start: Bushpilot
 
-Run Claude Code, OpenCode, Aider, or Cline against a model served locally on-device by Apple's MLX,
+Run Claude Code, OpenCode, Aider, Cline, or Pi against a model served locally on-device by Apple's MLX,
 instead of a cloud API. Hardware-aware: it detects your Mac's chip and free memory
 and recommends a model + context size that's actually safe to run.
 
@@ -26,7 +26,7 @@ starts `mlx_vlm.server`, and takes over the terminal with a live dashboard.
 ./launch_tool.sh
 ```
 
-This shows a picker (Claude Code / OpenCode / Aider / Cline), checks the server from Terminal 1 is
+This shows a picker (Claude Code / OpenCode / Aider / Cline / Pi), checks the server from Terminal 1 is
 healthy and has room for that tool's context preload, then launches straight into it.
 
 Open a **third** terminal and run `./launch_tool.sh` again with another tool to

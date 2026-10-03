@@ -71,11 +71,11 @@ Leave that terminal open. In a **different** terminal:
 ./launch_tool.sh
 ```
 
-This runs `launch_tool.sh`'s own tool picker (Claude Code / OpenCode / Aider / Cline),
-checks that the server from step above is actually healthy, checks that the picked
-tool's own context preload still leaves enough room in whatever context size you
-chose, and then `exec`s straight into `claude`, `opencode`, `aider`, or `cline` with
-all the right environment variables (or, for Cline, provider config) set.
+This runs `launch_tool.sh`'s own tool picker (Claude Code / OpenCode / Aider / Cline /
+Pi), checks that the server from step above is actually healthy, checks that the
+picked tool's own context preload still leaves enough room in whatever context size
+you chose, and then `exec`s straight into `claude`, `opencode`, `aider`, `cline`, or
+`pi` with all the right environment variables (or, for Cline/Pi, provider config) set.
 
 ### Skipping the pickers
 
@@ -142,6 +142,11 @@ you're not looking — see `MONITORING_ARCHITECTURE.md`.)
   --baseurl <server>/v1` to persist the connection (Cline's CLI has no env-var path for
   this — see `apps/cli/README.md` in the `cline/cline` repo), then launches with
   `-P openai-native -m <model>`
+- **Pi**: registers the model under a `mlx-direct` provider (`baseUrl`/`api:
+  "openai-completions"`/`apiKey`/`models`) in `~/.pi/agent/models.json` — the same
+  provider-registration shape this project already uses for OpenCode, just a
+  different file/schema (see `pi.dev/docs/latest/models`) — then launches with
+  `--model mlx-direct/<model>`
 
 If the server isn't running when `launch_tool.sh` starts, it asks to confirm, then
 `exec`s `start_mlx_server.sh` directly in that same terminal (replacing itself, not

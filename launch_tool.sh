@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# launch_tool.sh — attaches a coding tool (Claude Code / OpenCode / Aider / Cline) to
-# the already-running MLX supervisor (start_mlx_server.sh). See PHASE_PLAN.md Phase 3.
+# launch_tool.sh — attaches a coding tool (Claude Code / OpenCode / Aider / Cline / Pi)
+# to the already-running MLX supervisor (start_mlx_server.sh). See PHASE_PLAN.md Phase 3.
 #
 # This script does NOT start or manage the model server itself -- that's
 # start_mlx_server.sh's job, and its dashboard is the thing keeping the shared
@@ -18,6 +18,7 @@ set -euo pipefail
 #   launch_tool.sh opencode [args...] → skip the picker, launch OpenCode directly
 #   launch_tool.sh aider    [args...] → skip the picker, launch Aider directly
 #   launch_tool.sh cline    [args...] → skip the picker, launch Cline directly
+#   launch_tool.sh pi       [args...] → skip the picker, launch Pi directly
 #
 # Antigravity is deliberately not offered here -- already researched and confirmed
 # there's no way to point it at a custom local endpoint (see PHASE_PLAN.md). "Tau" and
@@ -79,7 +80,7 @@ MIN_USABLE_CONTEXT=12288
 # PromptTooLongError that live test hit.
 CLAUDE_OUTPUT_TOKENS_RESERVE=32000
 
-TOOLS=(claude opencode aider cline)
+TOOLS=(claude opencode aider cline pi)
 
 log_info() { echo "[INFO] $*"; }
 log_error() { echo "[ERROR] $*" >&2; }
@@ -93,6 +94,7 @@ tool_display_name() {
         opencode) echo "OpenCode" ;;
         aider) echo "Aider" ;;
         cline) echo "Cline" ;;
+        pi) echo "Pi" ;;
         *) echo "$1" ;;
     esac
 }
@@ -103,6 +105,7 @@ tool_command() {
         opencode) echo opencode ;;
         aider) echo aider ;;
         cline) echo cline ;;
+        pi) echo pi ;;
     esac
 }
 
@@ -112,6 +115,7 @@ tool_install_hint() {
         opencode) echo "curl -fsSL https://opencode.ai/install | bash   (or see https://opencode.ai)" ;;
         aider) echo "python -m pip install aider-install && aider-install   (or see https://aider.chat/docs/install.html)" ;;
         cline) echo "npm install -g cline   (or see https://cline.bot)" ;;
+        pi) echo "curl -fsSL https://pi.dev/install.sh | sh   (or see https://pi.dev)" ;;
     esac
 }
 
@@ -328,6 +332,93 @@ launch_cline() {
 
     log_success "Launching Cline against $MLX_MODEL (openai-native provider, baseURL $base_url)"
     exec cline -P openai-native -m "$MLX_MODEL" -k sk-mlx-direct-local "$@"
+}
+
+# Pi (pi.dev / github.com/earendil-works/pi) registers custom OpenAI-compatible
+# endpoints in ~/.pi/agent/models.json -- confirmed live against 1.0.1's own docs
+# (pi.dev/docs/latest/models#configure-a-compatible-endpoint, pi.dev/docs/latest/
+# configuration#agent-directory):
+#   {"providers": {"<name>": {"baseUrl", "api": "openai-completions", "apiKey",
+#     "models": [{"id": "<model-id>"}]}}}
+# Same provider-registration shape this project already uses for OpenCode's
+# mlx-direct provider (register_opencode_model above), just a different file/schema.
+# "mlx-direct/<model_id>" also works directly as a --model pattern (confirmed live --
+# Pi splits on the first "/" to separate provider from id, so this works even though
+# MLX_MODEL itself contains a "/", e.g. "mlx-community/Qwen3.5-9B-MLX-4bit"), mirroring
+# launch_opencode's own "mlx-direct/$MLX_MODEL" convention below.
+register_pi_model() {
+    local base_url="$1"
+    local pi_models_config="$HOME/.pi/agent/models.json"
+    mkdir -p "$(dirname "$pi_models_config")"
+    log_info "Checking Pi's mlx-direct provider registration ($pi_models_config)..."
+
+    local result pyscript
+    pyscript="$(mktemp)"
+    # Written to a temp file FIRST, as its own plain `cat <<'PYEOF' > "$pyscript"` with no
+    # surrounding $(...) -- see the longer comment above register_opencode_model for why
+    # combining a heredoc with $(...) in one statement is unsafe on the stock macOS
+    # /bin/bash (3.2.57): never repeated here, just referenced.
+    cat <<'PYEOF' > "$pyscript"
+import json
+import sys
+
+config_path, model_id, base_url = sys.argv[1], sys.argv[2], sys.argv[3]
+
+try:
+    with open(config_path) as f:
+        parsed = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    parsed = {}
+
+providers = parsed.setdefault("providers", {})
+existing = providers.get("mlx-direct", {})
+existing_models = existing.get("models", [])
+already_correct = (
+    existing.get("baseUrl") == base_url
+    and existing.get("api") == "openai-completions"
+    and any(m.get("id") == model_id for m in existing_models)
+    and len(existing_models) == 1
+)
+if already_correct:
+    print("ALREADY_REGISTERED")
+    sys.exit(0)
+
+providers["mlx-direct"] = {
+    "baseUrl": base_url,
+    "api": "openai-completions",
+    "apiKey": "sk-mlx-direct-local",
+    "models": [{"id": model_id}],
+}
+
+with open(config_path, "w") as f:
+    json.dump(parsed, f, indent=2)
+    f.write("\n")
+print("REGISTERED")
+PYEOF
+    result="$("$MLX_PYTHON" "$pyscript" "$pi_models_config" "$MLX_MODEL" "$base_url")" || true
+    rm -f "$pyscript"
+
+    case "$result" in
+        ALREADY_REGISTERED)
+            log_success "$MLX_MODEL already registered under mlx-direct -- no changes needed"
+            ;;
+        REGISTERED)
+            log_success "Registered $MLX_MODEL in ~/.pi/agent/models.json's mlx-direct provider"
+            ;;
+        *)
+            log_error "Could not auto-register $MLX_MODEL in $pi_models_config ($result)"
+            log_error "Add it manually under providers.\"mlx-direct\".models, or Pi won't find the model."
+            exit 1
+            ;;
+    esac
+}
+
+launch_pi() {
+    local base_url="http://$MLX_HOST:$MLX_PORT/v1"
+    register_pi_model "$base_url"
+
+    log_success "Launching Pi against mlx-direct/$MLX_MODEL (context: ${CONTEXT_WINDOW} tokens)"
+    exec pi --model "mlx-direct/$MLX_MODEL" "$@"
 }
 
 # OpenCode v2 (a separate, parallel install track -- npm package @opencode/cli vs the
@@ -809,7 +900,7 @@ main() {
     fi
 
     case "$tool" in
-        claude|opencode|aider|cline) ;;
+        claude|opencode|aider|cline|pi) ;;
         *)
             log_error "Unknown tool '$tool'. Supported: ${TOOLS[*]}"
             exit 1
@@ -830,6 +921,7 @@ main() {
         opencode) launch_opencode "$@" ;;
         aider) launch_aider "$@" ;;
         cline) launch_cline "$@" ;;
+        pi) launch_pi "$@" ;;
     esac
 }
 

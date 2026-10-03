@@ -1,6 +1,6 @@
 # Bushpilot
 
-Run Claude Code, OpenCode, Aider, or Cline against a model served locally on your Mac by Apple's
+Run Claude Code, OpenCode, Aider, Cline, or Pi against a model served locally on your Mac by Apple's
 MLX, instead of a cloud API. Hardware-aware: it detects your Mac's chip and free
 memory and recommends a model + context size that's actually safe to run, rather
 than crashing your machine or silently truncating context.
@@ -12,7 +12,7 @@ than crashing your machine or silently truncating context.
 - [Homebrew](https://brew.sh)
 - Python 3.10+ somewhere on the machine (the setup script will find or help you
   install one if needed)
-- Claude Code, OpenCode, Aider, and/or Cline, for whichever tool you plan to use
+- Claude Code, OpenCode, Aider, Cline, and/or Pi, for whichever tool you plan to use
 - `fzf` (optional) — both scripts' interactive pickers use it if present, and fall
   back to a plain numbered menu if it's missing:
   ```bash
@@ -45,7 +45,7 @@ if needed, and starts serving it with a live status dashboard.
 ./launch_tool.sh
 ```
 
-This shows a picker (Claude Code / OpenCode / Aider / Cline), checks the server from Terminal 1 is
+This shows a picker (Claude Code / OpenCode / Aider / Cline / Pi), checks the server from Terminal 1 is
 healthy, and launches straight into it. You can open additional terminals and run
 `./launch_tool.sh` again to attach another tool to the same running model.
 
