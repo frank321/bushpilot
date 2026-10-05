@@ -23,6 +23,10 @@ import model_advisor as ma
 # (same function object). Patch it where those functions actually look it up.
 from bushpilot import calibration as _calibration
 
+# Same reasoning as _calibration above, for mlx_vlm_apc_pool_bytes's own module
+# globals (MLX_VLM_APC_NUM_BLOCKS/MLX_VLM_APC_BLOCK_SIZE, both defined in bushpilot/kv.py).
+from bushpilot import kv as _kv
+
 # --- effective_size_gb --------------------------------------------------------------
 
 def test_effective_size_gb_without_drafter(dense_model):
@@ -110,8 +114,10 @@ def test_recommend_max_context_insufficient_for_model_weights(dense_model):
 
 
 def test_recommend_max_context_too_small_to_be_useful(dense_model):
-    # Just over the weights+buffer floor, but not enough left for MIN_USABLE_CONTEXT.
-    ctx, reason, _ = ma.recommend_max_context(dense_model, free_wired_gb=9.3)
+    # Just over the weights+buffer floor AND mlx_vlm_apc_pool_bytes's own fixed cost
+    # (dense_model has no serving block -> mlx_vlm backend -> that cost applies here),
+    # but not enough left for MIN_USABLE_CONTEXT.
+    ctx, reason, _ = ma.recommend_max_context(dense_model, free_wired_gb=9.56)
     assert ctx is None
     assert reason == "computed_context_too_small_to_be_useful"
 
@@ -119,7 +125,7 @@ def test_recommend_max_context_too_small_to_be_useful(dense_model):
 def test_recommend_max_context_rounds_down_to_a_clean_tier(dense_model):
     ctx, reason, _ = ma.recommend_max_context(dense_model, free_wired_gb=10)
     assert reason == "computed"
-    assert ctx == 131072
+    assert ctx == 65536
 
 
 def test_recommend_max_context_capped_at_architectural_max(dense_model):
@@ -149,6 +155,94 @@ def test_recommend_max_context_concurrency_shrinks_per_slot_context(dense_model)
     ctx_4, _, _ = ma.recommend_max_context(dense_model, free_wired_gb=12, concurrency=4)
     assert ctx_1 == 262144  # one slot: plenty of room, hits the architectural cap
     assert ctx_4 < ctx_1  # four slots dividing the same memory: each gets less
+
+
+# --- prefix_cache_cost_multiplier / mlx-dspark prefix-cache sizing --------------------
+
+def test_prefix_cache_cost_multiplier_is_noop_for_non_dspark_backend(drafter_model):
+    # drafter_model's serving.backend is "mlx_vlm" -- the multiplier must not apply
+    # even with an explicit slots count, since mlx_vlm doesn't run mlx-dspark's
+    # always-on checkpoint LRU at all.
+    assert ma.prefix_cache_cost_multiplier(drafter_model, prefix_cache_slots=5) == 1
+
+
+def test_prefix_cache_cost_multiplier_is_noop_for_model_with_no_serving_block(dense_model):
+    assert ma.prefix_cache_cost_multiplier(dense_model, prefix_cache_slots=5) == 1
+
+
+def test_prefix_cache_cost_multiplier_defaults_to_dspark_default_slots(dspark_drafter_model):
+    # No explicit override -- assume mlx-dspark's own default slot count (what
+    # actually launches when config.json's dspark_prefix_cache_slots is unset).
+    expected = 1 + ma.DSPARK_DEFAULT_PREFIX_CACHE_SLOTS
+    assert ma.prefix_cache_cost_multiplier(dspark_drafter_model) == expected
+    assert ma.prefix_cache_cost_multiplier(dspark_drafter_model, prefix_cache_slots=None) == expected
+
+
+def test_prefix_cache_cost_multiplier_honors_explicit_slots_override(dspark_drafter_model):
+    assert ma.prefix_cache_cost_multiplier(dspark_drafter_model, prefix_cache_slots=0) == 1
+    assert ma.prefix_cache_cost_multiplier(dspark_drafter_model, prefix_cache_slots=1) == 2
+    assert ma.prefix_cache_cost_multiplier(dspark_drafter_model, prefix_cache_slots=4) == 5
+
+
+def test_recommend_max_context_prices_in_dspark_default_prefix_cache_slots(dspark_drafter_model):
+    # Same free memory, same model -- the only difference is mlx-dspark's own default
+    # 2-slot prefix-cache LRU being priced in (slots=0 behaves like today's un-fixed
+    # math; the default behaves like what the real backend actually keeps resident).
+    ctx_default, reason, detail = ma.recommend_max_context(dspark_drafter_model, free_wired_gb=8.5)
+    ctx_no_cache, _, _ = ma.recommend_max_context(
+        dspark_drafter_model, free_wired_gb=8.5, prefix_cache_slots=0)
+    assert reason == "computed"
+    assert detail["prefix_cache_cost_multiplier"] == 1 + ma.DSPARK_DEFAULT_PREFIX_CACHE_SLOTS
+    assert ctx_no_cache == 65536
+    assert ctx_default == 32768
+    assert ctx_default < ctx_no_cache
+
+
+def test_recommend_max_context_dspark_slots_override_matches_launch_config(dspark_drafter_model):
+    # An explicit override (config.json's dspark_prefix_cache_slots, forwarded as
+    # --prefix-cache-slots) must change the sizing math, not just be accepted and
+    # ignored -- otherwise the advisor and the actual mlx-dspark launch flags could
+    # silently disagree again.
+    ctx_slots_0, _, detail_0 = ma.recommend_max_context(
+        dspark_drafter_model, free_wired_gb=8.5, prefix_cache_slots=0)
+    ctx_slots_1, _, detail_1 = ma.recommend_max_context(
+        dspark_drafter_model, free_wired_gb=8.5, prefix_cache_slots=1)
+    assert detail_0["prefix_cache_cost_multiplier"] == 1
+    assert detail_1["prefix_cache_cost_multiplier"] == 2
+    assert ctx_slots_1 < ctx_slots_0
+
+
+# --- mlx_vlm_apc_pool_bytes / mlx_vlm's own APC sizing --------------------------------
+
+def test_mlx_vlm_apc_pool_bytes_is_noop_for_dspark_backend(dspark_drafter_model):
+    # mlx-dspark never runs mlx_vlm's APC at all -- see prefix_cache_cost_multiplier
+    # for that backend's own, different (and mutually exclusive) cache cost instead.
+    assert ma.mlx_vlm_apc_pool_bytes(dspark_drafter_model, bytes_per_growing_token=4096) == 0
+
+
+def test_mlx_vlm_apc_pool_bytes_applies_for_no_serving_block(dense_model):
+    # dense_model has no "serving" block at all -- the plain mlx_vlm.server default,
+    # still subject to its always-on APC (start_mlx_server.sh's else branch exports
+    # APC_ENABLED/APC_NUM_BLOCKS unconditionally, drafter or not).
+    expected = ma.MLX_VLM_APC_NUM_BLOCKS * ma.MLX_VLM_APC_BLOCK_SIZE * 4096
+    assert ma.mlx_vlm_apc_pool_bytes(dense_model, bytes_per_growing_token=4096) == expected
+
+
+def test_mlx_vlm_apc_pool_bytes_applies_for_explicit_mlx_vlm_backend(drafter_model):
+    # drafter_model's serving.backend is explicitly "mlx_vlm" (native --draft-model
+    # path) -- same always-on APC applies as the no-serving-block case above.
+    expected = ma.MLX_VLM_APC_NUM_BLOCKS * ma.MLX_VLM_APC_BLOCK_SIZE * 8192
+    assert ma.mlx_vlm_apc_pool_bytes(drafter_model, bytes_per_growing_token=8192) == expected
+
+
+def test_recommend_max_context_prices_in_mlx_vlm_apc_pool(dense_model):
+    # Same free memory, same model -- the only difference is mlx_vlm's own always-on
+    # APC pool ceiling being priced in as a fixed cost alongside the live KV cache.
+    ctx, reason, detail = ma.recommend_max_context(dense_model, free_wired_gb=10)
+    expected_pool_bytes = ma.MLX_VLM_APC_NUM_BLOCKS * ma.MLX_VLM_APC_BLOCK_SIZE * 4096.0
+    assert reason == "computed"
+    assert ctx == 65536
+    assert detail["mlx_vlm_apc_pool_bytes"] == expected_pool_bytes
 
 
 # --- estimate_speed_tok_s -------------------------------------------------------------
@@ -293,12 +387,14 @@ def test_recommend_kv_bits_and_context_prefers_unquantized_when_it_fits(dense_mo
 
 
 def test_recommend_kv_bits_and_context_falls_back_to_8bit_when_needed(dense_model):
-    # At this free memory, unquantized's context rounds to below MIN_USABLE_CONTEXT,
-    # but halving KV bytes/token with 8-bit KV lets it clear the floor.
-    result = ma.recommend_kv_bits_and_context(dense_model, free_wired_gb=9.34)
+    # At this free memory, unquantized's context rounds to below MIN_USABLE_CONTEXT
+    # (also now failing on mlx_vlm_apc_pool_bytes's own fixed cost at the unquantized
+    # rate), but halving KV bytes/token with 8-bit KV (which also halves the APC pool's
+    # own fixed cost) lets it clear the floor.
+    result = ma.recommend_kv_bits_and_context(dense_model, free_wired_gb=9.5)
     assert result["fits"] is True
     assert result["kv_bits"] == ma.MEMORY_CONSTRAINED_KV_BITS
-    assert result["recommended_context"] == 16384
+    assert result["recommended_context"] == 32768
     # dense_model has no sliding-window layers -- the mlx-vlm #1559 gap doesn't apply.
     assert result["kv_bits_apc_caveat"] is False
 
@@ -308,7 +404,7 @@ def test_recommend_kv_bits_and_context_flags_apc_caveat_for_sliding_window_fallb
     # window (SWA) layers don't compose correctly on the batched request path. Only
     # set when the quantized fallback is ACTUALLY used -- a model with sliding-window
     # layers that fits unquantized never hits this combo at all (see the next test).
-    result = ma.recommend_kv_bits_and_context(sliding_window_model, free_wired_gb=7.55)
+    result = ma.recommend_kv_bits_and_context(sliding_window_model, free_wired_gb=7.66)
     assert result["fits"] is True
     assert result["kv_bits"] == ma.MEMORY_CONSTRAINED_KV_BITS
     assert result["kv_bits_apc_caveat"] is True
@@ -335,6 +431,21 @@ def test_recommend_kv_bits_and_context_preload_overhead_can_fail_an_otherwise_fi
     assert result["fits"] is False
     assert result["context_reason"] == "insufficient_context_after_tool_preload"
     assert result["context_after_preload"] == 262144 - 260000
+
+
+def test_recommend_kv_bits_and_context_forwards_prefix_cache_slots_to_both_attempts(dspark_drafter_model):
+    # Both the unquantized AND the quantized-fallback recommend_max_context calls
+    # inside recommend_kv_bits_and_context need the same prefix_cache_slots value --
+    # otherwise the fallback path could silently stop pricing in mlx-dspark's cache.
+    with_cache = ma.recommend_kv_bits_and_context(dspark_drafter_model, free_wired_gb=8.5)
+    without_cache = ma.recommend_kv_bits_and_context(
+        dspark_drafter_model, free_wired_gb=8.5, prefix_cache_slots=0)
+    assert with_cache["fits"] is True
+    assert without_cache["fits"] is True
+    assert with_cache["recommended_context"] < without_cache["recommended_context"]
+    assert with_cache["kv_formula_detail"]["prefix_cache_cost_multiplier"] == \
+        1 + ma.DSPARK_DEFAULT_PREFIX_CACHE_SLOTS
+    assert without_cache["kv_formula_detail"]["prefix_cache_cost_multiplier"] == 1
 
 
 # --- recommend_prefill_step_size (per-(chip, model) sweep override of the global default)
@@ -431,6 +542,30 @@ def test_compute_bonus_concurrency_one_when_context_is_none(dense_model):
     assert ma.compute_bonus_concurrency(dense_model, 24, None, None) == 1
 
 
+def test_compute_bonus_concurrency_prices_in_dspark_default_prefix_cache_slots(dspark_drafter_model):
+    # Each bonus slot's true cost on mlx-dspark includes that backend's own always-on
+    # prefix-cache copies -- without re-applying the same multiplier here, this would
+    # offer more "free" bonus concurrency than free memory actually allows.
+    without_cache = ma.compute_bonus_concurrency(
+        dspark_drafter_model, 24, None, 262144, prefix_cache_slots=0)
+    with_default_cache = ma.compute_bonus_concurrency(dspark_drafter_model, 24, None, 262144)
+    assert without_cache == ma.AUTO_MAX_CONCURRENCY == 4
+    assert with_default_cache < without_cache
+
+
+def test_compute_bonus_concurrency_prices_in_mlx_vlm_apc_pool(dense_model, monkeypatch):
+    # Same reasoning as the mlx-dspark case above, for mlx_vlm's own always-on APC
+    # pool ceiling -- unlike prefix_cache_slots, this constant isn't exposed as a
+    # per-call override (it mirrors start_mlx_server.sh's hardcoded APC_NUM_BLOCKS=4096,
+    # not something config.json can tune today), so the "without it" baseline is
+    # obtained by monkeypatching the module constant to 0 rather than passing a kwarg.
+    with_real_apc_pool = ma.compute_bonus_concurrency(dense_model, 13.5, None, 262144)
+    monkeypatch.setattr(_kv, "MLX_VLM_APC_NUM_BLOCKS", 0)
+    without_apc_pool = ma.compute_bonus_concurrency(dense_model, 13.5, None, 262144)
+    assert without_apc_pool == ma.AUTO_MAX_CONCURRENCY == 4
+    assert with_real_apc_pool < without_apc_pool
+
+
 # --- build_recommendations (end-to-end) ----------------------------------------------
 
 def test_build_recommendations_marks_fitting_and_non_fitting_models(dense_model, moe_model_no_active_weight):
@@ -481,3 +616,35 @@ def test_build_recommendations_explicit_concurrency_shrinks_context_instead_of_a
                                             requested_concurrency=2)
     assert auto_rows[0]["concurrency"] == 4  # auto bonus picked its own count
     assert forced_rows[0]["concurrency"] == 2  # explicit request always honored exactly
+
+
+def test_build_recommendations_dspark_prefix_cache_slots_shrinks_recommended_context(dspark_drafter_model):
+    # End-to-end: config.json's dspark_prefix_cache_slots (plumbed through cli.py's
+    # --prefix-cache-slots flag) must actually reach the per-model context-sizing
+    # math, not just be accepted at the top level and dropped before it matters.
+    default_rows = ma.build_recommendations(
+        [dspark_drafter_model], free_wired_gb=8.5, chip_name="Apple M3 Max", gpu_cores=40)
+    no_cache_rows = ma.build_recommendations(
+        [dspark_drafter_model], free_wired_gb=8.5, chip_name="Apple M3 Max", gpu_cores=40,
+        dspark_prefix_cache_slots=0)
+    assert default_rows[0]["fits"] is True
+    assert no_cache_rows[0]["fits"] is True
+    assert default_rows[0]["recommended_context"] < no_cache_rows[0]["recommended_context"]
+    assert no_cache_rows[0]["recommended_context"] == 65536
+    assert default_rows[0]["recommended_context"] == 32768
+
+
+def test_build_recommendations_mlx_vlm_apc_pool_shrinks_recommended_context(dense_model, monkeypatch):
+    # End-to-end equivalent of the mlx-dspark test above, for mlx_vlm's own always-on
+    # APC pool ceiling (dense_model has no "serving" block -- the plain mlx_vlm.server
+    # default, still subject to it).
+    with_real_apc_pool = ma.build_recommendations(
+        [dense_model], free_wired_gb=10, chip_name="Apple M3 Max", gpu_cores=40)
+    monkeypatch.setattr(_kv, "MLX_VLM_APC_NUM_BLOCKS", 0)
+    without_apc_pool = ma.build_recommendations(
+        [dense_model], free_wired_gb=10, chip_name="Apple M3 Max", gpu_cores=40)
+    assert with_real_apc_pool[0]["fits"] is True
+    assert without_apc_pool[0]["fits"] is True
+    assert with_real_apc_pool[0]["recommended_context"] < without_apc_pool[0]["recommended_context"]
+    assert with_real_apc_pool[0]["recommended_context"] == 65536
+    assert without_apc_pool[0]["recommended_context"] == 131072

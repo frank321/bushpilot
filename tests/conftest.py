@@ -146,3 +146,37 @@ def drafter_model():
             "multimodal_capable": True,
         },
     }
+
+
+@pytest.fixture
+def dspark_drafter_model():
+    """Same shape as drafter_model, but served through mlx_dspark -- the backend whose
+    own always-on prefix-cache LRU (DSPARK_DEFAULT_PREFIX_CACHE_SLOTS) prefix_cache_cost_
+    multiplier/recommend_max_context's prefix_cache_slots param price in. Distinct from
+    drafter_model (serving.backend == "mlx_vlm") specifically so tests can confirm the
+    multiplier is backend-gated, not applied to every drafter-equipped model."""
+    return {
+        "id": "test-dspark-drafter",
+        "huggingface": "mlx-community/Test-Dspark-Drafter",
+        "size_gb": 4.5,
+        "type": "dense",
+        "status": "tested",
+        "modalities": ["text"],
+        "released": "2026-06",
+        "max_context_architectural": 262144,
+        "active_weight_gb": 4.5,
+        "kv_config": {
+            "num_key_value_heads": 4,
+            "head_dim": 128,
+            "num_hidden_layers": 4,
+            "layer_types": ["full_attention"] * 4,
+        },
+        "serving": {
+            "backend": "mlx_dspark",
+            "drafter": "incoai/Test-Dspark-Drafter2",
+            "drafter_size_gb": 0.16,
+            "measured_speedup": 2.4,
+            "measured_on": "Apple M5 Pro, 2026-09-29",
+            "multimodal_capable": False,
+        },
+    }

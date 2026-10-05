@@ -252,9 +252,9 @@ def test_color_highlights_context_and_kv_green_when_unquantized(dense_model, mon
 
 def test_color_highlights_context_and_kv_yellow_when_kv_quantized(dense_model, monkeypatch):
     monkeypatch.setattr(_display, "use_color", lambda force=False: True)
-    # free_wired_gb=9.34 is the verified fallback-to-8bit-KV case from
+    # free_wired_gb=9.5 is the verified fallback-to-8bit-KV case from
     # test_recommendation_math.py.
-    rows = ma.build_recommendations([dense_model], free_wired_gb=9.34, chip_name="Apple M3 Max", gpu_cores=40)
+    rows = ma.build_recommendations([dense_model], free_wired_gb=9.5, chip_name="Apple M3 Max", gpu_cores=40)
     widths = ma.compact_row_widths(rows)
     cols = list(range(ma.COL_LAST))
     line = ma.format_model_compact_row(rows[0], widths, cols, None)

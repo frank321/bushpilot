@@ -5,6 +5,8 @@ from .kv import (
     UNQUANTIZED_KV_BITS,
     compute_kv_formula,
     effective_size_gb,
+    mlx_vlm_apc_pool_bytes,
+    prefix_cache_cost_multiplier,
     recommend_kv_bits_and_context,
 )
 from .prefill import recommend_prefill_step_size
@@ -33,25 +35,39 @@ AUTO_MAX_CONCURRENCY = 4
 
 
 def compute_bonus_concurrency(model_entry, free_wired_gb, kv_bits_used, recommended_context,
-                               safety_buffer_gb=SAFETY_BUFFER_GB):
+                               safety_buffer_gb=SAFETY_BUFFER_GB, prefix_cache_slots=None):
     """Auto mode (no explicit concurrency requested): recommend_kv_bits_and_context has
     already picked the max context for ONE slot, rounded DOWN to a clean tier (see
     recommend_max_context's own tiering comment) -- which almost always leaves some
     memory unused. This checks whether that rounding leftover fits one or more
     additional, identically-sized slots for free, without shrinking anyone's context,
-    and returns the total slot count (>=1)."""
+    and returns the total slot count (>=1).
+
+    prefix_cache_slots: same multiplier recommend_max_context applied to pick
+    recommended_context in the first place (see prefix_cache_cost_multiplier) -- must be
+    re-applied here too, or a bonus slot's true cost (live KV + mlx-dspark's own
+    always-on prefix-cache copies) would be underestimated and this could offer more
+    bonus concurrency than free memory actually allows. mlx_vlm's own APC pool (see
+    mlx_vlm_apc_pool_bytes) gets the same treatment but subtracted ONCE up front instead
+    of per-slot -- it's one pool shared by the whole server process, not duplicated per
+    bonus slot."""
     if recommended_context is None:
         return 1
     formula = compute_kv_formula(model_entry.get("kv_config"),
                                   kv_bits_used if kv_bits_used is not None else UNQUANTIZED_KV_BITS)
     if formula is None:
         return 1
-    bytes_per_growing_token, fixed_bytes, _ = formula
+    raw_bytes_per_growing_token, fixed_bytes, _ = formula
+    cache_multiplier = prefix_cache_cost_multiplier(model_entry, prefix_cache_slots)
+    bytes_per_growing_token = raw_bytes_per_growing_token * cache_multiplier
+    fixed_bytes *= cache_multiplier
     per_slot_bytes = fixed_bytes + bytes_per_growing_token * recommended_context
     if per_slot_bytes <= 0:
         return 1
 
+    apc_pool_bytes = mlx_vlm_apc_pool_bytes(model_entry, raw_bytes_per_growing_token)
     available_bytes = (free_wired_gb - effective_size_gb(model_entry) - safety_buffer_gb) * 1024**3
+    available_bytes -= apc_pool_bytes
     remaining = available_bytes - per_slot_bytes
     concurrency = 1
     while remaining >= per_slot_bytes and concurrency < AUTO_MAX_CONCURRENCY:
@@ -61,20 +77,27 @@ def compute_bonus_concurrency(model_entry, free_wired_gb, kv_bits_used, recommen
 
 
 def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_overhead=0,
-                           requested_concurrency=None, max_context_tokens=None):
+                           requested_concurrency=None, max_context_tokens=None,
+                           dspark_prefix_cache_slots=None):
     """requested_concurrency: None means auto (maximize context for 1 slot, then add
     free bonus slots from tier-rounding leftover -- see compute_bonus_concurrency).
     An explicit int forces that many slots, shrinking context as needed to guarantee
     all of them fit (see recommend_max_context's concurrency param).
     max_context_tokens: optional upper bound on every model's recommended context
     (config.json's "max_context_tokens") -- a cap layered on top of the memory-fit
-    math, never a bypass of it (see recommend_max_context's own docstring)."""
+    math, never a bypass of it (see recommend_max_context's own docstring).
+    dspark_prefix_cache_slots: forwarded to recommend_kv_bits_and_context/
+    compute_bonus_concurrency for every model -- a no-op for anything not served
+    through mlx_dspark (see prefix_cache_cost_multiplier). None means mlx-dspark's own
+    default slot count, matching what start_mlx_server.sh actually launches with when
+    config.json doesn't override it."""
     rows = []
     for m in models:
         sizing_concurrency = requested_concurrency if requested_concurrency else 1
         kv_result = recommend_kv_bits_and_context(m, free_wired_gb, preload_overhead,
                                                     concurrency=sizing_concurrency,
-                                                    max_context_tokens=max_context_tokens)
+                                                    max_context_tokens=max_context_tokens,
+                                                    prefix_cache_slots=dspark_prefix_cache_slots)
         speed, speed_reason = estimate_speed_tok_s(m, chip_name, gpu_cores)
 
         fits = kv_result["fits"]
@@ -93,6 +116,7 @@ def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_o
         if fits and not requested_concurrency:
             concurrency = compute_bonus_concurrency(
                 m, free_wired_gb, kv_result["kv_bits"], kv_result["recommended_context"],
+                prefix_cache_slots=dspark_prefix_cache_slots,
             )
 
         prefill_step_size, prefill_step_size_reason = recommend_prefill_step_size(

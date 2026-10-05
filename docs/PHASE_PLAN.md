@@ -1494,4 +1494,100 @@ Commits: `c0e3c1d` (docs move + hygiene), `87ad6ac` (the backend-liveness
 backstop, pre-existing uncommitted work), `b59133e` (the package split),
 `bb8d7fd` (ruff), `a23882b` (CI), `c647823` (bats).
 
+## Fix: mlx-dspark and mlx_vlm prefix-cache memory sizing gaps (2026-10-05)
+
+Prompted by a user question on a live session ("the prefix cache only got 29 hits,
+is caching not working?"), not a planned task. Diagnosis found caching itself was
+fine; the real bug was in `recommend_max_context`'s own memory-fit math, on BOTH
+serving backends, in a way that generalizes a real class of gap: an always-on
+prefix cache that costs real memory the context-sizing formula never knew about.
+
+### Diagnosis: the live session's numbers, read correctly
+
+`hits: 29` is a per-REQUEST counter, not per-token -- out of 33 total requests, 29
+full hits + 2 partial hits is actually a ~94% request hit rate, and
+`reused_tokens/prompt_tokens` (1,408,546 / 1,642,726) showed ~86% of all prompt
+tokens that session were served from cache. Caching was working close to as well as
+it could. The real finding was elsewhere in the same `/metrics` payload: 16
+memory-guard sheds, 2 full `CRITICAL`-pressure cache-empties, and a `peak_bytes`
+(45.15GB) that exceeded what `recommend_max_context` had budgeted for the
+262144-token context it recommended (weights + drafter + one full KV cache + the 3GB
+safety buffer, ≈36-39GB) by roughly one more KV-cache-sized structure.
+
+Traced to `mlx_dspark/prefix_cache.py`'s own docstring: mlx-dspark keeps a small LRU
+of up to `slots` (default 2) full conversation checkpoints resident at once ("the
+target KV cache (and, for DSpark, the drafter's context cache)"), with **no RAM
+ceiling of its own** unless `--prefix-cache-max-ram-mb` is passed (this project's
+`config.json` didn't set `dspark_prefix_cache_max_ram_mb`, so it wasn't). The memory
+backstop in `start_mlx_server.sh` was correctly, reactively shedding a cache
+`recommend_max_context` never knew existed in the first place.
+
+### Fix 1: `prefix_cache_cost_multiplier` prices in mlx-dspark's own slot count
+
+`bushpilot/kv.py`: added `DSPARK_DEFAULT_PREFIX_CACHE_SLOTS = 2` and
+`prefix_cache_cost_multiplier()` -- a no-op for every `serving.backend` except
+`mlx_dspark`, where `recommend_max_context`/`recommend_kv_bits_and_context` now
+multiply the growing/fixed KV-byte costs by `(1 + slots)` before the fits check.
+Threaded a `prefix_cache_slots` param down through `recommend.py`'s
+`compute_bonus_concurrency`/`build_recommendations`, a new `cli.py`
+`--prefix-cache-slots` flag, and `start_mlx_server.sh`'s `ADVISOR_FLAGS` (forwarding
+`config.json`'s `dspark_prefix_cache_slots` key, which existed and reached the real
+launch flag already but was invisible to the sizing math until now) -- so the
+advisor's recommendation and the actual launch flag can never silently disagree.
+
+Concrete effect on the diagnosed session: at the `free_wired_gb` logged at launch
+(41.28GB), the old math picked the full architectural max (262144 tokens); with the
+fix, it recommends 65536 -- a context the server can sustain with its prefix cache
+fully resident, instead of surviving on swap plus repeated cache eviction.
+
+### Fix 2: mlx_vlm's own always-on APC pool has the same unbudgeted-cache shape
+
+Same root-cause pattern on the OTHER backend, found while scoping fix 1 and
+confirmed with the user before implementing given its size: `mlx_vlm.server`'s
+native Automatic Prefix Caching (always on; `APC_ENABLED=1`, `APC_NUM_BLOCKS=4096`
+per `start_mlx_server.sh`, see §13 of `HARDWARE_SPEED_ESTIMATION.md`) has a real,
+documented worst-case memory ceiling -- `APC_NUM_BLOCKS * APC_BLOCK_SIZE(16)` =
+65,536 tokens' worth of KV, lazily allocated but never budgeted for.
+
+Bigger blast radius than fix 1 (53/58 catalog models use `mlx_vlm` vs. 5/58 on
+`mlx_dspark`) and preemptive rather than measured -- no live reproduction of this
+specific ceiling actually being hit, unlike fix 1's session. Added
+`MLX_VLM_APC_NUM_BLOCKS`/`MLX_VLM_APC_BLOCK_SIZE` to `bushpilot/kv.py` (mirroring
+`start_mlx_server.sh`'s own `APC_NUM_BLOCKS`, same deliberately-duplicated-constant
+pairing as `DEFAULT_PREFILL_STEP_SIZE` -- now in `AGENTS.md`'s invariant #3) and
+`mlx_vlm_apc_pool_bytes()`, added as a FIXED cost (not scaled by concurrency -- one
+pool shared by the whole server process) in `recommend_max_context` and
+`compute_bonus_concurrency`.
+
+Checked against the real 58-model catalog, not just synthetic fixtures: at
+48/36/24GB free, 12/15/17 models' `recommended_context` shrinks, and 0/3/3 newly
+don't fit at all even with the 8-bit KV fallback (e.g. at 24GB free:
+`qwen3.8-27b-4bit-dflash-vlm`, `gemma-4-31b-it-4bit`,
+`deepseek-r1-distill-qwen-32b-4bit`).
+
+### Dashboard: `PREFIX CACHE` section now shows cache coverage directly
+
+The mlx-dspark dashboard previously split `prompt` (`LIFETIME` section) from
+`reused` (`PREFIX CACHE` section) with no computed ratio between them -- exactly
+the ambiguity that prompted the original "is caching broken" question. Moved
+`prompt` into `PREFIX CACHE` next to `reused`, added a locally-computed `cached X%`
+(mlx-dspark's `/metrics` has no precomputed ratio the way mlx_vlm's
+`/v1/cache/stats` `token_hit_rate` already provides).
+
+### Verification performed
+
+165 pytest tests (up from 150 at session start), all green via `./ci.sh`. New
+`dspark_drafter_model` fixture plus ~15 new/updated cases covering both
+multipliers' backend-gating, override paths, and end-to-end `build_recommendations`
+effects (the mlx_vlm one via `monkeypatch` on the module constant, since unlike
+`prefix_cache_slots` it isn't exposed as a per-call override). 4 pre-existing tests
+whose free-memory constants were tuned to exact edge cases of the OLD, incomplete
+formula were recomputed by hand and re-verified against the real functions (same
+standard this test file's own header already holds itself to), not just nudged
+until green. Rendered the real dashboard heredoc against this session's actual live
+`/metrics` payload to confirm box-drawing alignment held. Ran `build_recommendations`
+against the full real `models.json` at several free-memory levels with no
+exceptions, and `python3 model_advisor.py --resolve <id> --prefix-cache-slots N`
+against the real catalog to confirm the new flag reaches the final recommendation.
+
 

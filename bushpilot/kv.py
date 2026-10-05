@@ -15,6 +15,27 @@ MIN_USABLE_CONTEXT = 12288   # below this, a context window isn't really usable 
                               # Code's/OpenCode's own preload isn't usable either.
 
 
+# mlx-dspark (serving.backend == "mlx_dspark") always runs its own prefix-cache, a small
+# LRU of up to this many full conversation checkpoints kept resident in RAM at once (see
+# mlx_dspark/prefix_cache.py's own docstring: "a small LRU of conversations (default 2
+# slots) -- so an agent process and a chat window hitting the same server don't evict
+# each other every turn"). start_mlx_server.sh only passes --prefix-cache-slots when
+# config.json's dspark_prefix_cache_slots is set; unset means mlx-dspark's own default,
+# which this constant mirrors. Each resident slot can be nearly as large as the live
+# generation's own KV cache (a slot snapshots "the target KV cache (and, for DSpark, the
+# drafter's context cache)" per that same docstring), and there's no RAM ceiling of its
+# own by default either (--prefix-cache-max-ram-mb also unset unless config.json's
+# dspark_prefix_cache_max_ram_mb is set) -- so without accounting for it here, a model
+# sized to just fit ONE live KV cache can push well past free memory in real multi-turn
+# use once the cache fills, surfacing only reactively as repeated memory-guard sheds
+# (confirmed live: a qwen3.8-27b-4bit-dflash session recommended the full 262144-token
+# architectural max at launch, free_wired_gb=41.28GB, then measured peak_bytes=45.15GB
+# mid-session with 16 memory-guard sheds and 2 full cache-empties -- the ~6-9GB gap
+# between the formula's budget and the real peak matches an extra, unbudgeted KV-sized
+# structure almost exactly).
+DSPARK_DEFAULT_PREFIX_CACHE_SLOTS = 2
+
+
 def effective_size_gb(model_entry):
     """model_entry["size_gb"] is the target weights only (see _schema_notes.size_gb in
     models.json) -- a "serving" block's drafter is a SEPARATE real download that sits in
@@ -27,6 +48,66 @@ def effective_size_gb(model_entry):
     forward pass doesn't change; the drafter's speed impact is already captured in
     serving.measured_speedup instead."""
     return model_entry["size_gb"] + model_entry.get("serving", {}).get("drafter_size_gb", 0)
+
+
+def prefix_cache_cost_multiplier(model_entry, prefix_cache_slots=None):
+    """How many KV-cache-sized copies to budget for, beyond the one live generation
+    already costs. 1 (no-op) for every backend except mlx_dspark: that backend always
+    keeps its own prefix-cache LRU resident (see DSPARK_DEFAULT_PREFIX_CACHE_SLOTS'
+    comment), so a model served through it needs memory for the live KV cache PLUS up
+    to `slots` more full-size cached snapshots, worst case all resident at once.
+
+    prefix_cache_slots=None means "whatever start_mlx_server.sh will actually launch
+    with" -- mirrors --prefix-cache-slots being omitted, which is mlx-dspark's own
+    default (DSPARK_DEFAULT_PREFIX_CACHE_SLOTS). An explicit value (from config.json's
+    dspark_prefix_cache_slots, forwarded by model_advisor.py's --prefix-cache-slots)
+    overrides it so the sizing math never disagrees with what actually gets launched."""
+    if model_entry.get("serving", {}).get("backend") != "mlx_dspark":
+        return 1
+    slots = prefix_cache_slots if prefix_cache_slots is not None else DSPARK_DEFAULT_PREFIX_CACHE_SLOTS
+    return 1 + max(0, slots)
+
+
+# mlx_vlm (every model NOT served through mlx_dspark -- with or without a drafter, see
+# start_mlx_server.sh's launch branches) always runs with its own native Automatic
+# Prefix Caching (APC) too, unconditionally (see docs/HARDWARE_SPEED_ESTIMATION.md §13):
+# start_mlx_server.sh exports APC_ENABLED=1, APC_NUM_BLOCKS=4096 for every mlx_vlm
+# launch. These two constants mirror that real, currently-unbudgeted memory consumer --
+# same "deliberately duplicated constants" pairing as DEFAULT_PREFILL_STEP_SIZE/
+# PREFILL_STEP_SIZE (see AGENTS.md): if APC_NUM_BLOCKS changes in start_mlx_server.sh,
+# change MLX_VLM_APC_NUM_BLOCKS here too. APC_BLOCK_SIZE itself is mlx_vlm's own
+# hard-coded default (not an env var this project sets, so there is nothing on the bash
+# side to mirror beyond APC_NUM_BLOCKS) -- confirmed from mlx_vlm/apc.py's own source
+# per §13's research.
+MLX_VLM_APC_NUM_BLOCKS = 4096
+MLX_VLM_APC_BLOCK_SIZE = 16
+
+
+def mlx_vlm_apc_pool_bytes(model_entry, bytes_per_growing_token):
+    """mlx_vlm's own APC pool's documented worst case: APC_NUM_BLOCKS * APC_BLOCK_SIZE
+    tokens' worth of KV, at whatever per-token rate the CURRENT recommend_max_context
+    attempt is using for bytes_per_growing_token (so the 8-bit kv_bits fallback prices
+    in half as much as the unquantized attempt tried first, matching compute_kv_
+    formula's own kv_bits scaling -- pass the RAW, pre-concurrency/pre-prefix_cache_
+    cost_multiplier value here, not the already-scaled one).
+
+    A no-op (returns 0) for mlx_dspark-served models, which never run mlx_vlm's APC at
+    all (see prefix_cache_cost_multiplier for that backend's own, different cache cost
+    instead -- the two are mutually exclusive per model, never both nonzero).
+
+    This is ONE pool SHARED across every request/conversation the server sees, not one
+    per concurrent slot and not one per cached-conversation slot -- unlike bytes_per_
+    growing_token/fixed_bytes, callers must NOT scale this by concurrency.
+
+    Confirmed lazy allocation (real memory grows only as the cache actually fills, per
+    §13's own research into mlx_vlm/apc.py) means this is a worst-case ceiling, not a
+    guaranteed cost -- and that same §13 research flags this ceiling as "never
+    approached, let alone tested past" in this project's own real use. Priced in as a
+    safety margin against that documented worst case, not a reproduction of an observed
+    crash the way DSPARK_DEFAULT_PREFIX_CACHE_SLOTS's own live-measured gap was."""
+    if model_entry.get("serving", {}).get("backend") == "mlx_dspark":
+        return 0
+    return MLX_VLM_APC_NUM_BLOCKS * MLX_VLM_APC_BLOCK_SIZE * bytes_per_growing_token
 
 
 def compute_kv_formula(kv_config, kv_bits=UNQUANTIZED_KV_BITS):
@@ -83,7 +164,7 @@ def compute_kv_formula(kv_config, kv_bits=UNQUANTIZED_KV_BITS):
 
 def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BITS,
                            safety_buffer_gb=SAFETY_BUFFER_GB, concurrency=1,
-                           max_context_tokens=None):
+                           max_context_tokens=None, prefix_cache_slots=None):
     """Returns (recommended_tokens_or_None, reason_string, detail_dict_or_None).
 
     concurrency>1 sizes context for N identically-sized concurrent slots instead of
@@ -101,7 +182,12 @@ def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BIT
     unchanged and can only ever shrink the result further, so a cap can never
     produce a context the host can't actually afford (unlike the launcher's
     fixed-model CLI form, whose 3rd positional arg bypasses this check entirely).
-    None (the default) means no cap and today's behavior exactly."""
+    None (the default) means no cap and today's behavior exactly.
+
+    prefix_cache_slots: see prefix_cache_cost_multiplier -- a no-op for every backend
+    except mlx_dspark, where it prices in that backend's always-on, by-default-
+    unbounded prefix-cache LRU alongside the live generation's own KV cost BEFORE the
+    fits check, instead of discovering the gap live via memory-guard sheds/swap."""
     available_gb = free_wired_gb - effective_size_gb(model_entry) - safety_buffer_gb
     if available_gb <= 0:
         return None, "insufficient_memory_for_model_weights", None
@@ -109,9 +195,23 @@ def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BIT
     formula = compute_kv_formula(model_entry.get("kv_config"), kv_bits)
     if formula is None:
         return None, "architecture_fields_missing_from_config", None
-    bytes_per_growing_token, fixed_bytes, detail = formula
-    bytes_per_growing_token *= concurrency
+    raw_bytes_per_growing_token, fixed_bytes, detail = formula
+    bytes_per_growing_token = raw_bytes_per_growing_token * concurrency
     fixed_bytes *= concurrency
+
+    cache_multiplier = prefix_cache_cost_multiplier(model_entry, prefix_cache_slots)
+    bytes_per_growing_token *= cache_multiplier
+    fixed_bytes *= cache_multiplier
+    detail["prefix_cache_cost_multiplier"] = cache_multiplier
+
+    # mlx_vlm's own APC pool (see mlx_vlm_apc_pool_bytes) is priced in off the RAW,
+    # pre-concurrency/pre-cache_multiplier rate -- it's one pool shared by the whole
+    # server process, not one per concurrent slot or per mlx-dspark-style cached slot
+    # (and mutually exclusive with cache_multiplier above: never both nonzero for the
+    # same model, since each is gated to the opposite backend).
+    apc_pool_bytes = mlx_vlm_apc_pool_bytes(model_entry, raw_bytes_per_growing_token)
+    fixed_bytes += apc_pool_bytes
+    detail["mlx_vlm_apc_pool_bytes"] = apc_pool_bytes
 
     available_bytes = available_gb * 1024**3
     usable_bytes = available_bytes - fixed_bytes
@@ -164,7 +264,7 @@ def _apply_preload(ctx, reason, preload_overhead):
 
 def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0,
                                    safety_buffer_gb=SAFETY_BUFFER_GB, concurrency=1,
-                                   max_context_tokens=None):
+                                   max_context_tokens=None, prefix_cache_slots=None):
     """Decides BOTH whether to quantize the KV cache AND the resulting context size, in
     one pass — see docs/HARDWARE_SPEED_ESTIMATION.md §14 for the full reasoning and its
     measured basis (§10/§12).
@@ -195,13 +295,16 @@ def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0
     could otherwise run look like they don't fit at all, over a bug that degrades
     rather than breaks. Re-check mlx-vlm#1559's status before removing this flag.
 
+    prefix_cache_slots: forwarded to recommend_max_context -- see
+    prefix_cache_cost_multiplier. A no-op for every backend except mlx_dspark.
+
     Returns dict: kv_bits (None or MEMORY_CONSTRAINED_KV_BITS), recommended_context,
     context_reason, kv_formula_detail, context_after_preload, fits, kv_bits_apc_caveat.
     """
     ctx_u, reason_u, detail_u = recommend_max_context(
         model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BITS,
         safety_buffer_gb=safety_buffer_gb, concurrency=concurrency,
-        max_context_tokens=max_context_tokens,
+        max_context_tokens=max_context_tokens, prefix_cache_slots=prefix_cache_slots,
     )
     fits_u, reason_u, after_u = _apply_preload(ctx_u, reason_u, preload_overhead)
     if fits_u:
@@ -214,7 +317,7 @@ def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0
     ctx_q, reason_q, detail_q = recommend_max_context(
         model_entry, free_wired_gb, kv_bits=MEMORY_CONSTRAINED_KV_BITS,
         safety_buffer_gb=safety_buffer_gb, concurrency=concurrency,
-        max_context_tokens=max_context_tokens,
+        max_context_tokens=max_context_tokens, prefix_cache_slots=prefix_cache_slots,
     )
     fits_q, reason_q, after_q = _apply_preload(ctx_q, reason_q, preload_overhead)
     if fits_q:

@@ -56,7 +56,10 @@ in CI or on any non-Mac machine.
    the same number on purpose (bash owns the launch flag; they are NOT shared
    across the bash/python boundary). Same for the memory "free" semantics:
    both sides read `kern.memorystatus_level` so the fit check and the backstop
-   can never disagree. If you change one, change the other and the comment
+   can never disagree. Same again for `MLX_VLM_APC_NUM_BLOCKS` in
+   `bushpilot/kv.py` and `APC_NUM_BLOCKS` in `start_mlx_server.sh` (mlx_vlm's
+   always-on APC pool-size ceiling, priced into `recommend_max_context` as a
+   fixed memory cost). If you change one, change the other and the comment
    that documents the pairing.
 4. **Calibration files are a cache, never a requirement.** Missing or corrupt
    `~/.bushpilot/calibration/*.json` must degrade to the formula/default path,

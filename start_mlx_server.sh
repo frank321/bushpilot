@@ -170,6 +170,15 @@ if [[ -n "$CONFIG_CONCURRENCY" ]]; then
     [[ "$INTERACTIVE" == "false" ]] && CONCURRENCY="$CONFIG_CONCURRENCY"
 fi
 [[ -n "$CONFIG_MAX_CONTEXT" ]] && ADVISOR_FLAGS+=(--max-context-tokens "$CONFIG_MAX_CONTEXT")
+# model_advisor.py's context-sizing math needs to know mlx-dspark's own prefix-cache
+# slot count too (see bushpilot/kv.py's prefix_cache_cost_multiplier) -- otherwise it
+# would size context for a single live KV cache while the actual mlx-dspark launch
+# below keeps up to this many MORE full-size cached conversation snapshots resident at
+# once, understating real peak memory (confirmed live: this exact gap is what drove the
+# repeated memory-guard sheds documented at DSPARK_DEFAULT_PREFIX_CACHE_SLOTS). Unset
+# here means "let the advisor assume mlx-dspark's own default," matching what actually
+# gets launched below when CONFIG_DSPARK_PC_SLOTS is also unset.
+[[ -n "$CONFIG_DSPARK_PC_SLOTS" ]] && ADVISOR_FLAGS+=(--prefix-cache-slots "$CONFIG_DSPARK_PC_SLOTS")
 
 # Panel finding (GLM, high): the LiteLLM-removal decision rests on this specific
 # installed mlx-vlm version's behavior (native /v1/messages routes, /metrics's
@@ -1384,6 +1393,16 @@ def rate(v, default="—"):
 def pct(v, default="—"):
     return f"{v*100:.0f}%" if isinstance(v, (int, float)) else default
 
+# Unlike pct() above (which formats an already-computed 0-1 fraction straight from
+# /metrics), this derives the fraction itself from two raw counts -- mlx-dspark's
+# /metrics has no precomputed cache-hit-rate field the way mlx_vlm's /v1/cache/stats
+# does (token_hit_rate, see the mlx_vlm dashboard branch below), so "what % of prompt
+# tokens were served from cache" has to be computed here instead of just displayed.
+def pct_ratio(numerator, denominator, default="—"):
+    if not isinstance(numerator, (int, float)) or not isinstance(denominator, (int, float)) or denominator <= 0:
+        return default
+    return f"{numerator / denominator * 100:.1f}%"
+
 def gb(v):
     return f"{v/1e9:.1f}" if isinstance(v, (int, float)) else "—"
 
@@ -1418,8 +1437,8 @@ line(f"API endpoint  http://{host}:{port}/v1   (OpenAI-compatible -- point any t
 line(f"context {context}   concurrency {concurrency}")
 rule()
 line(f"REQUESTS        completed {num(metrics.get('requests'), 0)}   (failed/in-flight not reported by mlx-dspark)")
-line(f"LIFETIME        prompt {num(metrics.get('prompt_tokens'), 0)} tok   generated {num(metrics.get('completion_tokens'), 0)} tok")
-line(f"                overall {rate(metrics.get('mean_tokens_per_sec'))} tok/s   decode {rate(metrics.get('mean_decode_tokens_per_sec'))} tok/s")
+line(f"LIFETIME        generated {num(metrics.get('completion_tokens'), 0)} tok   "
+     f"overall {rate(metrics.get('mean_tokens_per_sec'))} tok/s   decode {rate(metrics.get('mean_decode_tokens_per_sec'))} tok/s")
 rule()
 line(f"SPECULATION     mode {mode or '—'}   drafter {drafter or '—'}")
 line(f"                accept_len {rate(metrics.get('mean_accept_len'))}   draft_acceptance {pct(rounds.get('draft_acceptance'))}   "
@@ -1427,8 +1446,11 @@ line(f"                accept_len {rate(metrics.get('mean_accept_len'))}   draft
 line(f"                position accept: {pos_accept(rounds.get('position_acceptance'))}")
 rule()
 line(f"PREFIX CACHE    mode {prefix_cache.get('mode', '—')}   l2 {'on' if prefix_cache.get('l2') else 'off'}")
+line(f"                prompt {num(metrics.get('prompt_tokens'), 0)} tok   "
+     f"reused {num(prefix_cache.get('reused_tokens'), 0)} tok   "
+     f"cached {pct_ratio(prefix_cache.get('reused_tokens'), metrics.get('prompt_tokens'))}")
 line(f"                cached_tokens {num(prefix_cache.get('cached_tokens'), 0)}   hits {num(prefix_cache.get('hits'), 0)}   "
-     f"partial_hits {num(prefix_cache.get('partial_hits'), 0)}   reused {num(prefix_cache.get('reused_tokens'), 0)}")
+     f"partial_hits {num(prefix_cache.get('partial_hits'), 0)}")
 rule()
 line(f"MEMORY          active {gb(mem.get('active_bytes'))} GB   cache {gb(mem.get('cache_bytes'))} GB   peak {gb(mem.get('peak_bytes'))} GB")
 line(f"SYSTEM          free mem {pct_free}%   pressure: {pressure}   MLX RSS {rss} GB   swap {gb(system.get('swap_used_bytes'))} GB")

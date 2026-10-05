@@ -79,6 +79,20 @@ def main():
         except ValueError:
             max_context_tokens = None
 
+    # Same convenience-override philosophy again: config.json's
+    # "dspark_prefix_cache_slots" (forwarded by start_mlx_server.sh's ADVISOR_FLAGS)
+    # overrides mlx-dspark's own default slot count (DSPARK_DEFAULT_PREFIX_CACHE_SLOTS)
+    # used when sizing context for any model served through that backend -- see
+    # prefix_cache_cost_multiplier. A no-op for every other backend. None (nothing
+    # passed) means "assume mlx-dspark's own default," not "assume no cache."
+    prefix_cache_slots_flag = _flag_value(argv, "--prefix-cache-slots")
+    dspark_prefix_cache_slots = None
+    if prefix_cache_slots_flag:
+        try:
+            dspark_prefix_cache_slots = max(0, int(prefix_cache_slots_flag))
+        except ValueError:
+            dspark_prefix_cache_slots = None
+
     with open(MODELS_JSON) as f:
         catalog = json.load(f)
     models = catalog["models"]
@@ -147,6 +161,7 @@ def main():
         preload_overhead=(preload["total"] if preload else 0),
         requested_concurrency=requested_concurrency,
         max_context_tokens=max_context_tokens,
+        dspark_prefix_cache_slots=dspark_prefix_cache_slots,
     )
 
     # Phase 6: three non-interactive presentation modes for the fzf-based picker.
