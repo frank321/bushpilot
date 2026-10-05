@@ -15,6 +15,12 @@ and cross-checked by running the real functions once to confirm (see the session
 added this file) -- not copied from a prior implementation that could itself be wrong.
 """
 import model_advisor as ma
+# CALIBRATION_DIR is a module global read at call time by the functions defined in
+# bushpilot/calibration.py (load_calibration/save_calibration/_calibration_path) --
+# monkeypatching ma.CALIBRATION_DIR wouldn't reach them (different module, different
+# __dict__), even though ma.save_calibration IS bushpilot.calibration.save_calibration
+# (same function object). Patch it where those functions actually look it up.
+from bushpilot import calibration as _calibration
 
 
 # --- effective_size_gb --------------------------------------------------------------
@@ -197,7 +203,7 @@ def test_estimate_speed_tok_s_uses_per_model_speed_correction_factor_override(de
 def test_estimate_speed_tok_s_prefers_saved_calibration_over_formula(dense_model, tmp_path, monkeypatch):
     # A real measurement from a previous run on this exact (chip, model) pair always
     # wins over the physics formula -- see load_calibration's docstring.
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     ma.save_calibration("Apple M3 Max", dense_model["id"], 55.5, context_tokens=4096)
     speed, reason = ma.estimate_speed_tok_s(dense_model, "Apple M3 Max", 40)
     assert speed == 55.5
@@ -206,7 +212,7 @@ def test_estimate_speed_tok_s_prefers_saved_calibration_over_formula(dense_model
 
 
 def test_estimate_speed_tok_s_falls_back_to_formula_when_no_calibration_saved(dense_model, tmp_path, monkeypatch):
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     speed, reason = ma.estimate_speed_tok_s(dense_model, "Apple M3 Max", 40)
     assert speed == 48.3
     assert reason == "estimated"
@@ -215,12 +221,12 @@ def test_estimate_speed_tok_s_falls_back_to_formula_when_no_calibration_saved(de
 # --- save_calibration / load_calibration -----------------------------------------------
 
 def test_load_calibration_returns_none_when_nothing_saved(tmp_path, monkeypatch):
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     assert ma.load_calibration("Apple M5 Pro", "some-model") is None
 
 
 def test_save_then_load_calibration_round_trips(tmp_path, monkeypatch):
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     ma.save_calibration("Apple M5 Pro", "gemma-4-e4b-it-4bit", 71.6,
                          context_tokens=7200, ttft_s=1.65, peak_memory_gb=6.49)
     loaded = ma.load_calibration("Apple M5 Pro", "gemma-4-e4b-it-4bit")
@@ -232,14 +238,14 @@ def test_save_then_load_calibration_round_trips(tmp_path, monkeypatch):
 
 
 def test_save_calibration_overwrites_prior_measurement_for_same_pair(tmp_path, monkeypatch):
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     ma.save_calibration("Apple M5 Pro", "some-model", 10.0)
     ma.save_calibration("Apple M5 Pro", "some-model", 20.0)
     assert ma.load_calibration("Apple M5 Pro", "some-model")["decode_tok_s"] == 20.0
 
 
 def test_load_calibration_ignores_corrupt_file(tmp_path, monkeypatch):
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     path = ma._calibration_path("Apple M5 Pro", "some-model")
     import os
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -249,7 +255,7 @@ def test_load_calibration_ignores_corrupt_file(tmp_path, monkeypatch):
 
 
 def test_calibration_path_sanitizes_chip_name_spaces(tmp_path, monkeypatch):
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     ma.save_calibration("Apple M5 Pro", "some-model", 10.0)
     files = list(tmp_path.iterdir())
     assert len(files) == 1
@@ -260,7 +266,7 @@ def test_save_calibration_omits_sweep_fields_when_not_given(tmp_path, monkeypatc
     # Additive-only contract (see save_calibration's own docstring) -- a plain
     # teardown-time save (no sweep data) must look byte-identical to before
     # prefill_step_size/kv_bits_safe_at_long_context existed, not write explicit nulls.
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     ma.save_calibration("Apple M5 Pro", "some-model", 10.0)
     loaded = ma.load_calibration("Apple M5 Pro", "some-model")
     assert "prefill_step_size" not in loaded
@@ -268,7 +274,7 @@ def test_save_calibration_omits_sweep_fields_when_not_given(tmp_path, monkeypatc
 
 
 def test_save_calibration_round_trips_sweep_fields_when_given(tmp_path, monkeypatch):
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     ma.save_calibration("Apple M5 Pro", "gemma-4-e4b-it-4bit", 71.6,
                          context_tokens=7200, ttft_s=1.65, peak_memory_gb=6.49,
                          prefill_step_size=2048, kv_bits_safe_at_long_context=True)
@@ -334,7 +340,7 @@ def test_recommend_kv_bits_and_context_preload_overhead_can_fail_an_otherwise_fi
 # --- recommend_prefill_step_size (per-(chip, model) sweep override of the global default)
 
 def test_recommend_prefill_step_size_defaults_when_nothing_calibrated(dense_model, tmp_path, monkeypatch):
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     step_size, reason = ma.recommend_prefill_step_size(dense_model, "Apple M3 Max", 24)
     assert step_size == ma.DEFAULT_PREFILL_STEP_SIZE == 2048
     assert "default" in reason
@@ -345,7 +351,7 @@ def test_recommend_prefill_step_size_defaults_when_calibration_predates_the_fiel
     # A calibration file saved before prefill_step_size existed at all (e.g. by an
     # older save_calibration_snapshot()) has no such key -- treated identically to
     # "nothing calibrated yet", not an error.
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     ma.save_calibration("Apple M3 Max", dense_model["id"], 55.5, context_tokens=4096)
     step_size, reason = ma.recommend_prefill_step_size(dense_model, "Apple M3 Max", 24)
     assert step_size == ma.DEFAULT_PREFILL_STEP_SIZE
@@ -355,7 +361,7 @@ def test_recommend_prefill_step_size_defaults_when_calibration_predates_the_fiel
 def test_recommend_prefill_step_size_reports_calibrated_default_as_calibrated(dense_model, tmp_path, monkeypatch):
     # Calibrated value happens to equal the global default -- still a real
     # measurement, worth saying so, not silently indistinguishable from "unmeasured".
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     ma.save_calibration("Apple M3 Max", dense_model["id"], 71.6, peak_memory_gb=6.49,
                          prefill_step_size=2048)
     step_size, reason = ma.recommend_prefill_step_size(dense_model, "Apple M3 Max", 24)
@@ -365,7 +371,7 @@ def test_recommend_prefill_step_size_reports_calibrated_default_as_calibrated(de
 
 
 def test_recommend_prefill_step_size_uses_calibrated_non_default_when_memory_allows(dense_model, tmp_path, monkeypatch):
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     ma.save_calibration("Apple M3 Max", dense_model["id"], 68.0, peak_memory_gb=6.71,
                          prefill_step_size=4096)
     # 6.71 * 1.15 margin + 3.0 safety buffer ≈ 10.7GB required -- 24GB clears it easily.
@@ -375,7 +381,7 @@ def test_recommend_prefill_step_size_uses_calibrated_non_default_when_memory_all
 
 
 def test_recommend_prefill_step_size_falls_back_when_memory_too_tight_for_non_default(dense_model, tmp_path, monkeypatch):
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     ma.save_calibration("Apple M3 Max", dense_model["id"], 68.0, peak_memory_gb=6.71,
                          prefill_step_size=4096)
     # Same calibration as above, but far less free memory this time -- 6.71*1.15+3.0
@@ -389,7 +395,7 @@ def test_recommend_prefill_step_size_falls_back_when_memory_too_tight_for_non_de
 def test_recommend_prefill_step_size_falls_back_when_calibration_has_no_peak_memory(dense_model, tmp_path, monkeypatch):
     # A non-default step size with no recorded peak_memory_gb can't be safety-checked
     # at all -- falls back rather than risk using an unverified value blindly.
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     ma.save_calibration("Apple M3 Max", dense_model["id"], 68.0, prefill_step_size=512)
     step_size, reason = ma.recommend_prefill_step_size(dense_model, "Apple M3 Max", 24)
     assert step_size == ma.DEFAULT_PREFILL_STEP_SIZE
@@ -399,7 +405,7 @@ def test_recommend_prefill_step_size_falls_back_when_calibration_has_no_peak_mem
 def test_recommend_prefill_step_size_lower_non_default_needs_no_extra_margin(dense_model, tmp_path, monkeypatch):
     # A step size BELOW the default (e.g. 512) was already observed using LESS memory
     # than the default in §12's own data -- no 15% margin applied in that direction.
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     ma.save_calibration("Apple M3 Max", dense_model["id"], 72.0, peak_memory_gb=6.25,
                          prefill_step_size=512)
     step_size, reason = ma.recommend_prefill_step_size(dense_model, "Apple M3 Max", 9.3)

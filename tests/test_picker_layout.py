@@ -11,6 +11,10 @@ important invariant in this file; the rest are supporting unit tests for the pie
 that invariant is built from.
 """
 import model_advisor as ma
+# use_color is read at call time by format_compact_header_row/format_model_compact_row,
+# both defined in bushpilot/picker/display.py -- same reasoning as calibration.py's
+# CALIBRATION_DIR in test_recommendation_math.py: patch it where it's actually looked up.
+from bushpilot.picker import display as _display
 
 
 # --- compact_row_widths ---------------------------------------------------------------
@@ -236,7 +240,7 @@ def test_sort_key_for_click_skips_columns_dropped_for_width(sample_rows):
 # subset; see format_model_compact_row's own comment on this)
 
 def test_color_highlights_context_and_kv_green_when_unquantized(dense_model, monkeypatch):
-    monkeypatch.setattr(ma, "use_color", lambda force=False: True)
+    monkeypatch.setattr(_display, "use_color", lambda force=False: True)
     rows = ma.build_recommendations([dense_model], free_wired_gb=24, chip_name="Apple M3 Max", gpu_cores=40)
     widths = ma.compact_row_widths(rows)
     cols = list(range(ma.COL_LAST))
@@ -247,7 +251,7 @@ def test_color_highlights_context_and_kv_green_when_unquantized(dense_model, mon
 
 
 def test_color_highlights_context_and_kv_yellow_when_kv_quantized(dense_model, monkeypatch):
-    monkeypatch.setattr(ma, "use_color", lambda force=False: True)
+    monkeypatch.setattr(_display, "use_color", lambda force=False: True)
     # free_wired_gb=9.34 is the verified fallback-to-8bit-KV case from
     # test_recommendation_math.py.
     rows = ma.build_recommendations([dense_model], free_wired_gb=9.34, chip_name="Apple M3 Max", gpu_cores=40)
@@ -259,7 +263,7 @@ def test_color_highlights_context_and_kv_yellow_when_kv_quantized(dense_model, m
 
 
 def test_color_dims_the_entire_line_when_model_does_not_fit(dense_model, monkeypatch):
-    monkeypatch.setattr(ma, "use_color", lambda force=False: True)
+    monkeypatch.setattr(_display, "use_color", lambda force=False: True)
     rows = ma.build_recommendations([dense_model], free_wired_gb=1, chip_name="Apple M3 Max", gpu_cores=40)
     widths = ma.compact_row_widths(rows)
     cols = list(range(ma.COL_LAST))
@@ -273,7 +277,7 @@ def test_color_dims_the_entire_line_when_model_does_not_fit(dense_model, monkeyp
 def test_color_highlighting_does_not_crash_when_context_kv_engine_are_dropped(dense_model, monkeypatch):
     # The actual regression: COL_CTX/COL_KV/COL_ENGINE may not be in `cols` at all on
     # a narrow terminal -- highlighting must skip them gracefully, not KeyError.
-    monkeypatch.setattr(ma, "use_color", lambda force=False: True)
+    monkeypatch.setattr(_display, "use_color", lambda force=False: True)
     rows = ma.build_recommendations([dense_model], free_wired_gb=24, chip_name="Apple M3 Max", gpu_cores=40)
     widths = ma.compact_row_widths(rows)
     narrow_cols = [ma.COL_NAME, ma.COL_SIZE, ma.COL_CTX, ma.COL_KV, ma.COL_SPEED]

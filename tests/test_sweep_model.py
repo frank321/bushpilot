@@ -18,6 +18,7 @@ import pytest
 
 import model_advisor as ma
 import sweep_model as sm
+from bushpilot import calibration as _calibration
 
 
 # --- prompt builders -----------------------------------------------------------------
@@ -232,7 +233,7 @@ def test_concurrency_memory_guard_ok_true_when_no_kv_config():
 # --- sweep_path / write_sweep_json ------------------------------------------------------
 
 def test_sweep_path_sanitizes_and_lands_in_sweeps_subdir(tmp_path, monkeypatch):
-    monkeypatch.setattr(ma, "CALIBRATION_DIR", str(tmp_path))
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
     monkeypatch.setattr(sm, "SWEEP_DIR", os.path.join(str(tmp_path), "sweeps"))
     path = sm.sweep_path("Apple M5 Pro", "gemma-4-e4b-it-4bit")
     assert " " not in os.path.basename(path)

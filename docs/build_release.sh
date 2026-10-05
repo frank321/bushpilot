@@ -22,6 +22,9 @@ RUNTIME_FILES=(
     models.json
     uninstall.sh
 )
+# model_advisor.py is a thin shim over this package (see bushpilot/__init__.py) --
+# both or neither ship, never one without the other.
+RUNTIME_DIR="bushpilot"
 
 for f in "${RUNTIME_FILES[@]}"; do
     if [ ! -f "$REPO_ROOT/$f" ]; then
@@ -29,6 +32,10 @@ for f in "${RUNTIME_FILES[@]}"; do
         exit 1
     fi
 done
+if [ ! -d "$REPO_ROOT/$RUNTIME_DIR" ]; then
+    echo "[ERROR] Expected runtime directory missing: $REPO_ROOT/$RUNTIME_DIR" >&2
+    exit 1
+fi
 
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
@@ -38,6 +45,8 @@ mkdir -p "$BUNDLE_DIR"
 for f in "${RUNTIME_FILES[@]}"; do
     cp "$REPO_ROOT/$f" "$BUNDLE_DIR/"
 done
+cp -R "$REPO_ROOT/$RUNTIME_DIR" "$BUNDLE_DIR/$RUNTIME_DIR"
+find "$BUNDLE_DIR/$RUNTIME_DIR" -name "__pycache__" -type d -exec rm -rf {} +
 cp "$SCRIPT_DIR/release-README.md" "$BUNDLE_DIR/README.md"
 chmod +x "$BUNDLE_DIR/start_mlx_server.sh" "$BUNDLE_DIR/launch_tool.sh" "$BUNDLE_DIR/uninstall.sh"
 
