@@ -1704,4 +1704,12 @@ main() {
     run_dashboard
 }
 
-main "$@"
+# Guarded so tests/shell/'s bats suite can `source` this file to unit-test the
+# memory/backend-liveness backstop functions in isolation, without starting a real
+# server (main's full lifecycle: venv bootstrap, model download, mlx_vlm.server
+# launch, the live dashboard loop). Executing this file directly (./start_mlx_server.sh
+# or `bash start_mlx_server.sh`) behaves exactly as before -- this only changes
+# behavior when sourced.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
