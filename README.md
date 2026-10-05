@@ -78,5 +78,5 @@ This is deliberately separate from `verify_max_kv_size.sh` / `verify_long_contex
 
 - [QUICK_START.md](QUICK_START.md): the fast path
 - [MLX_SERVER_USAGE.md](MLX_SERVER_USAGE.md): full usage guide
-- [HARDWARE_SPEED_ESTIMATION.md](HARDWARE_SPEED_ESTIMATION.md): research behind the recommendations
-- [PROJECT_STATUS.md](PROJECT_STATUS.md) and [PHASE_PLAN.md](PHASE_PLAN.md): project history and plan
+- [docs/HARDWARE_SPEED_ESTIMATION.md](docs/HARDWARE_SPEED_ESTIMATION.md): research behind the recommendations
+- [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) and [docs/PHASE_PLAN.md](docs/PHASE_PLAN.md): project history and plan

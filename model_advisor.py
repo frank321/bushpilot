@@ -3,7 +3,7 @@
 model_advisor.py — hardware detection + per-model context-size recommendation +
 interactive model picker for start_litellm_proxy.sh.
 
-Design notes (see HARDWARE_SPEED_ESTIMATION.md for the full research behind this):
+Design notes (see docs/HARDWARE_SPEED_ESTIMATION.md for the full research behind this):
 - Context-size recommendation is an EXACT calculation from each model's "kv_config"
   field in models.json (num_kv_heads, head_dim, num_layers, and — critically —
   layer_types/sliding_window to separate context-growing layers from fixed-cost ones).
@@ -65,9 +65,9 @@ SAFETY_BUFFER_GB = 3.0       # headroom kept free beyond model+KV, for OS/backgr
 # same number deliberately, not a shared constant imported across the bash/python boundary:
 # bash owns the actual launch flag, this is only the fallback recommend_prefill_step_size
 # below returns when no (chip, model) calibration exists yet. Derived from exactly 2 Gemma-4
-# models on this one M5 Pro machine (HARDWARE_SPEED_ESTIMATION.md §12) — not assumed to
+# models on this one M5 Pro machine (docs/HARDWARE_SPEED_ESTIMATION.md §12) — not assumed to
 # generalize, which is the whole reason recommend_prefill_step_size/the sweep harness exist
-# (see NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md).
+# (see docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md).
 DEFAULT_PREFILL_STEP_SIZE = 2048
 MIN_USABLE_CONTEXT = 12288   # below this, a context window isn't really usable — also used
                               # as the floor for CONVERSATION HEADROOM after tool preload
@@ -86,7 +86,7 @@ MIN_USABLE_CONTEXT = 12288   # below this, a context window isn't really usable 
 # are labeled and sourced as such — not fabricated, but not exact either.
 #
 # TOOL_BASELINE_PRELOAD_TOKENS: system prompt + built-in tool schemas with NO MCP
-# servers or skills configured yet. Recalibrated 2026-09-29 (PHASE_PLAN.md Phase 5)
+# servers or skills configured yet. Recalibrated 2026-09-29 (docs/PHASE_PLAN.md Phase 5)
 # against REAL measurements via launch_tool.sh, replacing the previous public-report
 # -sourced figures (Claude 18,000 / OpenCode 7,000, from a Sep 2026 HN thread — never
 # measured on this project's own usage).
@@ -110,7 +110,7 @@ MIN_USABLE_CONTEXT = 12288   # below this, a context window isn't really usable 
 # ~24,000 total, consistent with the ~22,406 bare figure here, not the ~39-44K one —
 # that earlier figure could not be reproduced and is treated as superseded.
 #
-# aider/cline/pi added 2026-10-03 (PHASE_PLAN.md's lightweight-tool-CLI research
+# aider/cline/pi added 2026-10-03 (docs/PHASE_PLAN.md's lightweight-tool-CLI research
 # session), same ground-truth method (server's own /metrics prompt_tokens for a bare,
 # no-edit "say hello"-equivalent request through launch_tool.sh), but with NO skills
 # subtraction for any of the three — confirmed live that none of them were loading
@@ -138,7 +138,7 @@ MIN_USABLE_CONTEXT = 12288   # below this, a context window isn't really usable 
 #   pi: `pi --provider mlx-direct --model <id> --print "Say hello." --no-session`.
 #     1,611 measured total - ~3 (user msg) ≈ 1,608 — by far the smallest of the five
 #     tools measured so far, consistent with it being explicitly marketed as a
-#     minimal/hackable terminal agent (see PHASE_PLAN.md's research section).
+#     minimal/hackable terminal agent (see docs/PHASE_PLAN.md's research section).
 TOOL_BASELINE_PRELOAD_TOKENS = {
     "claude": 18900,
     "opencode": 6400,   # bare-install figure (~0 MCP; global skills subtracted back
@@ -159,7 +159,7 @@ TOOL_BASELINE_PRELOAD_TOKENS = {
 # this machine's own config (see measure_mcp_servers).
 MCP_SERVER_TOKENS_ESTIMATE = 3000
 
-# Sourced in HARDWARE_SPEED_ESTIMATION.md §4 — cross-checked across two independent
+# Sourced in docs/HARDWARE_SPEED_ESTIMATION.md §4 — cross-checked across two independent
 # sources for M5 Pro/Max specifically; M1-M4 figures are long-established/widely
 # reproduced. Treat M5-and-later as less certain (documented there, not repeated here).
 CHIP_BANDWIDTH_GB_S = {
@@ -170,13 +170,13 @@ CHIP_BANDWIDTH_GB_S = {
     "Apple M5": 153, "Apple M5 Pro": 307, "Apple M5 Max": 537, "Apple M5 Ultra": 1200,
     "Apple M6": 170,
 }
-# Derived live in HARDWARE_SPEED_ESTIMATION.md §6 from 3 real measurements (0.86, 0.97,
+# Derived live in docs/HARDWARE_SPEED_ESTIMATION.md §6 from 3 real measurements (0.86, 0.97,
 # 0.88) plus one independent published figure (0.88) — 0.87 sits near the low end of
 # that cluster deliberately, so the estimate errs toward underselling speed rather than
 # overpromising it.
 SPEED_CORRECTION_FACTOR = 0.87
 
-# Decided 2026-09-29 (PHASE_PLAN.md Phase 5): build_recommendations() previously gated
+# Decided 2026-09-29 (docs/PHASE_PLAN.md Phase 5): build_recommendations() previously gated
 # a model's availability purely on memory fit -- estimated_tok_s was computed and shown
 # but never used to exclude anything, so a model estimated at even 1 tok/s would still
 # appear fully selectable. Below this, a model is greyed out the same way an
@@ -436,7 +436,7 @@ def effective_size_gb(model_entry):
 
 def compute_kv_formula(kv_config, kv_bits=UNQUANTIZED_KV_BITS):
     """Returns (bytes_per_growing_token, fixed_kv_bytes_total, detail_dict) or None if
-    kv_config is missing fields we need. See HARDWARE_SPEED_ESTIMATION.md §9 — this
+    kv_config is missing fields we need. See docs/HARDWARE_SPEED_ESTIMATION.md §9 — this
     generalizes both the Qwen3.5 hybrid linear/full-attention case and the Gemma-4
     sliding/full-attention case with one formula: only 'full_attention' layers grow
     with context; 'sliding_attention' layers cost a FIXED amount (sliding_window
@@ -584,11 +584,11 @@ def save_calibration(chip_name, model_id, decode_tok_s, context_tokens=None,
     a FUTURE launch of the identical (chip, model) pair can report a measured tok/s
     instead of SPEED_CORRECTION_FACTOR's physics estimate -- whose own documented
     accuracy range is 0.75x-1.29x across just the 5 models checked so far (see
-    HARDWARE_SPEED_ESTIMATION.md §17 item #2). Called by start_mlx_server.sh at
+    docs/HARDWARE_SPEED_ESTIMATION.md §17 item #2). Called by start_mlx_server.sh at
     teardown with whatever that session's own /metrics last reported.
 
     prefill_step_size/kv_bits_safe_at_long_context (both optional, added for the
-    per-(chip, model) sweep harness -- see NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md):
+    per-(chip, model) sweep harness -- see docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md):
     a condensed summary of the richer `~/.bushpilot/calibration/sweeps/*.sweep.json`
     file a full sweep run produces, written here so recommend_prefill_step_size below
     (and any future reader) never has to parse that separate, larger file just to get
@@ -654,7 +654,7 @@ def estimate_speed_tok_s(model_entry, chip_name, gpu_cores):
     SPEED_CORRECTION_FACTOR constant when present -- added because that global constant
     is already confirmed NOT to hold across architecture families: Qwen measurements
     cluster at 0.86-0.97, but gemma-4-e4b-it-4bit measured 1.29 and gemma-4-12b-it-4bit
-    measured 0.75 (HARDWARE_SPEED_ESTIMATION.md §12/§17 item #2) -- a 4x-wider spread,
+    measured 0.75 (docs/HARDWARE_SPEED_ESTIMATION.md §12/§17 item #2) -- a 4x-wider spread,
     in opposite directions, than one global number can represent. Leave unset in
     models.json until a model has its own live calibration point; the global constant
     remains the right default for anything not yet measured."""
@@ -723,7 +723,7 @@ def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0
                                    safety_buffer_gb=SAFETY_BUFFER_GB, concurrency=1,
                                    max_context_tokens=None):
     """Decides BOTH whether to quantize the KV cache AND the resulting context size, in
-    one pass — see HARDWARE_SPEED_ESTIMATION.md §14 for the full reasoning and its
+    one pass — see docs/HARDWARE_SPEED_ESTIMATION.md §14 for the full reasoning and its
     measured basis (§10/§12).
 
     KV-cache quantization (--kv-bits 8) has a real decode-speed cost (up to 8.7% on
@@ -792,7 +792,7 @@ def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0
     }
 
 
-# A larger --prefill-step-size's measured memory cost (HARDWARE_SPEED_ESTIMATION.md §12) is
+# A larger --prefill-step-size's measured memory cost (docs/HARDWARE_SPEED_ESTIMATION.md §12) is
 # real but comparatively small relative to the model's own footprint, not a multiplier of
 # it: going 2048->4096 cost +3.4% of that run's own peak memory for gemma-4-e4b-it-4bit and
 # +11.8% for gemma-4-12b-it-4bit, the two data points that exist. Modeled conservatively here
@@ -801,7 +801,7 @@ def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0
 # proven-safe default (the default itself needs no extra margin: it's what the calibration's
 # own peak_memory_gb was actually measured running at). This is a documented approximation,
 # not a re-derivation of §12's relationship for every chip/model -- the sweep harness
-# (NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md) is what would eventually replace this with a real
+# (docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md) is what would eventually replace this with a real
 # per-model memory curve if the margin ever proves too tight or too loose in practice.
 PREFILL_STEP_SIZE_MEMORY_MARGIN = 1.15
 
@@ -812,7 +812,7 @@ def recommend_prefill_step_size(model_entry, chip_name, free_wired_gb,
     try-the-better-option-then-fall-back-to-the-proven-safe-default structure, but for
     --prefill-step-size instead of --kv-bits.
 
-    §12's own finding (HARDWARE_SPEED_ESTIMATION.md) is that `--prefill-step-size`
+    §12's own finding (docs/HARDWARE_SPEED_ESTIMATION.md) is that `--prefill-step-size`
     affects ONLY time-to-first-token, never decode speed, and that the currently
     hardcoded global default (DEFAULT_PREFILL_STEP_SIZE, 2048) already beat both 512
     and 4096 on both models tested -- but that was 2 Gemma-4 models on 1 machine (this
@@ -838,7 +838,7 @@ def recommend_prefill_step_size(model_entry, chip_name, free_wired_gb,
     if calibrated is None or not isinstance(calibrated.get("prefill_step_size"), int):
         return DEFAULT_PREFILL_STEP_SIZE, (
             "default (no calibrated prefill_step_size for this chip+model yet — "
-            "see NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md to run the sweep)"
+            "see docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md to run the sweep)"
         )
 
     step_size = calibrated["prefill_step_size"]
@@ -1524,7 +1524,7 @@ def _flag_value(argv, flag):
 def emit_selection_json(m, selected):
     # Machine-readable result — the ONLY thing on stdout.
     # kv_bits is None when this model's recommended context fits free memory
-    # unquantized (the common case now — see HARDWARE_SPEED_ESTIMATION.md §14); the
+    # unquantized (the common case now — see docs/HARDWARE_SPEED_ESTIMATION.md §14); the
     # caller (start_mlx_server.sh) must omit --kv-bits entirely in that case rather
     # than treating None as a literal value.
     print(json.dumps({

@@ -4,7 +4,7 @@ compute_bonus_concurrency, build_recommendations.
 
 This is the project's actual core value proposition -- "will this model fit, at what
 context size, how fast" -- and until now it was only ever checked by hand on whatever
-Mac happened to be at hand (see IMPLEMENTATION_NOTES.md's "Testing Strategy"). These
+Mac happened to be at hand (see docs/IMPLEMENTATION_NOTES.md's "Testing Strategy"). These
 tests use synthetic chip/memory inputs instead of real hardware, so the ARITHMETIC can
 be verified on any machine, in CI, offline -- they deliberately don't replace
 verify_max_kv_size.sh / verify_long_context_memory.sh, which check things no unit test
@@ -185,7 +185,7 @@ def test_estimate_speed_tok_s_applies_measured_speedup_multiplier(drafter_model)
 def test_estimate_speed_tok_s_uses_per_model_speed_correction_factor_override(dense_model):
     # Same shape as test_estimate_speed_tok_s_dense_model, but with a model-specific
     # override (gap: one global SPEED_CORRECTION_FACTOR is confirmed not to hold across
-    # architecture families -- see HARDWARE_SPEED_ESTIMATION.md \u00a717 item #2) in place
+    # architecture families -- see docs/HARDWARE_SPEED_ESTIMATION.md \u00a717 item #2) in place
     # of the 0.87 global constant.
     dense_model["speed_correction_factor"] = 1.29
     speed, reason = ma.estimate_speed_tok_s(dense_model, "Apple M3 Max", 40)

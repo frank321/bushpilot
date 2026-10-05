@@ -4,7 +4,7 @@ Run Claude Code, OpenCode, Aider, Cline, or Pi against a model served locally on
 instead of a cloud API. Hardware-aware: it detects your Mac's chip and free memory
 and recommends a model + context size that's actually safe to run.
 
-**Rewritten for the two-script architecture (PHASE_PLAN.md Phase 4).** There is no
+**Rewritten for the two-script architecture (docs/PHASE_PLAN.md Phase 4).** There is no
 LiteLLM, no PostgreSQL, and no `--monitor`/`--interactive`-flag-per-run design
 anymore — see `MLX_SERVER_USAGE.md` for the full guide. This doc is the fast path.
 
@@ -89,5 +89,5 @@ Removes the venv, downloaded model weights, APC cache, state, and logs.
 ## Questions?
 
 - **`MLX_SERVER_USAGE.md`** — the full usage guide, both scripts' env vars, troubleshooting
-- **`HARDWARE_SPEED_ESTIMATION.md`** — the research behind the context-size math and speed estimates
-- **`PHASE_PLAN.md`** — the redesign this project went through, and why
+- **`docs/HARDWARE_SPEED_ESTIMATION.md`** — the research behind the context-size math and speed estimates
+- **`docs/PHASE_PLAN.md`** — the redesign this project went through, and why

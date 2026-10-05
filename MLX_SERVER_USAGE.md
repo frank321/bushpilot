@@ -1,7 +1,7 @@
 # MLX Server & Tool Launcher — Usage Guide
 
-**Renamed from `LITELLM_PROXY_USAGE.md` (PHASE_PLAN.md Phase 4).** LiteLLM and
-PostgreSQL are gone from this project entirely — see PHASE_PLAN.md's "drop LiteLLM +
+**Renamed from `LITELLM_PROXY_USAGE.md` (docs/PHASE_PLAN.md Phase 4).** LiteLLM and
+PostgreSQL are gone from this project entirely — see docs/PHASE_PLAN.md's "drop LiteLLM +
 Postgres entirely" decision. `mlx_vlm.server` natively serves both the OpenAI
 (`/v1/chat/completions`) and Anthropic (`/v1/messages`) wire formats, so there is no
 translation-layer proxy process anymore, and this doc's old three-service
@@ -98,7 +98,7 @@ trigger the same teardown path. There's no "detach without stopping" mode: the
 dashboard process *is* what's keeping the server up, so closing it always stops
 everything, for every tool/terminal attached to it. (An automatic memory-pressure
 backstop also triggers the same teardown if free memory gets dangerously low while
-you're not looking — see `MONITORING_ARCHITECTURE.md`.)
+you're not looking — see `docs/MONITORING_ARCHITECTURE.md`.)
 
 ---
 
@@ -193,8 +193,8 @@ this project manages. Nothing else on the machine is touched.
 - **`model_advisor.py`** — hardware detection + per-model context recommendation +
   interactive/`fzf` model picker, called by `start_mlx_server.sh`
 - **`models.json`** — the curated, live-verified model catalog
-- **`HARDWARE_SPEED_ESTIMATION.md`** — the research behind the context-size math and
+- **`docs/HARDWARE_SPEED_ESTIMATION.md`** — the research behind the context-size math and
   speed estimates
-- **`MONITORING_ARCHITECTURE.md`** — the memory-pressure backstop now folded into
+- **`docs/MONITORING_ARCHITECTURE.md`** — the memory-pressure backstop now folded into
   `start_mlx_server.sh`'s own poll loop
-- **`PHASE_PLAN.md`** — the redesign this doc reflects, and the decisions behind it
+- **`docs/PHASE_PLAN.md`** — the redesign this doc reflects, and the decisions behind it

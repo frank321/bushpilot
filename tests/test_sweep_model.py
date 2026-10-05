@@ -5,7 +5,7 @@ monkeypatched, exactly like test_recommendation_math.py does for model_advisor.p
 Deliberately NOT tested here: SweepServer's real subprocess launch/teardown, the
 chat_completion/_http_json HTTP layer, or run_sweep's live orchestration -- those need
 a real mlx_vlm.server instance and are exercised by actually running the harness (see
-NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md), not by this pure-logic unit suite.
+docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md), not by this pure-logic unit suite.
 """
 import os
 import sys

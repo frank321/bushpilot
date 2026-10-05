@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # launch_tool.sh — attaches a coding tool (Claude Code / OpenCode / Aider / Cline / Pi)
-# to the already-running MLX supervisor (start_mlx_server.sh). See PHASE_PLAN.md Phase 3.
+# to the already-running MLX supervisor (start_mlx_server.sh). See docs/PHASE_PLAN.md Phase 3.
 #
 # This script does NOT start or manage the model server itself -- that's
 # start_mlx_server.sh's job, and its dashboard is the thing keeping the shared
@@ -21,7 +21,7 @@ set -euo pipefail
 #   launch_tool.sh pi       [args...] → skip the picker, launch Pi directly
 #
 # Antigravity is deliberately not offered here -- already researched and confirmed
-# there's no way to point it at a custom local endpoint (see PHASE_PLAN.md). "Tau" and
+# there's no way to point it at a custom local endpoint (see docs/PHASE_PLAN.md). "Tau" and
 # "Flash CLI" were also looked at and deliberately left out: neither name maps to a
 # single established, reputable coding-agent CLI (searched npm/GitHub/PyPI -- the
 # closest matches are either one-person projects with a few hundred downloads and no
@@ -73,7 +73,7 @@ MLX_PYTHON="$BUSHPILOT_HOME/venv/bin/python"
 # output specifically so this constant doesn't have to be trusted blindly here).
 MIN_USABLE_CONTEXT=12288
 
-# Measured live (see PHASE_PLAN.md's live end-to-end test): Claude Code's own
+# Measured live (see docs/PHASE_PLAN.md's live end-to-end test): Claude Code's own
 # max-output-tokens is ~32,000. recommended_context/CONTEXT_WINDOW is a memory
 # ceiling, not a usable prompt budget -- reserve this much off the top when setting
 # CLAUDE_CODE_MAX_CONTEXT_TOKENS, or requests near the ceiling reproduce exactly the
@@ -217,7 +217,7 @@ read_loaded_state() {
     IFS='|' read -r MLX_MODEL CONTEXT_WINDOW KV_BITS < "$MLX_STATE_FILE"
 }
 
-# Validates preload fit at attach-time, not just liveness (PHASE_PLAN.md Phase 3):
+# Validates preload fit at attach-time, not just liveness (docs/PHASE_PLAN.md Phase 3):
 # the supervisor is deliberately tool-agnostic now, so the "does this tool's preload
 # leave enough usable context" question moves here, at the point a specific tool is
 # actually about to attach.
@@ -253,7 +253,7 @@ launch_claude() {
     export ANTHROPIC_BASE_URL="http://$MLX_HOST:$MLX_PORT"
     # Dummy credentials -- unconfirmed whether Claude Code behaves with none configured
     # at all against a keyless server, so keep these until a startup test proves
-    # they're unnecessary (see PHASE_PLAN.md).
+    # they're unnecessary (see docs/PHASE_PLAN.md).
     export ANTHROPIC_API_KEY="local-token"
     export ANTHROPIC_AUTH_TOKEN="ollama"
     export ANTHROPIC_MODEL="$MLX_MODEL"

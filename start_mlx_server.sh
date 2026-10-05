@@ -3,8 +3,8 @@ set -euo pipefail
 
 # start_mlx_server.sh — MLX-only model-serving supervisor.
 #
-# Renamed from start_litellm_proxy.sh (PHASE_PLAN.md Phase 4) — this script no longer
-# starts or manages LiteLLM (or Postgres) at all, see PHASE_PLAN.md's "drop LiteLLM +
+# Renamed from start_litellm_proxy.sh (docs/PHASE_PLAN.md Phase 4) — this script no longer
+# starts or manages LiteLLM (or Postgres) at all, see docs/PHASE_PLAN.md's "drop LiteLLM +
 # Postgres entirely" decision. `mlx_vlm.server` natively serves both the OpenAI
 # (/v1/chat/completions) and Anthropic (/v1/messages) wire formats, so there is no
 # translation-layer proxy process needed anymore.
@@ -13,7 +13,7 @@ set -euo pipefail
 # the machine), show a live status dashboard in the foreground, and tear everything
 # down cleanly on Ctrl-C / `q` / a closed terminal / a memory emergency. Picking a
 # coding tool (Claude Code / OpenCode) and pointing it at this server is
-# launch_tool.sh's job (PHASE_PLAN.md Phase 3) — multiple tools/terminals are meant to
+# launch_tool.sh's job (docs/PHASE_PLAN.md Phase 3) — multiple tools/terminals are meant to
 # attach to the one shared server this starts.
 #
 # Usage:
@@ -27,7 +27,7 @@ set -euo pipefail
 #   Fixed-model form (for scripting/restarts without the interactive picker):
 #     start_mlx_server.sh qwen3.5-9b-mlx-8bit mlx-community/Qwen3.5-9B-MLX-8bit 131072
 #
-# Automatic Prefix Caching (APC) is always enabled — see HARDWARE_SPEED_ESTIMATION.md
+# Automatic Prefix Caching (APC) is always enabled — see docs/HARDWARE_SPEED_ESTIMATION.md
 # §13. KV-cache quantization is applied only when the interactively-recommended
 # context doesn't already fit free memory unquantized (see model_advisor.py); the
 # fixed-model form has no such computed decision and defaults to unquantized.
@@ -63,7 +63,7 @@ fi
 # removable by deleting one directory. Migrating an EXISTING scattered install
 # (~/pip_env/mlx_lm, ~/mlx_models/~/MLX_Models, ~/.cache/mlx-vlm/caching,
 # /tmp/mlx-llm-proxy-*) into this layout is a deliberate one-time manual step on this
-# machine, not scripted here (see PHASE_PLAN.md's "Open / still deciding" resolution)
+# machine, not scripted here (see docs/PHASE_PLAN.md's "Open / still deciding" resolution)
 # — this script always uses the new paths below, full stop.
 # ---------------------------------------------------------------------------
 BUSHPILOT_HOME="$HOME/.bushpilot"
@@ -77,7 +77,7 @@ mkdir -p "$BUSHPILOT_VENV" "$BUSHPILOT_STATE_DIR" "$BUSHPILOT_LOG_DIR" "$BUSHPIL
 MLX_STATE_FILE="$BUSHPILOT_STATE_DIR/mlx-loaded.txt"
 # Written best-effort after every FRESH launch (never on an attach-to-already-healthy
 # path, which never calls wait_for_url at all) with the measured process-start → first-
-# healthy-response seconds -- "load time" per NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md's
+# healthy-response seconds -- "load time" per docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md's
 # Tier 1 metrics table ("not tracked anywhere today" before this). sweep_model.py reads
 # this file (if freshly written) to fill its own "load.load_time_s" field without
 # needing to manage this script's own process lifecycle -- see that script's docstring.
@@ -190,19 +190,19 @@ QUANTIZED_KV_START=0
 # model_advisor.py's recommend_prefill_step_size() -- a real measurement from
 # sweep_model.py's per-(chip, model) sweep when one exists on this machine, falling
 # back to this same global default otherwise. See
-# NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md for why a single hardcoded global constant
+# docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md for why a single hardcoded global constant
 # here (derived from 2 Gemma-4 models on this one M5 Pro) doesn't generalize across
 # chip architectures, and `python3 sweep_model.py --model-id <id>` to calibrate one.
 PREFILL_STEP_SIZE=2048
 
-# Automatic Prefix Caching (APC) — see HARDWARE_SPEED_ESTIMATION.md §13.
+# Automatic Prefix Caching (APC) — see docs/HARDWARE_SPEED_ESTIMATION.md §13.
 APC_ENABLED=1
 APC_NUM_BLOCKS=4096
 APC_DISK_PATH="$BUSHPILOT_APC_DIR"
 APC_DISK_MAX_GB=5
 
 # Memory-pressure backstop thresholds — same values/rationale as the now-retired
-# monitor_memory.sh (see MONITORING_ARCHITECTURE.md): kern.memorystatus_level is the
+# monitor_memory.sh (see docs/MONITORING_ARCHITECTURE.md): kern.memorystatus_level is the
 # kernel's own real-time percent-free figure, machine-size-normalized by construction.
 MEM_ABORT_BELOW_PCT=10
 MEM_WARN_BELOW_PCT=18
@@ -619,7 +619,7 @@ ensure_backend_installed() {
 }
 
 # Phase 6: arrow-key model picker with a live detail pane, using fzf rather than
-# hand-rolled TUI code -- see PHASE_PLAN.md for why fzf over stdlib curses. Prints
+# hand-rolled TUI code -- see docs/PHASE_PLAN.md for why fzf over stdlib curses. Prints
 # model_advisor.py's own --resolve output (the same JSON contract the plain-menu path
 # already produces) on success, or returns non-zero on cancel/failure.
 #
@@ -745,7 +745,7 @@ run_interactive_selection() {
     # Overrides this script's own static PREFILL_STEP_SIZE=2048 default (set near the
     # top of this file) with model_advisor.py's recommend_prefill_step_size() decision
     # -- a real per-(chip, model) sweep measurement when one exists on this machine
-    # (see NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md / sweep_model.py), the SAME global
+    # (see docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md / sweep_model.py), the SAME global
     # default otherwise. Only the --interactive path goes through model_advisor.py at
     # all, so the fixed-model form (scripting/restarts) keeps today's static default
     # unchanged, exactly like KV_BITS above.
@@ -1107,7 +1107,7 @@ ensure_mlx_running() {
 
 # ---------------------------------------------------------------------------
 # Live status dashboard + memory-pressure backstop + full teardown on
-# Ctrl-C/q/HUP/TERM. See PHASE_PLAN.md Phase 2's locked dashboard layout.
+# Ctrl-C/q/HUP/TERM. See docs/PHASE_PLAN.md Phase 2's locked dashboard layout.
 # ---------------------------------------------------------------------------
 DASHBOARD_START_TS=$(date +%s)
 MEM_ABORT_STREAK=0
@@ -1192,7 +1192,7 @@ log_launch_config() {
 # estimate_speed_tok_s's physics-based guess -- see model_advisor.py's
 # save_calibration docstring, and the conversation history behind this feature: one
 # global SPEED_CORRECTION_FACTOR is already confirmed wrong by up to ~1.7x across
-# model families (HARDWARE_SPEED_ESTIMATION.md §17 item #2), so a real per-model,
+# model families (docs/HARDWARE_SPEED_ESTIMATION.md §17 item #2), so a real per-model,
 # per-chip measurement is strictly more trustworthy than the formula once one exists.
 #
 # Deliberately never allowed to block or fail teardown: a curl timeout, a server

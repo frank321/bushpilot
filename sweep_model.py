@@ -5,8 +5,8 @@ TTFT optimum, decode-speed-vs-context-depth curve, KV-bits decode-speed cost AT 
 CONTEXT, Automatic Prefix Caching (APC) hit-rate/correctness, tool-calling/multimodal/
 drafter re-verification, concurrency throughput, and a thermal-throttling check.
 
-See NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md for the full spec/rationale this implements
-("the sweep spec" section) and HARDWARE_SPEED_ESTIMATION.md §12/§13/§17/§19 for the
+See docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md for the full spec/rationale this implements
+("the sweep spec" section) and docs/HARDWARE_SPEED_ESTIMATION.md §12/§13/§17/§19 for the
 prior art each tier extends. Short version of WHY this exists: `start_mlx_server.sh`'s
 hardcoded `PREFILL_STEP_SIZE=2048` was derived from sweeping exactly 2 models on 1
 machine -- this script makes that a per-(chip, model) SELF-CALIBRATING measurement
@@ -22,7 +22,7 @@ prefill-step-size axis specifically, since `--prefill-step-size` is a server LAU
 flag, not a per-request parameter, so sweeping it requires relaunching the server with
 each candidate value. Every OTHER tier below reuses whichever one of those launches is
 still live rather than relaunching again, maximizing what gets measured per model-load
-per NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md's own stated priority.
+per docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md's own stated priority.
 
 Scope: mlx_vlm backend only (not mlx-dspark) -- mlx-dspark has no --prefill-step-size
 equivalent at all (it self-calibrates its own prefill path per machine+model+quant,
@@ -78,7 +78,7 @@ SWEEP_DIR = os.path.join(ma.CALIBRATION_DIR, "sweeps")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 38973
 
-# §12's exact 3 candidate values -- see HARDWARE_SPEED_ESTIMATION.md §12/§17 item #8
+# §12's exact 3 candidate values -- see docs/HARDWARE_SPEED_ESTIMATION.md §12/§17 item #8
 # for why these 3 and why the result (2048 lowest-TTFT, non-monotonic) is a measured
 # finding on 2 models/1 machine, not an understood-and-tuned optimum.
 DEFAULT_STEP_SIZES = [512, 2048, 4096]
@@ -172,7 +172,7 @@ def build_code_prompt(target_tokens, repo_file=None,
     every block after it too (prefix caching only reuses a BLOCK-SEQUENCE match
     starting from block 0; a mismatched first block means nothing downstream can
     match either, confirmed against this project's own APC description in
-    HARDWARE_SPEED_ESTIMATION.md §13). Exists because of a real bug confirmed live
+    docs/HARDWARE_SPEED_ESTIMATION.md §13). Exists because of a real bug confirmed live
     this session: APC_ENABLED=1 is unconditional in production (and in every
     SweepServer launch here, deliberately, to stay production-representative) and its
     DISK tier survives process restarts (§13's own "surviving the model-switch
@@ -249,7 +249,7 @@ def derive_lightweight_calibration_fields(sweep_data):
     """Condenses the rich sweep JSON into exactly the fields save_calibration() needs
     for the lightweight file (decode_tok_s/context_tokens/ttft_s/peak_memory_gb from
     the WINNING step size's own measured run, plus the 2 new optional keys) -- see
-    NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md's storage-design section for why these two
+    docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md's storage-design section for why these two
     files are kept deliberately separate. Returns a plain kwargs dict ready to
     **-expand into model_advisor.save_calibration(), or None if the sweep didn't even
     get far enough to produce a usable step-size measurement (e.g. every launch in
@@ -528,7 +528,7 @@ def memory_guard_ok(model_entry, safety_buffer_gb=ma.SAFETY_BUFFER_GB):
 
 def concurrency_memory_guard_ok(model_entry, context_tokens, concurrency, kv_bits,
                                  safety_buffer_gb=ma.SAFETY_BUFFER_GB):
-    """Tier 4's own safety rule (NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md remaining-work
+    """Tier 4's own safety rule (docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md remaining-work
     item #5): reuses compute_kv_formula directly (the exact same math
     compute_bonus_concurrency/recommend_max_context already trust) to check whether
     `concurrency` identically-sized slots at `context_tokens` each would ACTUALLY fit
@@ -560,7 +560,7 @@ def sweep_path(chip_name, model_id):
 def write_sweep_json(path, data):
     """Atomic write (tmp + os.replace), same pattern as model_advisor.save_calibration
     -- called after every tier completes so a crash mid-sweep never loses everything
-    already measured (NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md remaining-work item #3)."""
+    already measured (docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md remaining-work item #3)."""
     tmp_path = f"{path}.tmp"
     with open(tmp_path, "w") as f:
         json.dump(data, f, indent=2)
@@ -816,7 +816,7 @@ def run_apc_tier(model_entry, host, port, prefix_tokens, kv_bits_quantized):
     }
 
 
-# Mirrors the live methodology PROJECT_STATUS.md's "Live-tested tool-calling support"
+# Mirrors the live methodology docs/PROJECT_STATUS.md's "Live-tested tool-calling support"
 # section documents (a web_search tool schema, temperature=0, finish_reason check) --
 # the exact schema text was never committed verbatim anywhere in this repo, so this is
 # a faithful reconstruction of that description, not a copy of a committed fixture.
