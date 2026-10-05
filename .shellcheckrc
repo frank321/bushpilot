@@ -1,0 +1,27 @@
+# shellcheck configuration for this project. Disables below are deliberate,
+# not blanket suppressions -- see each one's reasoning.
+
+# SC2086 (double-quote to prevent word splitting): this project's kill/ps calls on
+# `$pids`/`$owner_pids` deliberately rely on word-splitting a lsof-produced,
+# space-separated list of PIDs into separate arguments (start_mlx_server.sh's
+# wait_for_port_free/wait_for_process_gone, uninstall.sh). Quoting them, as
+# shellcheck's own suggested fix would do, passes "123 456" as one malformed PID
+# instead of two -- the fix would break the exact behavior being relied on.
+disable=SC2086
+
+# SC2329 (function never invoked): verify_max_kv_size.sh's and
+# verify_long_context_memory.sh's cleanup() is invoked via `trap cleanup EXIT INT
+# TERM` -- shellcheck doesn't track trap-based invocation.
+disable=SC2329
+
+# SC2034 (variable appears unused): a few config constants (start_mlx_server.sh's
+# MEM_WARN_BELOW_PCT/MEM_CAUTION_BELOW_PCT, launch_tool.sh's PRELOAD_TOTAL, the
+# KV_BITS field in launch_tool.sh's `IFS='|' read -r MLX_MODEL CONTEXT_WINDOW
+# KV_BITS` state-file parse) are either reserved for a not-yet-built warning tier
+# or a positional field that must be named to parse the line correctly even though
+# nothing reads it afterward. Disabled project-wide, not just at those sites --
+# the real tradeoff is that a genuinely dead variable added later won't be caught
+# by CI either; this project's style leans on inline comments to explain every
+# constant's purpose (see e.g. MIN_USABLE_CONTEXT's own comment in
+# bushpilot/kv.py) rather than on a linter to prove it's read somewhere.
+disable=SC2034

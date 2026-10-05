@@ -268,7 +268,8 @@ is_command_available() { command -v "$1" > /dev/null 2>&1; }
 # assuming — checked in the order a user is most likely to already have on $PATH.
 # ---------------------------------------------------------------------------
 ensure_symlinked_on_path() {
-    local target_name="$(basename "$SCRIPT_PATH")"
+    local target_name
+    target_name="$(basename "$SCRIPT_PATH")"
     local candidate
 
     # Already reachable by name on $PATH (whether via this exact symlink or otherwise)

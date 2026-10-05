@@ -53,24 +53,34 @@ Skip the pickers for scripting:
 
 | File | Purpose |
 |---|---|
-| `start_mlx_server.sh` | Brings up the model server, shows the dashboard, enforces the memory backstop |
+| `start_mlx_server.sh` | Brings up the model server, shows the dashboard, enforces the memory + backend-liveness backstops |
 | `launch_tool.sh` | Attaches Claude Code, OpenCode, Aider, Cline, or Pi to the running server |
-| `model_advisor.py` | Hardware detection and per-model context/speed recommendations |
+| `model_advisor.py` | Thin shim over `bushpilot/` (hardware detection and per-model context/speed recommendations) |
+| `bushpilot/` | The advisor's logic, one concern per module -- see `AGENTS.md` for the breakdown |
 | `models.json` | The curated model catalog |
 | `uninstall.sh` | Removes the running server, `~/.bushpilot`, the OpenCode provider registration, PATH symlinks, and this project folder |
 | `add_model.py` | Generates an untested `models.json` entry from a Hugging Face repo id, URL, or model name (`--write` to append) |
 | `verify_max_kv_size.sh`, `verify_long_context_memory.sh` | Verification tools behind the catalog's tested data |
-| `docs/` | GitHub Pages site and release bundle build |
-| `tests/` | Unit tests for `model_advisor.py`'s recommendation math and picker layout (see Tests below) |
+| `docs/` | GitHub/GitLab Pages site, release bundle build, and this project's research/history docs |
+| `tests/` | `pytest` suite (`bushpilot`'s recommendation math and picker layout) + `tests/shell/` bats suite (shell backstops) -- see Tests below |
+| `ci.sh` | Runs the full pytest + ruff + shellcheck + bats suite locally (same checks as CI) |
 
 ## Tests
 
-`tests/` covers `model_advisor.py`'s pure logic -- the memory/context/speed recommendation math, the picker's terminal-width-aware column layout, and its sort state machine -- with synthetic chip/memory inputs, no real Apple Silicon required:
+`tests/` covers `bushpilot`'s pure logic -- the memory/context/speed recommendation math, the picker's terminal-width-aware column layout, and its sort state machine -- with synthetic chip/memory inputs, no real Apple Silicon required:
 
 ```bash
 pip install -r requirements-dev.txt
 pytest
 ```
+
+`tests/shell/` covers `start_mlx_server.sh`'s memory and backend-liveness backstops (the consecutive-polls debounce that must never tear down a session over one transient blip) by extracting their real function bodies into an isolated, hermetic bats fixture -- no real server, no real memory pressure:
+
+```bash
+bats tests/shell/
+```
+
+`./ci.sh` runs both of the above plus `ruff` and `shellcheck`, skipping whichever of those two isn't installed locally (CI always has all four).
 
 This is deliberately separate from `verify_max_kv_size.sh` / `verify_long_context_memory.sh`, which check things no unit test can (whether `mlx_vlm.server` itself enforces its own flags on real hardware) and need a real Mac + a downloaded model to run.
 

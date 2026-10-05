@@ -7,7 +7,7 @@ backstop, and attachers for Claude Code / OpenCode / Aider / Cline / Pi.
 ## Run / test
 
 ```bash
-pip install -r requirements-dev.txt   # pytest
+pip install -r requirements-dev.txt   # pytest, ruff
 pytest                                # pure-logic suite, no Apple Silicon needed
 bats tests/shell                      # shell backstop safety logic (needs `bats`)
 shellcheck *.sh                       # if installed
@@ -33,6 +33,8 @@ in CI or on any non-Mac machine.
 | `verify_max_kv_size.sh`, `verify_long_context_memory.sh` | Live-hardware verification behind the catalog's tested data |
 | `tests/` | `pytest` suite (advisor math, picker layout/sort, sweep harness) + `tests/shell/` bats suite (bash backstops) |
 | `docs/` | GitHub/GitLab Pages site, release-bundle build (`build_release.sh`), and the project's research/history docs |
+| `ci.sh`, `.github/workflows/ci.yml` | pytest + ruff + shellcheck + bats, run locally or on push/PR |
+| `pyproject.toml`, `.shellcheckrc` | ruff and shellcheck config, each with inline reasoning for every disabled check |
 
 ## Invariants — do not break
 

@@ -123,7 +123,8 @@ check_tool_installed() { is_command_available "$(tool_command "$1")"; }
 
 # Same "on writable $PATH" pattern as start_mlx_server.sh's ensure_symlinked_on_path.
 ensure_symlinked_on_path() {
-    local target_name="$(basename "$SCRIPT_PATH")"
+    local target_name
+    target_name="$(basename "$SCRIPT_PATH")"
     local candidate
     if is_command_available "$target_name"; then
         return 0
