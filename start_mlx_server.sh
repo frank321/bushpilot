@@ -216,6 +216,20 @@ MEM_CAUTION_BELOW_PCT=25
 MEM_ABORT_CONSECUTIVE_POLLS=3
 MEM_CRITICAL_CONSECUTIVE_POLLS=3
 
+# Backend-liveness backstop: distinct from the memory-pressure backstop above --
+# this catches the backend process (mlx_vlm.server / mlx-dspark) dying or getting its
+# port stolen for reasons that have NOTHING to do with memory (an unhandled exception,
+# a signal from outside this script, etc.). Found live (2026-10-03): a server crashed
+# silently with no traceback in the log, and the dashboard loop kept polling and
+# rendering happily for 2.5+ hours afterward because check_memory_backstop() only ever
+# looks at system memory pressure, never at whether the backend itself is still there --
+# render_dashboard's own /metrics curl already fails silently in that case (falls back
+# to '{}', just renders dashes), so there was no visible signal at all that every tool
+# pointed at this server was failing to connect. Same consecutive-polls debounce
+# pattern as the memory checks, to absorb one slow/transient health check rather than
+# tearing down on a single blip.
+BACKEND_DOWN_CONSECUTIVE_POLLS=2
+
 DASHBOARD_POLL_INTERVAL=5
 
 # Respect an already-set SSL_CERT_FILE (e.g. a corporate TLS-interception-aware
@@ -1098,6 +1112,7 @@ ensure_mlx_running() {
 DASHBOARD_START_TS=$(date +%s)
 MEM_ABORT_STREAK=0
 MEM_CRITICAL_STREAK=0
+BACKEND_DOWN_STREAK=0
 TEARDOWN_REASON=""
 CONTEXT_WARNING_PENDING=""
 
@@ -1552,6 +1567,27 @@ check_memory_backstop() {
     return 0
 }
 
+# Catches the backend dying (or its port getting stolen) for any reason OTHER than
+# memory pressure -- see the comment at BACKEND_DOWN_CONSECUTIVE_POLLS above for the
+# live incident this fixes. Deliberately checks BOTH /health reachability and that the
+# expected process still owns the port: a dead backend fails the curl; a backend that
+# got its port stolen out from under it (e.g. something else bound to $MLX_PORT after
+# ours exited) would still make SOME /health call succeed, just not against our process.
+check_backend_alive() {
+    if curl -fsS --max-time 3 "http://$MLX_HOST:$MLX_PORT/health" > /dev/null 2>&1 \
+        && mlx_port_owner_is_expected; then
+        BACKEND_DOWN_STREAK=0
+        return 0
+    fi
+
+    BACKEND_DOWN_STREAK=$((BACKEND_DOWN_STREAK + 1))
+    if [[ "$BACKEND_DOWN_STREAK" -ge "$BACKEND_DOWN_CONSECUTIVE_POLLS" ]]; then
+        TEARDOWN_REASON="Backend not responding on $MLX_HOST:$MLX_PORT for ${BACKEND_DOWN_STREAK} consecutive checks (process died or port was taken over) -- stopping. Check $MLX_LOG_FILE for the last thing it logged before this."
+        return 1
+    fi
+    return 0
+}
+
 warn_if_context_exceeds_recommendation() {
     # Only meaningful in the fixed-model form (interactive mode derived CONTEXT_WINDOW
     # FROM the advisor, so it can't exceed it). No LOCAL_MODEL id means we can't look
@@ -1608,6 +1644,11 @@ run_dashboard() {
 
     while true; do
         if ! check_memory_backstop; then
+            render_dashboard
+            full_teardown "$TEARDOWN_REASON"
+        fi
+
+        if ! check_backend_alive; then
             render_dashboard
             full_teardown "$TEARDOWN_REASON"
         fi
