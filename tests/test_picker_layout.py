@@ -10,12 +10,14 @@ narrow terminal) -- every one of those would have been caught immediately by the
 important invariant in this file; the rest are supporting unit tests for the pieces
 that invariant is built from.
 """
+import pytest
+
 import model_advisor as ma
+
 # use_color is read at call time by format_compact_header_row/format_model_compact_row,
 # both defined in bushpilot/picker/display.py -- same reasoning as calibration.py's
 # CALIBRATION_DIR in test_recommendation_math.py: patch it where it's actually looked up.
 from bushpilot.picker import display as _display
-
 
 # --- compact_row_widths ---------------------------------------------------------------
 
@@ -136,8 +138,6 @@ def test_truncate_cell_width_one_has_no_room_for_ellipsis():
 
 
 # --- end-to-end rendering: the invariant that matters most --------------------------
-
-import pytest
 
 
 @pytest.mark.parametrize("term_width", [20, 40, 54, 60, 72, 73, 85, 97, 118, 129, 130, 160, 250])

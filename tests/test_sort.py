@@ -4,7 +4,6 @@ grouping.
 """
 import model_advisor as ma
 
-
 # --- next_sort: the state machine behind click-to-sort and resize-safe reloads -----
 
 def test_next_sort_defaults_to_released_ascending_with_no_prior_state(tmp_path):

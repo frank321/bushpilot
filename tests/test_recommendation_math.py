@@ -15,13 +15,13 @@ and cross-checked by running the real functions once to confirm (see the session
 added this file) -- not copied from a prior implementation that could itself be wrong.
 """
 import model_advisor as ma
+
 # CALIBRATION_DIR is a module global read at call time by the functions defined in
 # bushpilot/calibration.py (load_calibration/save_calibration/_calibration_path) --
 # monkeypatching ma.CALIBRATION_DIR wouldn't reach them (different module, different
 # __dict__), even though ma.save_calibration IS bushpilot.calibration.save_calibration
 # (same function object). Patch it where those functions actually look it up.
 from bushpilot import calibration as _calibration
-
 
 # --- effective_size_gb --------------------------------------------------------------
 

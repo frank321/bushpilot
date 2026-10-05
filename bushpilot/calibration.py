@@ -6,7 +6,6 @@ import os
 import re
 from datetime import datetime, timezone
 
-
 # Per-machine learned measurements, one JSON file per (chip, model id) pair -- see
 # save_calibration/load_calibration below. Mirrors ~/.bushpilot's other state (the bash
 # side's BUSHPILOT_HOME) without model_advisor.py needing to import or shell out to it.

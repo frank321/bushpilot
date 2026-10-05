@@ -3,7 +3,6 @@ overridden by a real per-(chip, model) calibration measurement when one exists
 (see load_calibration)."""
 from .calibration import load_calibration
 
-
 # Sourced in docs/HARDWARE_SPEED_ESTIMATION.md §4 — cross-checked across two independent
 # sources for M5 Pro/Max specifically; M1-M4 figures are long-established/widely
 # reproduced. Treat M5-and-later as less certain (documented there, not repeated here).

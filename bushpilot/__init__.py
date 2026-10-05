@@ -89,7 +89,11 @@ from .picker.sort import (
     sort_key_for_click,
     sort_rows,
 )
-from .prefill import DEFAULT_PREFILL_STEP_SIZE, PREFILL_STEP_SIZE_MEMORY_MARGIN, recommend_prefill_step_size
+from .prefill import (
+    DEFAULT_PREFILL_STEP_SIZE,
+    PREFILL_STEP_SIZE_MEMORY_MARGIN,
+    recommend_prefill_step_size,
+)
 from .preload import (
     MCP_SERVER_TOKENS_ESTIMATE,
     TOOL_BASELINE_PRELOAD_TOKENS,
@@ -99,7 +103,12 @@ from .preload import (
     measure_mcp_servers,
     measure_skills_preload,
 )
-from .recommend import AUTO_MAX_CONCURRENCY, MIN_SPEED_TOK_S, build_recommendations, compute_bonus_concurrency
+from .recommend import (
+    AUTO_MAX_CONCURRENCY,
+    MIN_SPEED_TOK_S,
+    build_recommendations,
+    compute_bonus_concurrency,
+)
 from .speed import CHIP_BANDWIDTH_GB_S, SPEED_CORRECTION_FACTOR, estimate_speed_tok_s
 
 __all__ = [

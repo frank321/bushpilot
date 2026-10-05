@@ -1,0 +1,22 @@
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes (unused imports/names, undefined names, etc.)
+    "W",   # pycodestyle warnings
+    "I",   # isort (import ordering)
+    "UP",  # pyupgrade
+    "B",   # bugbear (common real-world bugs)
+]
+ignore = [
+    "E501",  # line length -- the catalog/advisor prose comments run long on purpose;
+             # enforced loosely via line-length above, not hard-failed per line
+]
+
+[tool.ruff.lint.per-file-ignores]
+# model_advisor.py is a deliberate re-export shim (see its own docstring) --
+# the star import and the resulting "undefined" main() are both intentional.
+"model_advisor.py" = ["F403", "F405"]

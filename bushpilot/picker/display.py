@@ -11,11 +11,20 @@ from ..kv import MIN_USABLE_CONTEXT, SAFETY_BUFFER_GB, effective_size_gb
 from ..preload import MCP_SERVER_TOKENS_ESTIMATE
 from ..recommend import MIN_SPEED_TOK_S
 from .cells import (
-    COL_CTX, COL_ENGINE, COL_KV, COL_LAST, COL_NAME, COMPACT_HEADERS, COMPACT_RIGHT_ALIGNED,
-    _truncate_cell, cap_name_width, compact_row_cells, compact_row_widths, visible_columns,
+    COL_CTX,
+    COL_ENGINE,
+    COL_KV,
+    COL_LAST,
+    COL_NAME,
+    COMPACT_HEADERS,
+    COMPACT_RIGHT_ALIGNED,
+    _truncate_cell,
+    cap_name_width,
+    compact_row_cells,
+    compact_row_widths,
+    visible_columns,
 )
 from .sort import COLUMN_SORT_KEYS, next_sort, sort_key_for_click, sort_rows
-
 
 DIM = "\033[2m"
 BOLD = "\033[1m"

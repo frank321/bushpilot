@@ -1,10 +1,14 @@
 """Combines kv/speed/prefill into one row per model -- build_recommendations() is
 the advisor's main entry point, called once per launch with the full catalog."""
-from .kv import SAFETY_BUFFER_GB, UNQUANTIZED_KV_BITS, compute_kv_formula, effective_size_gb, \
-    recommend_kv_bits_and_context
+from .kv import (
+    SAFETY_BUFFER_GB,
+    UNQUANTIZED_KV_BITS,
+    compute_kv_formula,
+    effective_size_gb,
+    recommend_kv_bits_and_context,
+)
 from .prefill import recommend_prefill_step_size
 from .speed import estimate_speed_tok_s
-
 
 # Decided 2026-09-29 (docs/PHASE_PLAN.md Phase 5): build_recommendations() previously gated
 # a model's availability purely on memory fit -- estimated_tok_s was computed and shown

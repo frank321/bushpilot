@@ -1,14 +1,16 @@
 """Sort-key state machine for --list-compact: fzf header clicks map to a sort key
 (sort_key_for_click), applying it orders the rows (sort_rows), and the active sort
 persists across reloads (next_sort)."""
-import os
-
 from ..kv import UNQUANTIZED_KV_BITS
 from .cells import (
-    COL_LAST, COMPACT_HEADERS, compact_row_cells, model_display_name, model_drafter_label,
-    model_engine, model_tools_label,
+    COL_LAST,
+    COMPACT_HEADERS,
+    compact_row_cells,
+    model_display_name,
+    model_drafter_label,
+    model_engine,
+    model_tools_label,
 )
-
 
 SORT_KEYS = ("released", "speed", "size", "name", "type", "engine", "drafter", "input",
              "tools", "context", "kv")

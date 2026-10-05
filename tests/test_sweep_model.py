@@ -14,12 +14,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-import pytest
-
-import model_advisor as ma
-import sweep_model as sm
-from bushpilot import calibration as _calibration
-
+import model_advisor as ma  # noqa: E402 -- must follow the sys.path.insert above
+import sweep_model as sm  # noqa: E402
+from bushpilot import calibration as _calibration  # noqa: E402
 
 # --- prompt builders -----------------------------------------------------------------
 

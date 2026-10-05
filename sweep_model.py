@@ -479,7 +479,6 @@ class SweepServer:
         logf = open(self.log_path, "a")
         self.proc = subprocess.Popen(args, stdout=logf, stderr=subprocess.STDOUT, env=env)
         _ACTIVE_SERVERS.append(self)
-        start = time.monotonic()
         healthy, elapsed = wait_for_health(self.host, self.port, self.proc.pid, timeout_s=timeout_s)
         self.load_time_s = elapsed
         if not healthy:

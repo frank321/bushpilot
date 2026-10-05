@@ -5,7 +5,6 @@ import json
 import os
 import re
 
-
 # --- Tool preload-overhead estimation ---------------------------------------------
 #
 # Claude Code and OpenCode both load a system prompt, built-in tool schemas, any

@@ -4,7 +4,6 @@ docstring for the memory-safety check this applies to a calibrated value."""
 from .calibration import load_calibration
 from .kv import SAFETY_BUFFER_GB
 
-
 # Mirrors start_mlx_server.sh's own PREFILL_STEP_SIZE default -- two separate copies of the
 # same number deliberately, not a shared constant imported across the bash/python boundary:
 # bash owns the actual launch flag, this is only the fallback recommend_prefill_step_size

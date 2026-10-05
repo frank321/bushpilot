@@ -18,9 +18,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-import pytest
+import pytest  # noqa: E402 -- must follow the sys.path.insert above
 
-import model_advisor as ma
+import model_advisor as ma  # noqa: E402
 
 
 @pytest.fixture
