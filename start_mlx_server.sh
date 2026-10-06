@@ -1496,6 +1496,18 @@ def num(v, default="—"):
 def rate(v, default="—"):
     return f"{v:.1f}" if isinstance(v, (int, float)) else default
 
+# mlx_vlm's own token_hit_rate (below) is matched_tokens / (matched_tokens +
+# stored_tokens) -- same ratio in spirit, but derived here from the same two raw
+# counts this line displays (prompt/reused) rather than trusting a second,
+# separately-computed server-side field to stay in lockstep with them. Mirrors the
+# mlx-dspark dashboard branch's own pct_ratio (that one has no server-computed hit
+# rate to fall back on at all -- mlx_vlm's APC is the one backend that already had
+# this, just not displayed next to the raw counts it's built from).
+def pct_ratio(numerator, denominator, default="—"):
+    if not isinstance(numerator, (int, float)) or not isinstance(denominator, (int, float)) or denominator <= 0:
+        return default
+    return f"{numerator / denominator * 100:.1f}%"
+
 W = 90
 def line(s=""):
     s = s[:W - 4]
@@ -1526,8 +1538,7 @@ line(f"context {context}   concurrency {concurrency}   APC: {'on' if apc_on == '
 rule()
 line(f"REQUESTS        completed {num(summary.get('requests_completed'), 0)}   "
      f"failed {num(summary.get('requests_failed'), 0)}   in-flight {num(summary.get('in_flight'), 0)}")
-line(f"LIFETIME        prompt {num(summary.get('prompt_tokens_total'), 0)} tok   "
-     f"generated {num(summary.get('generated_tokens_total'), 0)} tok   "
+line(f"LIFETIME        generated {num(summary.get('generated_tokens_total'), 0)} tok   "
      f"avg decode {rate(summary.get('avg_decode_tok_s'), '—')} tok/s")
 rule()
 line(f"LATEST REQUEST  prefill {rate(latest.get('prefill_tok_s'))} tok/s   "
@@ -1541,6 +1552,9 @@ hit_rate = cache.get("token_hit_rate")
 hit_rate_s = f"{hit_rate*100:.0f}%" if isinstance(hit_rate, (int, float)) else "—"
 line(f"APC CACHE       hit rate {hit_rate_s}   hits {num(hits, 0)} / misses {num(misses, 0)}   "
      f"evictions {num(cache.get('evictions'), 0)}")
+line(f"                prompt {num(summary.get('prompt_tokens_total'), 0)} tok   "
+     f"reused {num(cache.get('matched_tokens'), 0)} tok   "
+     f"cached {pct_ratio(cache.get('matched_tokens'), summary.get('prompt_tokens_total'))}")
 line(f"                mem pool {num(cache.get('pool_used'), 0)}/{num(cache.get('num_blocks'), 0)} blocks   "
      f"disk {gb(cache.get('disk_bytes'))}/{gb(cache.get('disk_max_bytes'))} GB")
 rule()
