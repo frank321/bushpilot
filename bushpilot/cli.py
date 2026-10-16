@@ -42,6 +42,7 @@ def emit_selection_json(m, selected):
         "recommended_context": selected["recommended_context"],
         "kv_bits": selected["kv_bits"],
         "kv_bits_apc_caveat": selected["kv_bits_apc_caveat"],
+        "apc_num_blocks": selected.get("apc_num_blocks"),
         "estimated_tok_s": selected["estimated_tok_s"],
         "concurrency": selected["concurrency"],
         "prefill_step_size": selected["prefill_step_size"],

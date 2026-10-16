@@ -1,8 +1,10 @@
 """Combines kv/speed/prefill into one row per model -- build_recommendations() is
 the advisor's main entry point, called once per launch with the full catalog."""
 from .kv import (
+    DEFAULT_KV_GROUP_SIZE,
     SAFETY_BUFFER_GB,
     UNQUANTIZED_KV_BITS,
+    compute_drafter_kv_formula,
     compute_kv_formula,
     effective_size_gb,
     mlx_vlm_apc_pool_bytes,
@@ -35,7 +37,8 @@ AUTO_MAX_CONCURRENCY = 4
 
 
 def compute_bonus_concurrency(model_entry, free_wired_gb, kv_bits_used, recommended_context,
-                               safety_buffer_gb=SAFETY_BUFFER_GB, prefix_cache_slots=None):
+                               safety_buffer_gb=SAFETY_BUFFER_GB, prefix_cache_slots=None,
+                               apc_num_blocks=None):
     """Auto mode (no explicit concurrency requested): recommend_kv_bits_and_context has
     already picked the max context for ONE slot, rounded DOWN to a clean tier (see
     recommend_max_context's own tiering comment) -- which almost always leaves some
@@ -53,11 +56,18 @@ def compute_bonus_concurrency(model_entry, free_wired_gb, kv_bits_used, recommen
     bonus slot."""
     if recommended_context is None:
         return 1
-    formula = compute_kv_formula(model_entry.get("kv_config"),
-                                  kv_bits_used if kv_bits_used is not None else UNQUANTIZED_KV_BITS)
+    kv_bits = kv_bits_used if kv_bits_used is not None else UNQUANTIZED_KV_BITS
+    kv_group_size = DEFAULT_KV_GROUP_SIZE if kv_bits < UNQUANTIZED_KV_BITS else None
+    formula = compute_kv_formula(model_entry.get("kv_config"), kv_bits, kv_group_size=kv_group_size)
     if formula is None:
         return 1
-    raw_bytes_per_growing_token, fixed_bytes, _ = formula
+    target_bytes_per_growing_token, fixed_bytes, _ = formula
+    drafter_growing, drafter_fixed = compute_drafter_kv_formula(
+        model_entry, kv_bits=kv_bits, kv_group_size=kv_group_size,
+    )
+    raw_bytes_per_growing_token = target_bytes_per_growing_token + drafter_growing
+    fixed_bytes += drafter_fixed
+
     cache_multiplier = prefix_cache_cost_multiplier(model_entry, prefix_cache_slots)
     bytes_per_growing_token = raw_bytes_per_growing_token * cache_multiplier
     fixed_bytes *= cache_multiplier
@@ -65,7 +75,9 @@ def compute_bonus_concurrency(model_entry, free_wired_gb, kv_bits_used, recommen
     if per_slot_bytes <= 0:
         return 1
 
-    apc_pool_bytes = mlx_vlm_apc_pool_bytes(model_entry, raw_bytes_per_growing_token)
+    apc_pool_bytes = mlx_vlm_apc_pool_bytes(
+        model_entry, raw_bytes_per_growing_token, apc_num_blocks=apc_num_blocks,
+    )
     available_bytes = (free_wired_gb - effective_size_gb(model_entry) - safety_buffer_gb) * 1024**3
     available_bytes -= apc_pool_bytes
     remaining = available_bytes - per_slot_bytes
@@ -117,6 +129,7 @@ def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_o
             concurrency = compute_bonus_concurrency(
                 m, free_wired_gb, kv_result["kv_bits"], kv_result["recommended_context"],
                 prefix_cache_slots=dspark_prefix_cache_slots,
+                apc_num_blocks=kv_result.get("apc_num_blocks"),
             )
 
         prefill_step_size, prefill_step_size_reason = recommend_prefill_step_size(
@@ -130,6 +143,7 @@ def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_o
             "kv_formula_detail": kv_result["kv_formula_detail"],
             "kv_bits": kv_result["kv_bits"],
             "kv_bits_apc_caveat": kv_result["kv_bits_apc_caveat"],
+            "apc_num_blocks": kv_result.get("apc_num_blocks"),
             "estimated_tok_s": speed,
             "speed_reason": speed_reason,
             "context_after_preload": kv_result["context_after_preload"],

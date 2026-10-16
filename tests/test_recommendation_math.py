@@ -680,3 +680,144 @@ def test_estimate_preload_overhead_includes_skills_and_mcp_for_claude(tmp_path, 
     assert res["mcp_tokens"] == 3 * ma.MCP_SERVER_TOKENS_ESTIMATE
     assert res["mcp_count"] == 3
     assert res["total"] == res["baseline_tokens"] + res["doc_tokens"] + 3500 + 3 * ma.MCP_SERVER_TOKENS_ESTIMATE
+
+
+# --- Quantization group overhead, Gemma 4 KV geometry, drafter KV, smart 8-bit upgrade, dynamic APC, Metal cap
+
+def test_compute_kv_formula_includes_quantization_group_overhead():
+    kv_config = {
+        "num_key_value_heads": 2, "head_dim": 256, "num_hidden_layers": 8,
+        "layer_types": ["linear_attention"] * 6 + ["full_attention"] * 2,
+    }
+    bytes_no_group, _, _ = ma.compute_kv_formula(kv_config, kv_bits=8, kv_group_size=None)
+    bytes_with_group, _, detail = ma.compute_kv_formula(
+        kv_config, kv_bits=8, kv_group_size=ma.DEFAULT_KV_GROUP_SIZE)
+    assert bytes_no_group == 2048.0
+    # 8-bit with group_size=64 adds 4 bytes (FP16 scale + bias) per 64 elements = +6.25%
+    assert bytes_with_group == 2048.0 * 1.0625 == 2176.0
+    assert detail["kv_group_size"] == 64
+
+
+def test_compute_kv_formula_gemma4_per_layer_geometry_and_shared_kv_layers():
+    # Gemma 4 E4B shape: 42 layers total, last 18 share earlier KV caches (24 unique:
+    # 20 sliding_attention @ 2 heads x 256 dim + 4 full_attention @ 2 heads x 512 dim).
+    gemma4_e4b_kv = {
+        "num_key_value_heads": 2,
+        "head_dim": 256,
+        "global_head_dim": 512,
+        "num_hidden_layers": 42,
+        "num_kv_shared_layers": 18,
+        "sliding_window": 512,
+        "layer_types": (["sliding_attention"] * 5 + ["full_attention"]) * 7,
+    }
+    bytes_per_token, fixed_bytes, detail = ma.compute_kv_formula(gemma4_e4b_kv, kv_bits=16)
+    assert detail["num_kv_shared_layers"] == 18
+    assert detail["growing_layers"] == 4
+    assert detail["sliding_layers"] == 20
+    # 4 unique full_attention layers * 2 K/V * 2 heads * 512 global_head_dim * 2 bytes = 16,384 B/tok
+    assert bytes_per_token == 16384.0
+    # 20 unique sliding_attention layers * 2 K/V * 2 heads * 256 head_dim * 2 bytes * 512 window = 20,971,520 B
+    assert fixed_bytes == 20971520.0
+
+    # Gemma 4 31B shape: sliding layers have 16 heads x 256 dim, full layers have 4 heads x 512 dim
+    gemma4_31b_kv = {
+        "num_key_value_heads": 16,
+        "head_dim": 256,
+        "global_head_dim": 512,
+        "num_global_key_value_heads": 4,
+        "num_hidden_layers": 6,
+        "sliding_window": 1024,
+        "layer_types": ["sliding_attention"] * 5 + ["full_attention"],
+    }
+    bpt_31b, fixed_31b, _ = ma.compute_kv_formula(gemma4_31b_kv, kv_bits=16)
+    # 1 full_attention layer * 2 K/V * 4 global_kv_heads * 512 global_head_dim * 2 bytes = 8,192 B/tok
+    assert bpt_31b == 8192.0
+    # 5 sliding_attention layers * 2 K/V * 16 kv_heads * 256 head_dim * 2 bytes * 1024 window = 83,886,080 B
+    assert fixed_31b == 83886080.0
+
+
+def test_compute_drafter_kv_formula_and_recommend_max_context_includes_drafter_kv(drafter_model):
+    drafter_with_kv = {
+        **drafter_model,
+        "serving": {
+            **drafter_model["serving"],
+            "drafter_kv_config": {
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "num_hidden_layers": 5,
+                "sliding_window": 2048,
+                "layer_types": ["sliding_attention"] * 4 + ["full_attention"],
+            },
+        },
+    }
+    d_bpt, d_fixed = ma.compute_drafter_kv_formula(drafter_with_kv, kv_bits=16)
+    # 1 growing layer * 2 K/V * 8 heads * 128 dim * 2 bytes = 4096 B/tok
+    assert d_bpt == 4096.0
+    # 4 sliding layers * 2 K/V * 8 heads * 128 dim * 2 bytes * 2048 window = 33,554,432 B
+    assert d_fixed == 33554432.0
+
+    ctx_without, _, detail_without = ma.recommend_max_context(drafter_model, free_wired_gb=9.5)
+    ctx_with, _, detail_with = ma.recommend_max_context(drafter_with_kv, free_wired_gb=9.5)
+    assert detail_without["drafter_bytes_per_growing_token"] == 0.0
+    assert detail_with["drafter_bytes_per_growing_token"] == 4096.0
+    assert detail_with["drafter_fixed_bytes"] == 33554432.0
+    assert ctx_with < ctx_without
+
+
+def test_recommend_kv_bits_and_context_upgrades_to_8bit_when_unquantized_is_stuck_at_16k(dense_model):
+    # At 9.64 GB free:
+    # - Unquantized (16-bit): 0.34 GB for KV -> minus 0.25 GB APC pool = 0.09 GB -> ~23,592 raw -> 16,384 tier.
+    # - 8-bit (with group_size=64): APC pool drops to ~0.133 GB, per-token cost drops to 2,176 B -> 65,536 tier.
+    # Because 16,384 < COMFORTABLE_UNQUANTIZED_CONTEXT (32,768) and dense_model has no SWA layers,
+    # recommend_kv_bits_and_context upgrades to 8-bit KV to unlock 64k context.
+    ctx_16, _, _ = ma.recommend_max_context(dense_model, free_wired_gb=9.64, kv_bits=16)
+    assert ctx_16 == 16384
+    result = ma.recommend_kv_bits_and_context(dense_model, free_wired_gb=9.64)
+    assert result["fits"] is True
+    assert result["kv_bits"] == ma.MEMORY_CONSTRAINED_KV_BITS == 8
+    assert result["recommended_context"] == 65536
+    assert result["apc_num_blocks"] == ma.MLX_VLM_APC_NUM_BLOCKS
+
+
+def test_recommend_kv_bits_and_context_does_not_upgrade_to_8bit_when_sliding_window_present(sliding_window_model):
+    # When a model has sliding-window layers, upgrading from working 16k unquantized KV
+    # to 8-bit KV would trigger the mlx-vlm #1559 APC+SWA+quantized-KV caveat, so keep
+    # unquantized 16k when it fits.
+    ctx_16, _, _ = ma.recommend_max_context(sliding_window_model, free_wired_gb=7.84, kv_bits=16)
+    assert ctx_16 == 16384
+    result = ma.recommend_kv_bits_and_context(sliding_window_model, free_wired_gb=7.84)
+    assert result["fits"] is True
+    assert result["kv_bits"] is None
+    assert result["recommended_context"] == 16384
+    assert result["kv_bits_apc_caveat"] is False
+
+
+def test_recommend_kv_bits_and_context_scales_down_apc_num_blocks_on_tight_memory(dense_model):
+    # At 9.42 GB free (0.12 GB for KV after 6.3 GB weights + 3.0 GB safety buffer):
+    # Full 4096-block APC pool costs ~0.133 GB even at 8-bit KV, exceeding 0.12 GB.
+    # Scaling APC down to MLX_VLM_APC_CONSTRAINED_NUM_BLOCKS (1024 blocks = ~0.033 GB)
+    # leaves ~0.087 GB for the live KV cache -> fits cleanly at 32,768 tokens!
+    ctx_full_apc, _, _ = ma.recommend_max_context(
+        dense_model, free_wired_gb=9.42, kv_bits=8,
+        apc_num_blocks=ma.MLX_VLM_APC_NUM_BLOCKS)
+    assert ctx_full_apc is None
+
+    result = ma.recommend_kv_bits_and_context(dense_model, free_wired_gb=9.42)
+    assert result["fits"] is True
+    assert result["kv_bits"] == 8
+    assert result["apc_num_blocks"] == ma.MLX_VLM_APC_CONSTRAINED_NUM_BLOCKS == 1024
+    assert result["recommended_context"] == 32768
+
+
+def test_cap_free_by_metal_limit_enforces_metal_wired_ceiling(monkeypatch):
+    from bushpilot import hardware as _hw
+    monkeypatch.setattr(_hw, "get_metal_wired_limit_gb", lambda total_ram_gb=None: 49.92)
+    # 64 GB total RAM, 89% memorystatus_level -> 56.96 GB OS-reported free.
+    # With a 49.92 GB Metal wired limit (78% of 64 GB) + 3.0 GB safety buffer = 52.92 GB,
+    # _cap_free_by_metal_limit clamps raw_free_gb so available_gb after subtracting
+    # SAFETY_BUFFER_GB never exceeds 49.92 GB.
+    capped = _hw._cap_free_by_metal_limit(total_ram_gb=64.0, raw_free_gb=56.96)
+    assert capped == 49.92 + ma.SAFETY_BUFFER_GB
+    # When OS free memory is already below the Metal wired ceiling + buffer, OS free wins.
+    assert _hw._cap_free_by_metal_limit(total_ram_gb=64.0, raw_free_gb=30.0) == 30.0
+

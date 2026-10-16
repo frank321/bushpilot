@@ -4,9 +4,50 @@ get_current_wired_gb's docstring for why)."""
 import subprocess
 import sys
 
+from .kv import SAFETY_BUFFER_GB
+
+# When `sysctl iogpu.wired_limit_mb` is 0 (macOS's default: no custom override), Metal's
+# `max_recommended_working_set_size` caps GPU wired allocations to ~78% of physical RAM
+# (e.g. 37.44 GiB on a 48 GiB M5 Pro). Even if `kern.memorystatus_level` reports 85-90%
+# free on a freshly booted machine, MLX cannot wire more than this Metal ceiling without
+# hitting `[metal::malloc]` buffer allocation errors.
+DEFAULT_METAL_WIRED_LIMIT_FRACTION = 0.78
+
 
 def log(msg):
     print(msg, file=sys.stderr)
+
+
+def get_metal_wired_limit_gb(total_ram_gb=None):
+    """Maximum GPU wired memory (in GiB) macOS Metal will allow MLX to allocate.
+
+    Reads `sysctl -n iogpu.wired_limit_mb` first so a power user who explicitly raised
+    (or lowered) the kernel cap via `sudo sysctl iogpu.wired_limit_mb=...` gets their
+    exact limit honored. When that sysctl is 0 (the macOS default) or unreadable, falls
+    back to `DEFAULT_METAL_WIRED_LIMIT_FRACTION * total_ram_gb`."""
+    if total_ram_gb is None:
+        total_ram_gb = _get_total_ram_gb()
+    try:
+        out = subprocess.check_output(["sysctl", "-n", "iogpu.wired_limit_mb"], text=True)
+        mb = int(out.strip())
+        if mb > 0:
+            limit_gb = mb / 1024.0
+            return min(limit_gb, total_ram_gb) if total_ram_gb else limit_gb
+    except (subprocess.CalledProcessError, ValueError, FileNotFoundError):
+        pass
+    if total_ram_gb is None:
+        return None
+    return total_ram_gb * DEFAULT_METAL_WIRED_LIMIT_FRACTION
+
+
+def _cap_free_by_metal_limit(total_ram_gb, raw_free_gb):
+    """Clamps `raw_free_gb` so that after `recommend_max_context` subtracts
+    `SAFETY_BUFFER_GB`, the remaining model+KV budget never exceeds Metal's wired
+    allocation ceiling (`get_metal_wired_limit_gb`)."""
+    metal_limit_gb = get_metal_wired_limit_gb(total_ram_gb)
+    if metal_limit_gb is None:
+        return raw_free_gb
+    return min(raw_free_gb, metal_limit_gb + SAFETY_BUFFER_GB)
 
 
 def get_current_wired_gb():
@@ -36,6 +77,10 @@ def get_current_wired_gb():
     tears down on this same figure, the fit check and the guard can never disagree
     about what "free" means.
 
+    In addition, `free_gb` is capped against `get_metal_wired_limit_gb()` so an idle
+    Mac with >80% free RAM never recommends a model+KV footprint above Metal's GPU
+    wired limit (`iogpu.wired_limit_mb` or ~78% default working-set cap).
+
     Fallback (sysctl unavailable, e.g. a future macOS renaming it): vm_stat's
     free+speculative+purgeable+inactive as available -- closer to the kernel view than
     wired-only, still counts cache as reclaimable."""
@@ -47,7 +92,9 @@ def get_current_wired_gb():
         out = subprocess.check_output(["sysctl", "-n", "kern.memorystatus_level"], text=True)
         pct = int(out.strip())
         if 0 <= pct <= 100:
-            return total_ram_gb * (100 - pct) / 100
+            raw_free_gb = total_ram_gb * pct / 100.0
+            effective_free_gb = _cap_free_by_metal_limit(total_ram_gb, raw_free_gb)
+            return max(0.0, total_ram_gb - effective_free_gb)
     except (subprocess.CalledProcessError, ValueError):
         pass
 
@@ -71,7 +118,8 @@ def get_current_wired_gb():
     if not any(k in pages for k in reclaimable_keys):
         raise RuntimeError("Could not determine free memory from kern.memorystatus_level or vm_stat")
     reclaimable_gb = sum(pages.get(k, 0) for k in reclaimable_keys) * page_size / 1024**3
-    return max(0.0, total_ram_gb - reclaimable_gb)
+    effective_free_gb = _cap_free_by_metal_limit(total_ram_gb, reclaimable_gb)
+    return max(0.0, total_ram_gb - effective_free_gb)
 
 
 def _get_total_ram_gb():

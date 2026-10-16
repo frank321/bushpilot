@@ -3,8 +3,9 @@ context (and whether to quantize the KV cache) a model gets, given free memory.
 Pure arithmetic -- no imports, no I/O."""
 
 
-MEMORY_CONSTRAINED_KV_BITS = 8   # only used as a FALLBACK now — see recommend_kv_bits_and_context
+MEMORY_CONSTRAINED_KV_BITS = 8   # used when unquantized fails or unlocks a bigger tier — see recommend_kv_bits_and_context
 UNQUANTIZED_KV_BITS = 16        # what MLX uses when --kv-bits is simply not passed (float16 KV)
+DEFAULT_KV_GROUP_SIZE = 64      # MLX's default --kv-group-size (KVCache.to_quantized adds 4 bytes FP16 scale+bias per group)
 SAFETY_BUFFER_GB = 3.0       # headroom kept free beyond model+KV, for OS/background apps/spikes
 
 
@@ -13,6 +14,11 @@ MIN_USABLE_CONTEXT = 12288   # below this, a context window isn't really usable 
                               # (see estimate_preload_overhead below): a model that only
                               # "fits" on paper but leaves less than this after Claude
                               # Code's/OpenCode's own preload isn't usable either.
+
+# Unquantized KV that only reaches the 16k tier (< 32,768) when the model/config
+# supports more is upgraded to 8-bit KV if 8-bit unlocks a strictly larger tier (32k+)
+# without triggering mlx-vlm #1559's SWA+APC caveat.
+COMFORTABLE_UNQUANTIZED_CONTEXT = 32768
 
 
 # mlx-dspark (serving.backend == "mlx_dspark") always runs its own prefix-cache, a small
@@ -71,23 +77,25 @@ def prefix_cache_cost_multiplier(model_entry, prefix_cache_slots=None):
 # mlx_vlm (every model NOT served through mlx_dspark -- with or without a drafter, see
 # start_mlx_server.sh's launch branches) always runs with its own native Automatic
 # Prefix Caching (APC) too, unconditionally (see docs/HARDWARE_SPEED_ESTIMATION.md §13):
-# start_mlx_server.sh exports APC_ENABLED=1, APC_NUM_BLOCKS=4096 for every mlx_vlm
-# launch. These two constants mirror that real, currently-unbudgeted memory consumer --
-# same "deliberately duplicated constants" pairing as DEFAULT_PREFILL_STEP_SIZE/
+# start_mlx_server.sh exports APC_ENABLED=1, APC_NUM_BLOCKS=4096 by default (or the
+# advisor's scaled-down MLX_VLM_APC_CONSTRAINED_NUM_BLOCKS when memory is tight) for
+# every mlx_vlm launch. These constants mirror that real memory consumer -- same
+# "deliberately duplicated constants" pairing as DEFAULT_PREFILL_STEP_SIZE/
 # PREFILL_STEP_SIZE (see AGENTS.md): if APC_NUM_BLOCKS changes in start_mlx_server.sh,
 # change MLX_VLM_APC_NUM_BLOCKS here too. APC_BLOCK_SIZE itself is mlx_vlm's own
 # hard-coded default (not an env var this project sets, so there is nothing on the bash
 # side to mirror beyond APC_NUM_BLOCKS) -- confirmed from mlx_vlm/apc.py's own source
 # per §13's research.
 MLX_VLM_APC_NUM_BLOCKS = 4096
+MLX_VLM_APC_CONSTRAINED_NUM_BLOCKS = 1024  # 16,384 cached tokens when full 65k APC pool won't fit
 MLX_VLM_APC_BLOCK_SIZE = 16
 
 
-def mlx_vlm_apc_pool_bytes(model_entry, bytes_per_growing_token):
-    """mlx_vlm's own APC pool's documented worst case: APC_NUM_BLOCKS * APC_BLOCK_SIZE
+def mlx_vlm_apc_pool_bytes(model_entry, bytes_per_growing_token, apc_num_blocks=None):
+    """mlx_vlm's own APC pool's documented worst case: apc_num_blocks * APC_BLOCK_SIZE
     tokens' worth of KV, at whatever per-token rate the CURRENT recommend_max_context
     attempt is using for bytes_per_growing_token (so the 8-bit kv_bits fallback prices
-    in half as much as the unquantized attempt tried first, matching compute_kv_
+    in ~half as much as the unquantized attempt tried first, matching compute_kv_
     formula's own kv_bits scaling -- pass the RAW, pre-concurrency/pre-prefix_cache_
     cost_multiplier value here, not the already-scaled one).
 
@@ -107,10 +115,11 @@ def mlx_vlm_apc_pool_bytes(model_entry, bytes_per_growing_token):
     crash the way DSPARK_DEFAULT_PREFIX_CACHE_SLOTS's own live-measured gap was."""
     if model_entry.get("serving", {}).get("backend") == "mlx_dspark":
         return 0
-    return MLX_VLM_APC_NUM_BLOCKS * MLX_VLM_APC_BLOCK_SIZE * bytes_per_growing_token
+    blocks = MLX_VLM_APC_NUM_BLOCKS if apc_num_blocks is None else max(0, apc_num_blocks)
+    return blocks * MLX_VLM_APC_BLOCK_SIZE * bytes_per_growing_token
 
 
-def compute_kv_formula(kv_config, kv_bits=UNQUANTIZED_KV_BITS):
+def compute_kv_formula(kv_config, kv_bits=UNQUANTIZED_KV_BITS, kv_group_size=None):
     """Returns (bytes_per_growing_token, fixed_kv_bytes_total, detail_dict) or None if
     kv_config is missing fields we need. See docs/HARDWARE_SPEED_ESTIMATION.md §9 — this
     generalizes both the Qwen3.5 hybrid linear/full-attention case and the Gemma-4
@@ -120,6 +129,18 @@ def compute_kv_formula(kv_config, kv_bits=UNQUANTIZED_KV_BITS):
     'linear_attention' layers (Qwen3.5) are approximated as ~0 fixed cost — a real,
     documented approximation, not a solved calculation (their recurrent state is small
     but non-zero and not precisely modeled here).
+
+    Also supports Gemma-4's per-layer KV geometry (confirmed in mlx_vlm/models/gemma4/
+    language.py):
+    - num_kv_shared_layers: trailing layers that reuse earlier layers' KV caches and
+      allocate 0 new cache entries (make_cache slices layer_types[:num_layers -
+      num_kv_shared_layers]).
+    - global_head_dim / num_global_key_value_heads: full_attention layers can use a
+      distinct head_dim (e.g. 512 vs 256) and KV head count (e.g. 1-4 vs 8-16) from
+      sliding_attention layers.
+    - kv_group_size: when quantized (kv_bits < 16) and kv_group_size is provided (e.g.
+      DEFAULT_KV_GROUP_SIZE=64), accounts for the 4 bytes of FP16 scale+bias per group
+      in MLX's affine group quantization (bytes_per_elem = kv_bits/8 + 4/kv_group_size).
 
     kv_config comes from models.json's per-model "kv_config" field, extracted once
     ahead of time from each model's HF config.json (see extraction done when models.json
@@ -134,37 +155,70 @@ def compute_kv_formula(kv_config, kv_bits=UNQUANTIZED_KV_BITS):
         return None
 
     bytes_per_elem = kv_bits / 8
+    if kv_group_size and kv_bits < UNQUANTIZED_KV_BITS:
+        bytes_per_elem += 4.0 / kv_group_size
+
+    global_head_dim = kv_config.get("global_head_dim") or head_dim
+    global_kv_heads = kv_config.get("num_global_key_value_heads") or num_kv_heads
+    num_kv_shared_layers = kv_config.get("num_kv_shared_layers") or 0
+
     layer_types = kv_config.get("layer_types")
     sliding_window = kv_config.get("sliding_window")
 
     if layer_types:
-        growing = sum(1 for t in layer_types if t == "full_attention")
-        sliding = sum(1 for t in layer_types if t == "sliding_attention")
-        linear = sum(1 for t in layer_types if t == "linear_attention")
+        active_layer_types = layer_types
+        if 0 < num_kv_shared_layers <= len(layer_types):
+            active_layer_types = layer_types[:len(layer_types) - num_kv_shared_layers]
+        growing = sum(1 for t in active_layer_types if t == "full_attention")
+        sliding = sum(1 for t in active_layer_types if t == "sliding_attention")
+        linear = sum(1 for t in active_layer_types if t == "linear_attention")
         accounted = growing + sliding + linear
-        unknown = len(layer_types) - accounted
+        unknown = len(active_layer_types) - accounted
         # Unrecognized layer-type name: treat as growing (full attention) — the safer
         # overestimate of memory need rather than silently underestimating it.
         growing += unknown
     else:
-        growing, sliding, linear = num_layers, 0, 0
+        growing = max(0, num_layers - num_kv_shared_layers)
+        sliding, linear = 0, 0
 
-    bytes_per_growing_token = 2 * growing * num_kv_heads * head_dim * bytes_per_elem
+    bytes_per_growing_token = 2 * growing * global_kv_heads * global_head_dim * bytes_per_elem
     fixed_bytes = 0.0
     if sliding and sliding_window:
         fixed_bytes += 2 * sliding * num_kv_heads * head_dim * bytes_per_elem * sliding_window
 
     detail = {
         "growing_layers": growing, "sliding_layers": sliding, "linear_layers": linear,
-        "num_kv_heads": num_kv_heads, "head_dim": head_dim, "sliding_window": sliding_window,
-        "kv_bits": kv_bits,
+        "num_kv_heads": num_kv_heads, "head_dim": head_dim,
+        "global_kv_heads": global_kv_heads, "global_head_dim": global_head_dim,
+        "num_kv_shared_layers": num_kv_shared_layers,
+        "sliding_window": sliding_window,
+        "kv_bits": kv_bits, "kv_group_size": kv_group_size,
     }
     return bytes_per_growing_token, fixed_bytes, detail
 
 
+def compute_drafter_kv_formula(model_entry, kv_bits=UNQUANTIZED_KV_BITS, kv_group_size=None):
+    """Returns (drafter_bytes_per_growing_token, drafter_fixed_kv_bytes) for a model with
+    a speculative-decoding drafter whose KV config is recorded in
+    serving.drafter_kv_config, or (0.0, 0.0) when absent.
+
+    While effective_size_gb() accounts for the drafter's static weights
+    (serving.drafter_size_gb), a standalone drafter model (DFlash or MTP with unshared
+    layers) also allocates its own KV cache across the conversation context alongside
+    the target model."""
+    drafter_kv_config = model_entry.get("serving", {}).get("drafter_kv_config")
+    if not drafter_kv_config:
+        return 0.0, 0.0
+    formula = compute_kv_formula(drafter_kv_config, kv_bits=kv_bits, kv_group_size=kv_group_size)
+    if formula is None:
+        return 0.0, 0.0
+    return formula[0], formula[1]
+
+
 def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BITS,
                            safety_buffer_gb=SAFETY_BUFFER_GB, concurrency=1,
-                           max_context_tokens=None, prefix_cache_slots=None):
+                           max_context_tokens=None, prefix_cache_slots=None,
+                           apc_num_blocks=None):
     """Returns (recommended_tokens_or_None, reason_string, detail_dict_or_None).
 
     concurrency>1 sizes context for N identically-sized concurrent slots instead of
@@ -187,15 +241,29 @@ def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BIT
     prefix_cache_slots: see prefix_cache_cost_multiplier -- a no-op for every backend
     except mlx_dspark, where it prices in that backend's always-on, by-default-
     unbounded prefix-cache LRU alongside the live generation's own KV cost BEFORE the
-    fits check, instead of discovering the gap live via memory-guard sheds/swap."""
+    fits check, instead of discovering the gap live via memory-guard sheds/swap.
+
+    apc_num_blocks: optional override for MLX_VLM_APC_NUM_BLOCKS (e.g.
+    MLX_VLM_APC_CONSTRAINED_NUM_BLOCKS when scaling down the APC pool on a
+    memory-constrained machine)."""
     available_gb = free_wired_gb - effective_size_gb(model_entry) - safety_buffer_gb
     if available_gb <= 0:
         return None, "insufficient_memory_for_model_weights", None
 
-    formula = compute_kv_formula(model_entry.get("kv_config"), kv_bits)
+    kv_group_size = DEFAULT_KV_GROUP_SIZE if kv_bits < UNQUANTIZED_KV_BITS else None
+    formula = compute_kv_formula(model_entry.get("kv_config"), kv_bits, kv_group_size=kv_group_size)
     if formula is None:
         return None, "architecture_fields_missing_from_config", None
-    raw_bytes_per_growing_token, fixed_bytes, detail = formula
+    target_bytes_per_growing_token, fixed_bytes, detail = formula
+
+    drafter_growing, drafter_fixed = compute_drafter_kv_formula(
+        model_entry, kv_bits=kv_bits, kv_group_size=kv_group_size,
+    )
+    raw_bytes_per_growing_token = target_bytes_per_growing_token + drafter_growing
+    fixed_bytes += drafter_fixed
+    detail["drafter_bytes_per_growing_token"] = drafter_growing
+    detail["drafter_fixed_bytes"] = drafter_fixed
+
     bytes_per_growing_token = raw_bytes_per_growing_token * concurrency
     fixed_bytes *= concurrency
 
@@ -209,9 +277,15 @@ def recommend_max_context(model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BIT
     # server process, not one per concurrent slot or per mlx-dspark-style cached slot
     # (and mutually exclusive with cache_multiplier above: never both nonzero for the
     # same model, since each is gated to the opposite backend).
-    apc_pool_bytes = mlx_vlm_apc_pool_bytes(model_entry, raw_bytes_per_growing_token)
+    apc_pool_bytes = mlx_vlm_apc_pool_bytes(
+        model_entry, raw_bytes_per_growing_token, apc_num_blocks=apc_num_blocks,
+    )
     fixed_bytes += apc_pool_bytes
     detail["mlx_vlm_apc_pool_bytes"] = apc_pool_bytes
+    detail["apc_num_blocks"] = (
+        0 if model_entry.get("serving", {}).get("backend") == "mlx_dspark"
+        else (MLX_VLM_APC_NUM_BLOCKS if apc_num_blocks is None else max(0, apc_num_blocks))
+    )
 
     available_bytes = available_gb * 1024**3
     usable_bytes = available_bytes - fixed_bytes
@@ -265,53 +339,56 @@ def _apply_preload(ctx, reason, preload_overhead):
 def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0,
                                    safety_buffer_gb=SAFETY_BUFFER_GB, concurrency=1,
                                    max_context_tokens=None, prefix_cache_slots=None):
-    """Decides BOTH whether to quantize the KV cache AND the resulting context size, in
-    one pass — see docs/HARDWARE_SPEED_ESTIMATION.md §14 for the full reasoning and its
-    measured basis (§10/§12).
+    """Decides whether to quantize the KV cache, the APC pool block ceiling, and the
+    resulting context size in one pass — see docs/HARDWARE_SPEED_ESTIMATION.md §14 for
+    the full reasoning and its measured basis (§10/§12).
 
-    KV-cache quantization (--kv-bits 8) has a real decode-speed cost (up to 8.7% on
-    fast/small models, confirmed live) and confirmed ZERO memory benefit at short
-    context (peak_memory was byte-identical with/without it in every short-context
-    benchmark run for this project) — its only real purpose is letting a BIGGER
-    context fit in the SAME free memory. So: try unquantized first (kv_bits=None in the
-    return value means "omit --kv-bits entirely" downstream); only fall back to
-    kv_bits=8 if unquantized genuinely doesn't fit. This is a binary fits/doesn't-fit
-    decision at whatever context size the model would otherwise get, not a search for
-    the context-maximizing bit-width — see §14's own caveat for why this is grounded in
-    real data but that data's scope (short context only) doesn't fully cover the regime
-    (long context) this decision matters most for.
-
-    kv_bits_apc_caveat (in the returned dict) is True when the quantized fallback is
-    actually used AND the model has sliding-window (SWA) layers -- flagging a real,
-    already-filed upstream gap (mlx-vlm issue #1559, "APC + kv-bits full batch/SWA
-    coverage", confirmed/p1, open since Jul 2026, smoke-tested on gemma-4-e2b-it-4bit):
-    the server's own APC_ENABLED=1 is unconditional in this project, and upstream has
-    confirmed that combining --kv-bits with APC on the batched/concurrent request path
-    means SWA layer caches aren't clonable for an exact store, so sliding layers likely
-    won't get cached on that path until it's fixed. Degrades gracefully per upstream
-    ("prefix reuse still works" per their smoke note) -- NOT corrupted output -- so this
-    is surfaced as a caveat for the picker to show (see format_model_body_lines), not a
-    reason to refuse the fallback outright; refusing it would make some models that
-    could otherwise run look like they don't fit at all, over a bug that degrades
-    rather than breaks. Re-check mlx-vlm#1559's status before removing this flag.
-
-    prefix_cache_slots: forwarded to recommend_max_context -- see
-    prefix_cache_cost_multiplier. A no-op for every backend except mlx_dspark.
+    1. Try unquantized FP16 KV first (kv_bits=None downstream means "omit --kv-bits").
+       If unquantized reaches at least COMFORTABLE_UNQUANTIZED_CONTEXT (32,768) or the
+       model's/config's own max context ceiling, return it immediately for full decode
+       speed.
+    2. If unquantized is cramped at the 16k tier (< COMFORTABLE_UNQUANTIZED_CONTEXT)
+       despite the model/config supporting more, OR if unquantized doesn't fit at all,
+       evaluate 8-bit KV (MEMORY_CONSTRAINED_KV_BITS):
+       - When unquantized fit at 16k, upgrade to 8-bit KV only if 8-bit unlocks a
+         strictly larger context tier AND the model has no sliding-window layers (so we
+         never voluntarily trade a working unquantized cache for the mlx-vlm #1559
+         SWA+APC caveat).
+       - When unquantized didn't fit at all, accept 8-bit KV if it fits (surfacing
+         kv_bits_apc_caveat when SWA layers are present).
+    3. If even 8-bit KV fails to fit with the full 4,096-block (65,536-token) mlx_vlm
+       APC pool, retry 8-bit KV with MLX_VLM_APC_CONSTRAINED_NUM_BLOCKS (1,024 blocks =
+       16,384 cached tokens) so memory-constrained Macs can still run the model with a
+       smaller prefix cache instead of being blocked by the 65k APC reservation.
 
     Returns dict: kv_bits (None or MEMORY_CONSTRAINED_KV_BITS), recommended_context,
-    context_reason, kv_formula_detail, context_after_preload, fits, kv_bits_apc_caveat.
+    context_reason, kv_formula_detail, context_after_preload, fits, kv_bits_apc_caveat,
+    apc_num_blocks.
     """
+    default_apc_blocks = (
+        None if model_entry.get("serving", {}).get("backend") == "mlx_dspark"
+        else MLX_VLM_APC_NUM_BLOCKS
+    )
+    has_swa = _has_sliding_window_layers(model_entry.get("kv_config"))
+    effective_cap = model_entry["max_context_architectural"]
+    if max_context_tokens is not None:
+        effective_cap = min(effective_cap, max_context_tokens)
+
     ctx_u, reason_u, detail_u = recommend_max_context(
         model_entry, free_wired_gb, kv_bits=UNQUANTIZED_KV_BITS,
         safety_buffer_gb=safety_buffer_gb, concurrency=concurrency,
         max_context_tokens=max_context_tokens, prefix_cache_slots=prefix_cache_slots,
     )
     fits_u, reason_u, after_u = _apply_preload(ctx_u, reason_u, preload_overhead)
-    if fits_u:
+    if fits_u and (
+        ctx_u >= COMFORTABLE_UNQUANTIZED_CONTEXT
+        or ctx_u >= effective_cap
+        or has_swa
+    ):
         return {
             "kv_bits": None, "recommended_context": ctx_u, "context_reason": reason_u,
             "kv_formula_detail": detail_u, "context_after_preload": after_u, "fits": True,
-            "kv_bits_apc_caveat": False,
+            "kv_bits_apc_caveat": False, "apc_num_blocks": default_apc_blocks,
         }
 
     ctx_q, reason_q, detail_q = recommend_max_context(
@@ -320,13 +397,59 @@ def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0
         max_context_tokens=max_context_tokens, prefix_cache_slots=prefix_cache_slots,
     )
     fits_q, reason_q, after_q = _apply_preload(ctx_q, reason_q, preload_overhead)
+
+    if fits_u:
+        # Unquantized fit at < 32k (16k tier) on a non-SWA model whose cap allows more:
+        # upgrade to 8-bit KV if it unlocks a strictly larger context tier.
+        if fits_q and ctx_q > ctx_u:
+            return {
+                "kv_bits": MEMORY_CONSTRAINED_KV_BITS, "recommended_context": ctx_q,
+                "context_reason": reason_q, "kv_formula_detail": detail_q,
+                "context_after_preload": after_q, "fits": True,
+                "kv_bits_apc_caveat": False, "apc_num_blocks": default_apc_blocks,
+            }
+        return {
+            "kv_bits": None, "recommended_context": ctx_u, "context_reason": reason_u,
+            "kv_formula_detail": detail_u, "context_after_preload": after_u, "fits": True,
+            "kv_bits_apc_caveat": False, "apc_num_blocks": default_apc_blocks,
+        }
+
     if fits_q:
         return {
             "kv_bits": MEMORY_CONSTRAINED_KV_BITS, "recommended_context": ctx_q,
             "context_reason": reason_q, "kv_formula_detail": detail_q,
             "context_after_preload": after_q, "fits": True,
-            "kv_bits_apc_caveat": _has_sliding_window_layers(model_entry.get("kv_config")),
+            "kv_bits_apc_caveat": has_swa,
+            "apc_num_blocks": default_apc_blocks,
         }
+
+    # Dynamic APC pool scaling for mlx_vlm models: if 8-bit KV failed because the
+    # default 4,096-block (65,536-token) APC pool reservation ate the remaining memory
+    # budget, retry with MLX_VLM_APC_CONSTRAINED_NUM_BLOCKS (1,024 blocks = 16,384
+    # tokens).
+    if (
+        default_apc_blocks is not None
+        and reason_q in (
+            "insufficient_memory_for_fixed_kv_cost",
+            "computed_context_too_small_to_be_useful",
+            "insufficient_context_after_tool_preload",
+        )
+    ):
+        ctx_c, reason_c, detail_c = recommend_max_context(
+            model_entry, free_wired_gb, kv_bits=MEMORY_CONSTRAINED_KV_BITS,
+            safety_buffer_gb=safety_buffer_gb, concurrency=concurrency,
+            max_context_tokens=max_context_tokens, prefix_cache_slots=prefix_cache_slots,
+            apc_num_blocks=MLX_VLM_APC_CONSTRAINED_NUM_BLOCKS,
+        )
+        fits_c, reason_c, after_c = _apply_preload(ctx_c, reason_c, preload_overhead)
+        if fits_c:
+            return {
+                "kv_bits": MEMORY_CONSTRAINED_KV_BITS, "recommended_context": ctx_c,
+                "context_reason": reason_c, "kv_formula_detail": detail_c,
+                "context_after_preload": after_c, "fits": True,
+                "kv_bits_apc_caveat": has_swa,
+                "apc_num_blocks": MLX_VLM_APC_CONSTRAINED_NUM_BLOCKS,
+            }
 
     # Neither fits — report the quantized attempt's reason, since it's the more
     # forgiving of the two (smaller bytes-per-token) and so the more informative "even
@@ -334,5 +457,5 @@ def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0
     return {
         "kv_bits": None, "recommended_context": ctx_q, "context_reason": reason_q,
         "kv_formula_detail": detail_q, "context_after_preload": after_q, "fits": False,
-        "kv_bits_apc_caveat": False,
+        "kv_bits_apc_caveat": False, "apc_num_blocks": default_apc_blocks,
     }

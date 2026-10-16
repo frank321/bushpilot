@@ -175,6 +175,12 @@ def build_entry(repo):
     if t.get("use_sliding_window") is False:
         sliding = None
     kv_config = {"num_key_value_heads": kv_heads, "head_dim": head_dim, "num_hidden_layers": num_layers}
+    if t.get("global_head_dim"):
+        kv_config["global_head_dim"] = t["global_head_dim"]
+    if t.get("num_global_key_value_heads"):
+        kv_config["num_global_key_value_heads"] = t["num_global_key_value_heads"]
+    if t.get("num_kv_shared_layers"):
+        kv_config["num_kv_shared_layers"] = t["num_kv_shared_layers"]
     if t.get("layer_types"):
         kv_config["layer_types"] = t["layer_types"]
     kv_config["sliding_window"] = sliding

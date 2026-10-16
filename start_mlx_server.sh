@@ -205,6 +205,9 @@ QUANTIZED_KV_START=0
 PREFILL_STEP_SIZE=2048
 
 # Automatic Prefix Caching (APC) — see docs/HARDWARE_SPEED_ESTIMATION.md §13.
+# APC_NUM_BLOCKS is paired with MLX_VLM_APC_NUM_BLOCKS in bushpilot/kv.py; the
+# interactive advisor path overrides this with MLX_VLM_APC_CONSTRAINED_NUM_BLOCKS
+# (1024) when free memory is too tight for the full 4096-block pool.
 APC_ENABLED=1
 APC_NUM_BLOCKS=4096
 APC_DISK_PATH="$BUSHPILOT_APC_DIR"
@@ -763,6 +766,10 @@ run_interactive_selection() {
     prefill_step_size_val=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['prefill_step_size'])" "$advisor_output" 2>/dev/null) || prefill_step_size_val=""
     [[ -n "$prefill_step_size_val" ]] && PREFILL_STEP_SIZE="$prefill_step_size_val"
 
+    local apc_num_blocks_val
+    apc_num_blocks_val=$("$MLX_PYTHON" -c "import json,sys; v=json.loads(sys.argv[1]).get('apc_num_blocks'); print(v if v is not None else '')" "$advisor_output" 2>/dev/null) || apc_num_blocks_val=""
+    [[ -n "$apc_num_blocks_val" ]] && APC_NUM_BLOCKS="$apc_num_blocks_val"
+
     local kv_bits_log="unquantized (full decode speed — recommended context already fits free memory)"
     if [[ -n "$KV_BITS" ]]; then
         kv_bits_log="quantized to ${KV_BITS}-bit (memory-constrained — needed to fit this context)"
@@ -771,6 +778,9 @@ run_interactive_selection() {
     [[ -n "$CONFIG_MAX_CONTEXT" ]] && ctx_source_log+=" and capped by config.json's max_context_tokens (rounds down to the nearest tier)"
     log_success "Selected $LOCAL_MODEL ($MLX_MODEL) — context set to ${CONTEXT_WINDOW} tokens ($ctx_source_log)"
     log_success "KV cache: $kv_bits_log"
+    if [[ "$APC_NUM_BLOCKS" != "4096" ]]; then
+        log_success "APC pool scaled to $APC_NUM_BLOCKS blocks ($((APC_NUM_BLOCKS * 16)) cached tokens) to fit memory"
+    fi
     if [[ "$PREFILL_STEP_SIZE" != "2048" ]]; then
         log_success "Prefill step size: $PREFILL_STEP_SIZE (measured on this machine for this model — see ~/.bushpilot/calibration)"
     fi
