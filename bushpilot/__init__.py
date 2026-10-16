@@ -26,13 +26,13 @@ from .calibration import CALIBRATION_DIR, _calibration_path, load_calibration, s
 from .cli import MODELS_JSON, _flag_value, emit_selection_json, main
 from .hardware import get_chip_info, get_current_wired_gb, log
 from .kv import (
+    DSPARK_DEFAULT_PREFIX_CACHE_SLOTS,
     MEMORY_CONSTRAINED_KV_BITS,
     MIN_USABLE_CONTEXT,
-    SAFETY_BUFFER_GB,
-    UNQUANTIZED_KV_BITS,
-    DSPARK_DEFAULT_PREFIX_CACHE_SLOTS,
     MLX_VLM_APC_BLOCK_SIZE,
     MLX_VLM_APC_NUM_BLOCKS,
+    SAFETY_BUFFER_GB,
+    UNQUANTIZED_KV_BITS,
     compute_kv_formula,
     effective_size_gb,
     mlx_vlm_apc_pool_bytes,
@@ -115,6 +115,7 @@ from .recommend import (
     compute_bonus_concurrency,
 )
 from .speed import CHIP_BANDWIDTH_GB_S, SPEED_CORRECTION_FACTOR, estimate_speed_tok_s
+from .template_patches import check_and_patch_chat_template, find_chat_template_path
 
 __all__ = [
     "AUTO_MAX_CONCURRENCY", "BOLD", "CALIBRATION_DIR", "CHIP_BANDWIDTH_GB_S",
@@ -129,18 +130,18 @@ __all__ = [
     "PREFILL_STEP_SIZE_MEMORY_MARGIN", "RESET", "SAFETY_BUFFER_GB", "SORT_KEYS",
     "SPEED_CORRECTION_FACTOR", "TOOL_BASELINE_PRELOAD_TOKENS", "UNQUANTIZED_KV_BITS",
     "YELLOW", "_calibration_path", "_flag_value", "_truncate_cell", "cap_name_width",
-    "compact_row_cells", "compact_row_widths", "compute_bonus_concurrency",
-    "compute_kv_formula", "count_tokens_rough", "describe_unavailable_reason",
-    "effective_size_gb", "emit_selection_json", "estimate_preload_overhead",
-    "estimate_speed_tok_s", "format_compact_header_row", "format_context_k",
-    "format_model_body_lines", "format_model_compact_row", "get_chip_info",
-    "get_current_wired_gb", "load_calibration", "log", "main", "measure_doc_preload",
-    "measure_mcp_servers", "measure_skills_preload", "mlx_vlm_apc_pool_bytes",
-    "model_display_name",
+    "check_and_patch_chat_template", "compact_row_cells", "compact_row_widths",
+    "compute_bonus_concurrency", "compute_kv_formula", "count_tokens_rough",
+    "describe_unavailable_reason", "effective_size_gb", "emit_selection_json",
+    "estimate_preload_overhead", "estimate_speed_tok_s", "find_chat_template_path",
+    "format_compact_header_row", "format_context_k", "format_model_body_lines",
+    "format_model_compact_row", "get_chip_info", "get_current_wired_gb",
+    "load_calibration", "log", "main", "measure_doc_preload", "measure_mcp_servers",
+    "measure_skills_preload", "mlx_vlm_apc_pool_bytes", "model_display_name",
     "model_drafter_label", "model_engine", "model_input_label", "model_tools_label",
     "next_sort", "prefix_cache_cost_multiplier", "print_list_compact", "print_menu",
-    "print_preload_banner",
-    "build_recommendations", "recommend_kv_bits_and_context", "recommend_max_context",
-    "recommend_prefill_step_size", "save_calibration", "short_unavailable_reason",
-    "sort_key_for_click", "sort_rows", "use_color", "visible_columns",
+    "print_preload_banner", "build_recommendations", "recommend_kv_bits_and_context",
+    "recommend_max_context", "recommend_prefill_step_size", "save_calibration",
+    "short_unavailable_reason", "sort_key_for_click", "sort_rows", "use_color",
+    "visible_columns",
 ]

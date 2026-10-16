@@ -478,6 +478,7 @@ class SweepServer:
         log(f"Launching: {' '.join(args)}")
         logf = open(self.log_path, "a")
         self.proc = subprocess.Popen(args, stdout=logf, stderr=subprocess.STDOUT, env=env)
+        logf.close()
         _ACTIVE_SERVERS.append(self)
         healthy, elapsed = wait_for_health(self.host, self.port, self.proc.pid, timeout_s=timeout_s)
         self.load_time_s = elapsed
@@ -1060,6 +1061,10 @@ def run_sweep(model_id, host=DEFAULT_HOST, port=DEFAULT_PORT,
     }
     write_sweep_json(out_path, data)
     log(f"Sweep file: {out_path}")
+
+    template_patch_res = ma.check_and_patch_chat_template(HF_HOME, model_entry["huggingface"])
+    if template_patch_res == "patched":
+        log(f"Applied chat-template patch for '{model_entry['huggingface']}' before sweeping.")
 
     if "prefill_step_size" not in skip_tiers:
         # Must be genuinely deep -- a prompt that doesn't exceed even the SMALLEST

@@ -827,6 +827,31 @@ ensure_model_downloaded() {
     fi
 }
 
+# Opportunistic, model_advisor.py-delegated fix for a real chat-template bug found in
+# specific HuggingFace repos (gemma-4-12b-it-4bit, gemma-4-26b-a4b-it-4bit, and
+# siblings -- see those entries' known_issues in models.json for the full root-cause
+# writeup): a 4-token asymmetry between how a fresh generation prompt and a completed
+# turn's history-serialization render the same turn, which breaks mlx_vlm's APC
+# prefix-cache reuse on every turn of a growing conversation. NOT an mlx_vlm/
+# mlx-dspark code bug -- purely in the model repo's own chat_template.jinja; upstream
+# mlx-vlm PR #1960 fixed the identical bug for the 5-bit siblings via an HF repo
+# template discussion, a fix never applied to the 4-bit/8-bit repos this project
+# actually serves. See bushpilot/template_patches.py for the patch itself.
+#
+# Called only for the target model, after it's confirmed downloaded (there's a real
+# local file to inspect) and before the server starts (so a freshly-applied patch is
+# already in place for the very first request) -- never for a drafter repo, since
+# drafters aren't invoked through chat-template serialization. Detection inside
+# model_advisor.py is purely content-based (two required exact-string signatures, see
+# that module's docstring for a real false positive this caught before shipping), not
+# gated on this model id, so this call is a safe, silent no-op for every model that
+# isn't affected -- intentionally unconditional rather than an allowlist of known-
+# affected ids, so a sibling quantization with the identical bug gets fixed too
+# without this script needing its own copy of that list.
+patch_known_chat_template_bugs() {
+    "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --patch-chat-template "$MLX_MODEL"
+}
+
 # Returns 0 only if the process actually LISTENING on $MLX_PORT is our expected
 # server process (mlx_vlm.server, or `mlx-dspark serve` for an mlx_dspark-backed
 # model -- see MLX_PROC_PATTERN in resolve_serving_config). /health alone is not
@@ -1293,8 +1318,6 @@ get_mlx_rss_gb() {
     awk -v k="$rss_kb" 'BEGIN { printf "%.1f", k/1024/1024 }'
 }
 
-fmt_num() { "$MLX_PYTHON" -c "print(f'{int(sys.argv[1]):,}')" "$1" 2>/dev/null || echo "$1"; }
-
 # mlx_vlm.server (third-party) doesn't tag requests with any client/tool identity in
 # its /metrics response, so we can't learn this from the API. What we CAN see
 # ourselves: every tool talks to $MLX_PORT over a local TCP socket, so lsof on that
@@ -1735,6 +1758,7 @@ main() {
     fi
 
     ensure_model_downloaded
+    patch_known_chat_template_bugs
     ensure_mlx_running
 
     run_dashboard

@@ -12,6 +12,7 @@ from .picker.display import format_model_body_lines, print_list_compact, print_m
 from .picker.sort import SORT_KEYS
 from .preload import estimate_preload_overhead
 from .recommend import build_recommendations
+from .template_patches import check_and_patch_chat_template
 
 # The catalog lives at the repo root next to the model_advisor.py shim (and inside
 # docs/build_release.sh's release bundle), one directory ABOVE this package --
@@ -93,12 +94,31 @@ def main():
         except ValueError:
             dspark_prefix_cache_slots = None
 
-    with open(MODELS_JSON) as f:
-        catalog = json.load(f)
-    models = catalog["models"]
-
-    current_wired_gb = get_current_wired_gb()
-    chip_name, gpu_cores, total_ram_gb = get_chip_info()
+    # Standalone, model-catalog-and-RAM-independent fix path: start_mlx_server.sh
+    # calls this right after confirming the target model is downloaded and before
+    # launching the server, for every model (not just known-Gemma-4 ids) -- see
+    # template_patches.check_and_patch_chat_template's own docstring for why
+    # detection is purely content-based rather than gated on model id/architecture,
+    # and why that matters (a real false positive on gemma-4-e4b-it-4bit's actual
+    # cached template was caught and fixed before this shipped). Reads HF_HOME from
+    # the environment rather than a flag, since start_mlx_server.sh already exports
+    # it before any model_advisor.py invocation.
+    patch_chat_template_repo = _flag_value(argv, "--patch-chat-template")
+    if patch_chat_template_repo is not None:
+        hf_home = os.environ.get("HF_HOME")
+        if not hf_home:
+            log("ERROR: --patch-chat-template requires HF_HOME to be set in the environment.")
+            sys.exit(2)
+        result = check_and_patch_chat_template(hf_home, patch_chat_template_repo)
+        if result == "patched":
+            log(f"Patched a known chat-template APC cache-miss bug in '{patch_chat_template_repo}' "
+                "(see models.json's known_issues on this model for the root cause).")
+        elif result == "already_patched":
+            log(f"'{patch_chat_template_repo}' chat template already has this patch applied.")
+        # "not_affected" and "no_template" are both silent no-ops -- the common case
+        # (every non-Gemma-4 model, and every unaffected Gemma-4 variant) shouldn't
+        # print anything on every single launch.
+        return
 
     # Standalone, catalog-fit-independent write path: start_mlx_server.sh's
     # full_teardown calls this with whatever that session's own /metrics last
@@ -142,6 +162,7 @@ def main():
         kv_bits_safe_at_long_context = None
         if kv_bits_safe_flag is not None:
             kv_bits_safe_at_long_context = kv_bits_safe_flag.strip().lower() in ("1", "true", "yes")
+        chip_name, _, _ = get_chip_info()
         save_calibration(chip_name, save_calibration_id, decode_tok_s,
                           context_tokens=context_tokens, ttft_s=ttft_s,
                           peak_memory_gb=peak_memory_gb,
@@ -149,6 +170,13 @@ def main():
                           kv_bits_safe_at_long_context=kv_bits_safe_at_long_context)
         log(f"Saved calibration for '{save_calibration_id}' on '{chip_name}': {decode_tok_s} tok/s")
         return
+
+    with open(MODELS_JSON) as f:
+        catalog = json.load(f)
+    models = catalog["models"]
+
+    current_wired_gb = get_current_wired_gb()
+    chip_name, gpu_cores, total_ram_gb = get_chip_info()
 
     if total_ram_gb is None:
         log("ERROR: could not detect total RAM via system_profiler.")
