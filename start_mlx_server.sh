@@ -227,6 +227,10 @@ MEM_CAUTION_BELOW_PCT=25
 # own -- sustained CRITICAL (3 consecutive 5s polls) still tears down.
 MEM_ABORT_CONSECUTIVE_POLLS=3
 MEM_CRITICAL_CONSECUTIVE_POLLS=3
+# When tearing down due to a memory-backstop emergency, only wait this many seconds
+# after SIGTERM before escalating to SIGKILL so wired GPU memory is freed before macOS
+# jetsam or heavy swap thrashing locks the system.
+MEM_EMERGENCY_KILL_TIMEOUT=3
 
 # Backend-liveness backstop: distinct from the memory-pressure backstop above --
 # this catches the backend process (mlx_vlm.server / mlx-dspark) dying or getting its
@@ -241,6 +245,12 @@ MEM_CRITICAL_CONSECUTIVE_POLLS=3
 # pattern as the memory checks, to absorb one slow/transient health check rather than
 # tearing down on a single blip.
 BACKEND_DOWN_CONSECUTIVE_POLLS=2
+# When the expected MLX process still owns $MLX_PORT and is alive, a /health HTTP
+# timeout (curl exit 28) usually means Python's single-threaded asyncio loop is blocked
+# inside a synchronous Metal prefill or vision-encoder pass -- not that the server
+# crashed. Allow up to 18 consecutive busy polls (~90s at 5s interval) before declaring
+# the inference engine hung.
+BACKEND_HANG_CONSECUTIVE_POLLS=18
 
 DASHBOARD_POLL_INTERVAL=5
 
@@ -328,19 +338,30 @@ wait_for_process_gone() {
     local pattern="$1"
     local label="$2"
     local timeout="${3:-20}"
+    local target_pid="${4:-${MLX_PID:-}}"
     local attempts=0
 
-    if ! pgrep -f "$pattern" > /dev/null 2>&1; then
+    if ! pgrep -f "$pattern" > /dev/null 2>&1 \
+        && { [[ -z "$target_pid" ]] || ! kill -0 "$target_pid" 2>/dev/null; }; then
         return 0
     fi
 
+    if [[ -n "$target_pid" ]]; then
+        pkill -TERM -P "$target_pid" > /dev/null 2>&1 || true
+        kill -TERM "$target_pid" > /dev/null 2>&1 || true
+    fi
     pkill -TERM -f "$pattern" > /dev/null 2>&1 || true
     log_info "Sent stop signal to $label, waiting for it to exit..."
 
-    while pgrep -f "$pattern" > /dev/null 2>&1; do
+    while pgrep -f "$pattern" > /dev/null 2>&1 \
+        || { [[ -n "$target_pid" ]] && kill -0 "$target_pid" 2>/dev/null; }; do
         attempts=$((attempts + 1))
         if [ "$attempts" -ge "$timeout" ]; then
             log_info "$label still running after ${timeout}s, sending SIGKILL..."
+            if [[ -n "$target_pid" ]]; then
+                pkill -KILL -P "$target_pid" > /dev/null 2>&1 || true
+                kill -KILL "$target_pid" > /dev/null 2>&1 || true
+            fi
             pkill -KILL -f "$pattern" > /dev/null 2>&1 || true
             sleep 1
             break
@@ -348,7 +369,8 @@ wait_for_process_gone() {
         sleep 1
     done
 
-    if pgrep -f "$pattern" > /dev/null 2>&1; then
+    if pgrep -f "$pattern" > /dev/null 2>&1 \
+        || { [[ -n "$target_pid" ]] && kill -0 "$target_pid" 2>/dev/null; }; then
         log_error "$label did not exit"
         return 1
     fi
@@ -1157,7 +1179,9 @@ ensure_mlx_running() {
 DASHBOARD_START_TS=$(date +%s)
 MEM_ABORT_STREAK=0
 MEM_CRITICAL_STREAK=0
+MEM_WARNING_STATUS=""
 BACKEND_DOWN_STREAK=0
+BACKEND_BUSY_STREAK=0
 TEARDOWN_REASON=""
 CONTEXT_WARNING_PENDING=""
 
@@ -1299,12 +1323,23 @@ PYEOF
 
 full_teardown() {
     local reason="${1:-}"
+    local mode="${2:-normal}"
     [[ -n "$reason" ]] && echo -e "\n[!] Stopping: $reason"
     log_teardown "$reason"
-    save_calibration_snapshot || true
-    stty sane 2>/dev/null || true
-    wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 20 || true
-    rm -f "$MLX_STATE_FILE"
+    if [[ "$mode" == "emergency" ]]; then
+        # Under severe memory pressure (CRITICAL or <10% free), free the model's
+        # wired GPU memory IMMEDIATELY before doing any dashboard render or
+        # spawning Python subprocesses for calibration snapshots.
+        wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" "${MEM_EMERGENCY_KILL_TIMEOUT:-3}" || true
+        rm -f "$MLX_STATE_FILE"
+        render_dashboard || true
+        stty sane 2>/dev/null || true
+    else
+        save_calibration_snapshot || true
+        stty sane 2>/dev/null || true
+        wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 20 || true
+        rm -f "$MLX_STATE_FILE"
+    fi
     exit 0
 }
 
@@ -1364,10 +1399,15 @@ get_connected_clients() {
 # it has no /v1/cache/stats endpoint at all -- so the dspark branch below only ever
 # fetches /metrics, skipping a call that would otherwise fail every single poll.
 render_dashboard() {
-    local metrics_json cache_json=""
-    metrics_json="$(curl -fsS --max-time 3 "http://$MLX_HOST:$MLX_PORT/metrics" 2>/dev/null || echo '{}')"
-    [[ "$MLX_BACKEND" != "mlx_dspark" ]] && \
-        cache_json="$(curl -fsS --max-time 3 "http://$MLX_HOST:$MLX_PORT/v1/cache/stats" 2>/dev/null || echo '{}')"
+    local metrics_json='{}' cache_json='{}' metrics_ok=0
+    if metrics_json="$(curl -fsS --max-time 1 "http://$MLX_HOST:$MLX_PORT/metrics" 2>/dev/null)"; then
+        metrics_ok=1
+    else
+        metrics_json='{}'
+    fi
+    if [[ "$MLX_BACKEND" != "mlx_dspark" && "$metrics_ok" -eq 1 ]]; then
+        cache_json="$(curl -fsS --max-time 1 "http://$MLX_HOST:$MLX_PORT/v1/cache/stats" 2>/dev/null || echo '{}')"
+    fi
 
     local pct_free pressure pressure_name mlx_rss now_ts elapsed elapsed_fmt connected_clients
     pct_free="$(get_percent_free)"
@@ -1399,10 +1439,10 @@ render_dashboard() {
         "$MLX_PYTHON" - "$metrics_json" "$MLX_MODEL" "$MLX_PORT" "$CONTEXT_WINDOW" \
             "$elapsed_fmt" "${pct_free:-?}" "$pressure_name" "${mlx_rss:-?}" "$TEARDOWN_REASON" \
             "$SCRIPT_DIR/launch_tool.sh" "${connected_clients:-}" "$MLX_HOST" "$CONCURRENCY" \
-            "$MLX_DRAFTER" "${MLX_DSPARK_MODE:-dflash}" <<'PYEOF-DSPARK'
+            "$MLX_DRAFTER" "${MLX_DSPARK_MODE:-dflash}" "${MEM_WARNING_STATUS:-}" <<'PYEOF-DSPARK'
 import json, sys
 
-metrics_raw, model, port, context, uptime, pct_free, pressure, rss, teardown_reason, launch_cmd, connected, host, concurrency, drafter, mode = sys.argv[1:16]
+metrics_raw, model, port, context, uptime, pct_free, pressure, rss, teardown_reason, launch_cmd, connected, host, concurrency, drafter, mode, mem_warning = sys.argv[1:17]
 
 def safe_json(s):
     try:
@@ -1495,6 +1535,9 @@ if isinstance(sheds, (int, float)) and sheds > 0:
     line(f"⚠ memory guard has shed cache {int(sheds)} time(s) — last: {guard.get('last_shed') or 'unknown'}")
 rule()
 line("last error: none")
+if mem_warning and not teardown_reason:
+    rule()
+    wrap_line(f"⚠ {mem_warning}", indent="  ")
 if teardown_reason:
     rule()
     wrap_line(f"⚠ {teardown_reason}", indent="  ")
@@ -1507,10 +1550,10 @@ PYEOF-DSPARK
 
     "$MLX_PYTHON" - "$metrics_json" "$cache_json" "$MLX_MODEL" "$MLX_PORT" "$CONTEXT_WINDOW" \
         "$elapsed_fmt" "${APC_ENABLED}" "${pct_free:-?}" "$pressure_name" "${mlx_rss:-?}" "$TEARDOWN_REASON" \
-        "$SCRIPT_DIR/launch_tool.sh" "${connected_clients:-}" "$MLX_HOST" "$CONCURRENCY" <<'PYEOF'
+        "$SCRIPT_DIR/launch_tool.sh" "${connected_clients:-}" "$MLX_HOST" "$CONCURRENCY" "${MEM_WARNING_STATUS:-}" <<'PYEOF'
 import json, sys
 
-metrics_raw, cache_raw, model, port, context, uptime, apc_on, pct_free, pressure, rss, teardown_reason, launch_cmd, connected, host, concurrency = sys.argv[1:16]
+metrics_raw, cache_raw, model, port, context, uptime, apc_on, pct_free, pressure, rss, teardown_reason, launch_cmd, connected, host, concurrency, mem_warning = sys.argv[1:17]
 
 def safe_json(s):
     try:
@@ -1598,6 +1641,9 @@ line(f"CONNECTED       {connected if connected else 'no tool connected yet'}")
 rule()
 err = summary.get("last_error") or "none"
 wrap_line(f"last error: {err}", indent="            ")
+if mem_warning and not teardown_reason:
+    rule()
+    wrap_line(f"⚠ {mem_warning}", indent="  ")
 if teardown_reason:
     rule()
     wrap_line(f"⚠ {teardown_reason}", indent="  ")
@@ -1611,9 +1657,12 @@ PYEOF
 # decision) — same abort/warn/caution percent-free thresholds, same discrete CRITICAL
 # pressure-level override, applying the exact same full-teardown path as Ctrl-C/q.
 check_memory_backstop() {
-    local pct_free pressure
+    local pct_free pressure warn_pct caution_pct
     pct_free="$(get_percent_free)"
     pressure="$(get_pressure_level)"
+    warn_pct="${MEM_WARN_BELOW_PCT:-18}"
+    caution_pct="${MEM_CAUTION_BELOW_PCT:-25}"
+    MEM_WARNING_STATUS=""
 
     if [[ -n "$pressure" && "$pressure" -eq 4 ]]; then
         MEM_CRITICAL_STREAK=$((MEM_CRITICAL_STREAK + 1))
@@ -1634,6 +1683,18 @@ check_memory_backstop() {
     else
         MEM_ABORT_STREAK=0
     fi
+
+    if [[ "$MEM_CRITICAL_STREAK" -gt 0 ]]; then
+        MEM_WARNING_STATUS="Memory pressure CRITICAL (${MEM_CRITICAL_STREAK}/${MEM_CRITICAL_CONSECUTIVE_POLLS} checks before auto-stop)"
+    elif [[ "$MEM_ABORT_STREAK" -gt 0 ]]; then
+        MEM_WARNING_STATUS="Free memory ${pct_free}% < ${MEM_ABORT_BELOW_PCT}% abort threshold (${MEM_ABORT_STREAK}/${MEM_ABORT_CONSECUTIVE_POLLS} checks before auto-stop)"
+    elif [[ -n "$pressure" && "$pressure" -eq 2 ]]; then
+        MEM_WARNING_STATUS="Kernel memory pressure WARN (free memory ${pct_free:-?}%)"
+    elif [[ -n "$pct_free" ]] && awk -v p="$pct_free" -v w="$warn_pct" 'BEGIN{exit !(p<w)}'; then
+        MEM_WARNING_STATUS="Low free memory: ${pct_free}% (<${warn_pct}% warning threshold)"
+    elif [[ -n "$pct_free" ]] && awk -v p="$pct_free" -v c="$caution_pct" 'BEGIN{exit !(p<c)}'; then
+        MEM_WARNING_STATUS="Memory caution: ${pct_free}% free (<${caution_pct}% caution threshold)"
+    fi
     return 0
 }
 
@@ -1643,13 +1704,31 @@ check_memory_backstop() {
 # expected process still owns the port: a dead backend fails the curl; a backend that
 # got its port stolen out from under it (e.g. something else bound to $MLX_PORT after
 # ours exited) would still make SOME /health call succeed, just not against our process.
+# Also distinguishes curl HTTP timeout (exit 28) while the expected process still owns
+# the port (which happens during heavy synchronous Metal prefill / vision passes) from
+# connection refused / port loss, using BACKEND_HANG_CONSECUTIVE_POLLS (90s) for the
+# former so legitimate long prefills are never killed after 10 seconds.
 check_backend_alive() {
-    if curl -fsS --max-time 3 "http://$MLX_HOST:$MLX_PORT/health" > /dev/null 2>&1 \
-        && mlx_port_owner_is_expected; then
+    local curl_rc=0
+    curl -fsS --max-time 2 "http://$MLX_HOST:$MLX_PORT/health" > /dev/null 2>&1 || curl_rc=$?
+
+    if [[ "$curl_rc" -eq 0 ]] && mlx_port_owner_is_expected; then
         BACKEND_DOWN_STREAK=0
+        BACKEND_BUSY_STREAK=0
         return 0
     fi
 
+    if [[ "$curl_rc" -eq 28 ]] && mlx_port_owner_is_expected; then
+        BACKEND_DOWN_STREAK=0
+        BACKEND_BUSY_STREAK=$(( ${BACKEND_BUSY_STREAK:-0} + 1 ))
+        if [[ "$BACKEND_BUSY_STREAK" -ge "${BACKEND_HANG_CONSECUTIVE_POLLS:-18}" ]]; then
+            TEARDOWN_REASON="Backend on $MLX_HOST:$MLX_PORT timed out on /health for ${BACKEND_BUSY_STREAK} consecutive checks (inference hung) -- stopping. Check $MLX_LOG_FILE for the last thing it logged before this."
+            return 1
+        fi
+        return 0
+    fi
+
+    BACKEND_BUSY_STREAK=0
     BACKEND_DOWN_STREAK=$((BACKEND_DOWN_STREAK + 1))
     if [[ "$BACKEND_DOWN_STREAK" -ge "$BACKEND_DOWN_CONSECUTIVE_POLLS" ]]; then
         TEARDOWN_REASON="Backend not responding on $MLX_HOST:$MLX_PORT for ${BACKEND_DOWN_STREAK} consecutive checks (process died or port was taken over) -- stopping. Check $MLX_LOG_FILE for the last thing it logged before this."
@@ -1713,9 +1792,11 @@ run_dashboard() {
     [[ -n "$old_stty" ]] && stty -icanon -echo min 0 time 0 2>/dev/null || true
 
     while true; do
+        local loop_start_ts loop_elapsed sleep_rem
+        loop_start_ts=$(date +%s)
+
         if ! check_memory_backstop; then
-            render_dashboard
-            full_teardown "$TEARDOWN_REASON"
+            full_teardown "$TEARDOWN_REASON" "emergency"
         fi
 
         if ! check_backend_alive; then
@@ -1725,8 +1806,12 @@ run_dashboard() {
 
         render_dashboard
 
+        loop_elapsed=$(( $(date +%s) - loop_start_ts ))
+        sleep_rem=$(( DASHBOARD_POLL_INTERVAL - loop_elapsed ))
+        [[ "$sleep_rem" -lt 1 ]] && sleep_rem=1
+
         local key=""
-        read -r -t "$DASHBOARD_POLL_INTERVAL" -n 1 key || true
+        read -r -t "$sleep_rem" -n 1 key || true
         if [[ "$key" == "q" || "$key" == "Q" ]]; then
             full_teardown "stopped by user (q)"
         fi

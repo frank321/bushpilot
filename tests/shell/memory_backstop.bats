@@ -114,3 +114,49 @@ stub_memory() {
     [ "$status" -eq 0 ]
     [ "$MEM_ABORT_STREAK" -eq 0 ]
 }
+
+@test "MEM_WARNING_STATUS populates for caution (<25%), warn (<18% or pressure=2), and clears when healthy" {
+    MEM_WARN_BELOW_PCT=18
+    MEM_CAUTION_BELOW_PCT=25
+
+    stub_memory 22 1
+    call check_memory_backstop
+    [ "$status" -eq 0 ]
+    [[ "$MEM_WARNING_STATUS" == *"Memory caution: 22% free"* ]]
+
+    stub_memory 15 1
+    call check_memory_backstop
+    [ "$status" -eq 0 ]
+    [[ "$MEM_WARNING_STATUS" == *"Low free memory: 15%"* ]]
+
+    stub_memory 40 2
+    call check_memory_backstop
+    [ "$status" -eq 0 ]
+    [[ "$MEM_WARNING_STATUS" == *"Kernel memory pressure WARN"* ]]
+
+    stub_memory 50 1
+    call check_memory_backstop
+    [ "$status" -eq 0 ]
+    [ -z "$MEM_WARNING_STATUS" ]
+}
+
+@test "emergency full_teardown kills server BEFORE rendering dashboard and skips calibration snapshot" {
+    source_backstop_functions full_teardown
+    MLX_PROC_PATTERN="mlx_vlm.server"
+    MLX_STATE_FILE="/tmp/bats-mlx-state-$$"
+    MEM_EMERGENCY_KILL_TIMEOUT=3
+    order_file="/tmp/bats-teardown-order-$$"
+    rm -f "$order_file"
+
+    log_teardown() { printf 'log,' >> "$order_file"; }
+    save_calibration_snapshot() { printf 'cal,' >> "$order_file"; }
+    wait_for_process_gone() { printf 'kill(%s),' "$3" >> "$order_file"; }
+    render_dashboard() { printf 'render,' >> "$order_file"; }
+    stty() { :; }
+
+    ( full_teardown "Memory pressure CRITICAL" "emergency" )
+    actual="$(cat "$order_file")"
+    rm -f "$order_file"
+    [ "$actual" = "log,kill(3),render," ]
+}
+

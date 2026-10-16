@@ -15,7 +15,9 @@ setup() {
     MLX_PROC_PATTERN="mlx_vlm.server"
     MLX_LOG_FILE="/tmp/bats-mlx-server.log"
     BACKEND_DOWN_CONSECUTIVE_POLLS=2
+    BACKEND_HANG_CONSECUTIVE_POLLS=4
     BACKEND_DOWN_STREAK=0
+    BACKEND_BUSY_STREAK=0
     TEARDOWN_REASON=""
 }
 
@@ -61,11 +63,14 @@ setup() {
 # --- check_backend_alive --------------------------------------------------------------
 
 stub_backend() {
-    # $1 = "up" or "down" (curl's /health probe), $2 = "owned" or "stolen" (port owner)
+    # $1 = "up", "down" (conn refused), or "timeout" (HTTP timeout during prefill)
+    # $2 = "owned" or "stolen" (port owner)
     if [ "$1" = "up" ]; then
         curl() { return 0; }
+    elif [ "$1" = "timeout" ]; then
+        curl() { return 28; }  # curl's real exit code for CURLE_OPERATION_TIMEDOUT
     else
-        curl() { return 7; }  # curl's real exit code for "couldn't connect"
+        curl() { return 7; }   # curl's real exit code for "couldn't connect"
     fi
     if [ "$2" = "owned" ]; then
         lsof() { echo "4242"; }
@@ -79,9 +84,11 @@ stub_backend() {
 @test "healthy backend: returns 0 and resets the streak" {
     stub_backend up owned
     BACKEND_DOWN_STREAK=1
+    BACKEND_BUSY_STREAK=2
     call check_backend_alive
     [ "$status" -eq 0 ]
     [ "$BACKEND_DOWN_STREAK" -eq 0 ]
+    [ "$BACKEND_BUSY_STREAK" -eq 0 ]
 }
 
 @test "a single health-check failure is debounced, not an immediate teardown" {
@@ -122,3 +129,25 @@ stub_backend() {
     [ "$BACKEND_DOWN_STREAK" -eq 1 ]
     [ -z "$TEARDOWN_REASON" ]
 }
+
+@test "HTTP timeout (exit 28) while expected process owns port increments busy streak, not 2-poll down streak" {
+    stub_backend timeout owned
+    check_backend_alive
+    check_backend_alive
+    call check_backend_alive
+    [ "$status" -eq 0 ]
+    [ -z "$TEARDOWN_REASON" ]
+    [ "$BACKEND_DOWN_STREAK" -eq 0 ]
+    [ "$BACKEND_BUSY_STREAK" -eq 3 ]
+}
+
+@test "HTTP timeout (exit 28) for BACKEND_HANG_CONSECUTIVE_POLLS consecutive checks tears down as hung inference" {
+    stub_backend timeout owned
+    check_backend_alive
+    check_backend_alive
+    check_backend_alive
+    call check_backend_alive
+    [ "$status" -eq 1 ]
+    [[ "$TEARDOWN_REASON" == *"timed out on /health for 4 consecutive checks (inference hung)"* ]]
+}
+
