@@ -29,7 +29,7 @@ OPENCODE_CONFIG="$HOME/.config/opencode/opencode.jsonc"
 # the running server's actual config, so an env override is the only way to point it
 # at a non-default port if one was ever used.
 MLX_PORT="${MLX_PORT:-38472}"
-MLX_SERVER_MODULE="mlx_vlm.server"
+MLX_PROC_PATTERN="mlx_vlm\.server|mlx-dspark serve"
 
 log_info() { echo "[INFO] $*"; }
 log_error() { echo "[ERROR] $*" >&2; }
@@ -43,7 +43,7 @@ for arg in "$@"; do
         -h|--help)
             echo "Usage: $(basename "$0") [-y|--yes]"
             echo
-            echo "Removes ~/.bushpilot, the OpenCode mlx-direct provider, this"
+            echo "Removes ~/.bushpilot, the OpenCode/Pi mlx-direct providers, this"
             echo "project's PATH symlinks, and this project folder."
             exit 0
             ;;
@@ -72,6 +72,7 @@ echo "This will remove:"
 echo "  - Any running Bushpilot model server"
 echo "  - $BUSHPILOT_HOME (downloaded models, logs, state -- $bushpilot_home_size)"
 echo "  - The mlx-direct provider entry in $OPENCODE_CONFIG, if present"
+echo "  - The mlx-direct provider entry in ~/.pi/agent/models.json, if present"
 echo "  - PATH symlinks to start_mlx_server.sh/launch_tool.sh, if any"
 echo "  - This folder: $SCRIPT_DIR"
 echo
@@ -95,7 +96,7 @@ stop_running_server() {
         pids="$(lsof -ti "tcp:$MLX_PORT" 2>/dev/null || true)"
     fi
     if [[ -z "$pids" ]] && is_command_available pgrep; then
-        pids="$(pgrep -f "$MLX_SERVER_MODULE" 2>/dev/null || true)"
+        pids="$(pgrep -f "$MLX_PROC_PATTERN" 2>/dev/null || true)"
     fi
     if [[ -z "$pids" ]]; then
         log_info "No running model server found"
@@ -105,11 +106,11 @@ stop_running_server() {
     log_info "Stopping running model server (PID(s): $pids)..."
     kill -TERM $pids > /dev/null 2>&1 || true
     local attempts=0
-    while is_command_available pgrep && pgrep -f "$MLX_SERVER_MODULE" > /dev/null 2>&1; do
+    while is_command_available pgrep && pgrep -f "$MLX_PROC_PATTERN" > /dev/null 2>&1; do
         attempts=$((attempts + 1))
         if [[ "$attempts" -ge 10 ]]; then
             log_info "Still running after 10s -- sending SIGKILL..."
-            pkill -KILL -f "$MLX_SERVER_MODULE" > /dev/null 2>&1 || true
+            pkill -KILL -f "$MLX_PROC_PATTERN" > /dev/null 2>&1 || true
             break
         fi
         sleep 1
@@ -264,7 +265,51 @@ PYEOF
 }
 remove_opencode_provider
 
-# --- 4. Remove ~/.bushpilot ----------------------------------------------------------
+# --- 4. Remove the Pi mlx-direct provider -------------------------------------------
+remove_pi_provider() {
+    local pi_config="$HOME/.pi/agent/models.json"
+    if [[ ! -f "$pi_config" ]]; then
+        return 0
+    fi
+    if ! is_command_available python3; then
+        log_error "python3 not found -- could not check $pi_config for the mlx-direct provider"
+        return 0
+    fi
+
+    local result
+    result="$(python3 - "$pi_config" <<'PYEOF'
+import json
+import sys
+
+config_path = sys.argv[1]
+try:
+    with open(config_path) as f:
+        parsed = json.load(f)
+except Exception:
+    sys.exit(0)
+
+providers = parsed.get("providers", {})
+if "mlx-direct" not in providers:
+    sys.exit(0)
+
+del providers["mlx-direct"]
+if not providers:
+    parsed.pop("providers", None)
+
+with open(config_path, "w") as f:
+    json.dump(parsed, f, indent=2)
+    f.write("\n")
+print("REMOVED")
+PYEOF
+    )" || true
+
+    if [[ "$result" == "REMOVED" ]]; then
+        log_success "Removed mlx-direct provider from $pi_config"
+    fi
+}
+remove_pi_provider
+
+# --- 5. Remove ~/.bushpilot ----------------------------------------------------------
 if [[ -d "$BUSHPILOT_HOME" ]]; then
     rm -rf "$BUSHPILOT_HOME"
     log_success "Removed $BUSHPILOT_HOME"
@@ -272,7 +317,7 @@ else
     log_info "$BUSHPILOT_HOME doesn't exist -- nothing to remove"
 fi
 
-# --- 5. Remove this project folder itself, last --------------------------------------
+# --- 6. Remove this project folder itself, last --------------------------------------
 # Deleting the directory a running script's file lives in is safe on macOS/Linux --
 # the shell already has this file open for reading, and an open file descriptor
 # keeps working after its directory entry is unlinked. Nothing below this line reads
