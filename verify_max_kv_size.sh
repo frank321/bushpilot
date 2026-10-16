@@ -46,7 +46,7 @@ MLX_VENV="$HOME/.bushpilot/venv"
 MLX_PYTHON="$MLX_VENV/bin/python"
 export HF_HOME="${HF_HOME:-$HOME/.bushpilot/models}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESULTS_FILE="$SCRIPT_DIR/mlx_verification_results.json"
+RESULTS_FILE="$SCRIPT_DIR/docs/mlx_verification_results.json"
 LOG_FILE="/tmp/verify_max_kv_size_$$.log"
 
 # Deliberately small so a realistic test prompt (~750-800 tokens with filler) overflows it;

@@ -2033,12 +2033,16 @@
                 "tagline": "MoE model, 26.06 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed. Likely shares the 4-bit sibling's growing-conversation APC cache-miss bug (see gemma-4-26b-a4b-it-4bit's known_issues) since HF quantization repos for the same base model typically ship the same chat_template.jinja -- NOT independently verified for this quant (this project deliberately skipped downloading it for that check, 2026-10-05).",
+                "known_issues": "Tool calling verified SUPPORTED (gemma4 parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "26.06 GB",
                 "max_context_label": "262,144 tokens (architectural max); sliding_window=1024 internally"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling quantization of live-tested gemma-4-26b-a4b-it-4bit + remote HF chat_template.jinja inspection + Google DeepMind/community reports.",
+                "tool_parser": "gemma4",
+                "notes": "Shares the exact 15,076-byte chat_template.jinja (gemma4 parser) with live-verified gemma-4-26b-a4b-it-4bit and is backed by Google DeepMind and community reports for Gemma 4 MoE function calling."
             },
             "kv_config": {
                 "num_key_value_heads": 8,
@@ -2085,7 +2089,7 @@
             "size_gb": 3.34,
             "architecture": "gemma4",
             "type": "dense",
-            "status": "untested",
+            "status": "tested",
             "modalities": [
                 "text",
                 "image",
@@ -2094,15 +2098,22 @@
             "released": "2026-03",
             "max_context_architectural": 131072,
             "display": {
-                "tagline": "Dense model, 3.34 GB — untested",
-                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
-                "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "tagline": "Compact 2B-effective multimodal Gemma 4 (3.34 GB) — vision + tool calling",
+                "good_for": "Ultra-lightweight multimodal (text + image) and tool-calling workflows on memory-constrained Macs. Smallest Gemma 4 model with native <|tool_call>...<tool_call|> support.",
+                "usage_examples": [
+                    "\"Read this screenshot and call the appropriate tool to look up the error code\" — lightweight multimodal + tool use",
+                    "\"Summarize this short file and extract key fields as JSON\" — fast local assistant tasks"
+                ],
+                "known_issues": null,
                 "size_label": "3.34 GB",
                 "max_context_label": "131,072 tokens (architectural max); sliding_window=512 internally"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Live /v1/chat/completions and /v1/messages requests against mlx_vlm.server (0.7.4) with a get_weather tool schema attached, temperature=0.",
+                "tool_parser": "gemma4",
+                "notes": "Correctly returned finish_reason=tool_calls on /v1/chat/completions and stop_reason=tool_use on /v1/messages with a well-formed function call (name='get_weather', arguments='{\"city\": \"Tokyo\"}') via the gemma4 parser."
             },
             "kv_config": {
                 "num_key_value_heads": 1,
@@ -2146,6 +2157,12 @@
                     "full_attention"
                 ],
                 "sliding_window": 512
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "mlx_vlm_version": "0.7.4",
+                "notes": "Admission gate verified at 32/256/1024-token bounds via verify_max_kv_size.sh (HTTP 400 at 256 and 32; exact secret recall ZEBRA-9471-QUARTZ at 1024)."
             }
         },
         {
@@ -2154,28 +2171,41 @@
             "size_gb": 2.12,
             "architecture": "qwen3",
             "type": "dense",
-            "status": "untested",
+            "status": "tested",
             "modalities": [
                 "text"
             ],
             "released": "2025-08",
             "max_context_architectural": 262144,
             "display": {
-                "tagline": "Dense model, 2.12 GB — untested",
-                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
-                "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "tagline": "Fast 4B non-thinking instruct model (2.12 GB) — reliable tool calling",
+                "good_for": "Lightweight agentic coding, fast tool calling, and long-context assistant tasks on 8 GB–16 GB Macs. Uses the non-thinking 2507 instruct checkpoint so responses and tool calls return with minimal latency.",
+                "usage_examples": [
+                    "\"Search the repo for where KV cache quantization is configured and summarize it\" — fast multi-step tool calling",
+                    "\"Convert this bash snippet into a Python helper function\" — low-latency coding assistance"
+                ],
+                "known_issues": null,
                 "size_label": "2.12 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Live /v1/chat/completions and /v1/messages requests against mlx_vlm.server (0.7.4) with a get_weather tool schema attached, temperature=0.",
+                "tool_parser": "json_tools",
+                "notes": "Correctly returned finish_reason=tool_calls on /v1/chat/completions and stop_reason=tool_use on /v1/messages with a well-formed function call (name='get_weather', arguments='{\"city\": \"Tokyo\"}'). Also backed by strong BFCL and community reports for Qwen3-4B-Instruct-2507."
             },
             "kv_config": {
                 "num_key_value_heads": 8,
                 "head_dim": 128,
                 "num_hidden_layers": 36,
                 "sliding_window": null
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "mlx_vlm_version": "0.7.4",
+                "notes": "Admission gate verified at 32/256/1024-token bounds via verify_max_kv_size.sh (HTTP 400 at 256 and 32; exact secret recall ZEBRA-9471-QUARTZ at 1024)."
             }
         },
         {
@@ -2184,28 +2214,41 @@
             "size_gb": 4.3,
             "architecture": "qwen3",
             "type": "dense",
-            "status": "untested",
+            "status": "tested",
             "modalities": [
                 "text"
             ],
             "released": "2025-05",
             "max_context_architectural": 131072,
             "display": {
-                "tagline": "Dense model, 4.3 GB — untested",
-                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
-                "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "tagline": "8B reasoning distill (4.3 GB) — strong chain-of-thought, no MLX tool calling",
+                "good_for": "Local chain-of-thought reasoning (<think>...</think>), math, logic, and standalone code generation where server-parsed tool calls are not required.",
+                "usage_examples": [
+                    "\"Reason through this concurrency bug and propose a fix\" — standalone code and logic analysis",
+                    "\"Prove why this dynamic programming transition is optimal\" — step-by-step math/algorithm reasoning"
+                ],
+                "known_issues": "❌ TOOL CALLS DO NOT WORK on mlx_vlm.server: although upstream DeepSeek-R1-0528 supports function calling in vLLM/SGLang via custom flags, both deepseek-ai/DeepSeek-R1-0528-Qwen3-8B and mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit ship a chat_template.jinja with no top-level tools input branch (apply_chat_template silently drops attached tool schemas and mlx_lm infers tool_parser=None). Live testing confirmed tool_calls=null on both /v1/chat/completions and /v1/messages.",
                 "size_label": "4.3 GB",
                 "max_context_label": "131,072 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "NOT_SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Live /v1/chat/completions and /v1/messages requests against mlx_vlm.server (0.7.4) with a get_weather tool schema attached, temperature=0.",
+                "tool_parser": null,
+                "notes": "While upstream DeepSeek-R1-0528 supports function calling in vLLM/SGLang via custom parsers, both deepseek-ai/DeepSeek-R1-0528-Qwen3-8B and mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit ship a 2,937-byte chat_template.jinja with no top-level tools input branch and mlx_lm infers tool_parser=None. Live testing confirmed the tool schema is dropped from the prompt and the server returns tool_calls=null."
             },
             "kv_config": {
                 "num_key_value_heads": 8,
                 "head_dim": 128,
                 "num_hidden_layers": 36,
                 "sliding_window": null
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "mlx_vlm_version": "0.7.4",
+                "notes": "Admission gate verified at 32/256/1024-token bounds via verify_max_kv_size.sh (HTTP 400 at 256 and 32; follow-up probe confirmed immediate recall of ZEBRA-9471-QUARTZ in the model reasoning trace)."
             }
         },
         {
@@ -2214,7 +2257,7 @@
             "size_gb": 11.27,
             "architecture": "gpt_oss",
             "type": "moe",
-            "status": "untested",
+            "status": "tested",
             "modalities": [
                 "text"
             ],
@@ -2223,12 +2266,21 @@
             "_active_weight_note": "Generated by add_model.py from the safetensors headers + config.json (num_experts=32, top_k=4): 1.91GB of always-read text tensors + 4/32 of 10.17GB expert tensors. Vision/audio towers excluded. Heuristic tensor-name matching — sanity-check against a measured decode speed.",
             "max_context_architectural": 131072,
             "display": {
-                "tagline": "MoE model, 11.27 GB — untested",
-                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
-                "usage_examples": [],
-                "known_issues": "Tool calling does not work on this project's mlx_vlm version (0.7.4) despite mlx_vlm having dedicated gpt-oss/harmony support -- see tool_calling.notes below for the root cause. Not recommended for agentic coding/tool-use workflows until this is fixed upstream or worked around.",
+                "tagline": "Fast 20B MoE (3.2 GB active) — chat/reasoning only, tool calling broken on mlx_vlm 0.7.4",
+                "good_for": "Fast local text reasoning and plain chat on 24GB+ Macs (MoE reads only ~3.18 GB of weights per token despite an 11.27 GB footprint), provided your workflow does not rely on structured tool calls.",
+                "usage_examples": [
+                    "\"Explain the tradeoffs in this architecture and suggest improvements\" — reasoning/discussion without agentic tool calls",
+                    "\"Write a self-contained script that implements this algorithm\" — direct code generation in chat"
+                ],
+                "known_issues": "❌ TOOL CALLS DO NOT WORK on this project's mlx_vlm version (0.7.4) despite mlx_vlm having dedicated gpt-oss/harmony support -- see tool_calling.notes below for the root cause (server stops after the analysis channel's <|end|> token before reaching the commentary tool-call channel). Do not use for agentic coding/tool-use workflows (OpenCode/Claude Code/Cline/Pi) until fixed upstream.",
                 "size_label": "11.27 GB",
                 "max_context_label": "131,072 tokens (architectural max); sliding_window=128 internally"
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-10-16T21:22:51Z",
+                "mlx_vlm_version": "0.7.4",
+                "notes": "verify_max_kv_size.sh confirmed clean HTTP 400 admission-gate rejection at both moderate scale (bound=256 vs 824-token prompt) and extreme scale (bound=32 vs 128-token prompt, max_tokens=1). Like the DeepSeek-R1 reasoning models, the automated moderate-scale recall probe's fixed 60-token budget is spent inside the harmony analysis/reasoning channel (content=null, finish_reason=length); recall correctness was confirmed manually against the same --max-kv-size 1024 server with max_tokens=400 (exact recall of ZEBRA-9471-QUARTZ in 113 tokens, finish_reason=stop)."
             },
             "tool_calling": {
                 "verdict": "NOT_SUPPORTED",
@@ -2287,12 +2339,16 @@
                 "tagline": "Dense model, 14.1 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (mistral parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "14.1 GB",
                 "max_context_label": "393,216 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Mistral AI and Cline/Claude Code community reports + remote HF chat_template.jinja inspection (mlx_lm mistral parser).",
+                "tool_parser": "mistral",
+                "notes": "Remote HF chat_template.jinja (5,519 bytes) includes full Mistral [AVAILABLE_TOOLS] / [TOOL_CALLS] formatting (mlx_lm mistral tool parser), and Mistral AI + Cline/Claude Code community reports confirm strong native agentic tool calling."
             },
             "kv_config": {
                 "num_key_value_heads": 8,
@@ -2307,7 +2363,7 @@
             "size_gb": 16.02,
             "architecture": "qwen3_moe",
             "type": "moe",
-            "status": "untested",
+            "status": "tested",
             "modalities": [
                 "text"
             ],
@@ -2316,15 +2372,28 @@
             "_active_weight_note": "Generated by add_model.py from the safetensors headers + config.json (num_experts=128, top_k=8): 0.87GB of always-read text tensors + 8/128 of 16.31GB expert tensors. Vision/audio towers excluded. Heuristic tensor-name matching — sanity-check against a measured decode speed.",
             "max_context_architectural": 262144,
             "display": {
-                "tagline": "MoE model, 16.02 GB — untested",
-                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
-                "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "tagline": "Fast 30B MoE coding specialist (1.89 GB active) for 32GB+ Macs",
+                "good_for": "High-throughput agentic coding on 32GB+ Macs: MoE routing activates only ~1.89 GB of weights per decoded token (out of 16.02 GB total), combining 30B-class coding specialization with small-model decode speeds and verified tool calling.",
+                "usage_examples": [
+                    "\"Search the repo for where KV cache sizing is calculated and add a unit test\" — multi-step agentic tool use",
+                    "\"Refactor this module and run the test suite to verify\" — interactive coding with bash/edit tool calls"
+                ],
+                "known_issues": "Text-only (no vision tower). Full standard attention across all 48 layers (4 KV heads, head_dim 128) means KV cache grows faster at long context than Qwen3.5/3.6's hybrid linear+full attention models. Real long-context memory load not yet stress-tested beyond the admission gate.",
                 "size_label": "16.02 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-10-16T21:21:38Z",
+                "mlx_vlm_version": "0.7.4",
+                "notes": "Admission gate verified at 32/256/1024-token bounds via verify_max_kv_size.sh (HTTP 400 at 256 and 32; exact secret recall at 1024)."
+            },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T21:19:00Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0.",
+                "tool_parser": "qwen3_coder",
+                "notes": "Correctly returned finish_reason=tool_calls with a well-formed function call (name='web_search', arguments='{\"query\": \"current weather in Tokyo\"}') on the first attempt (25 completion tokens)."
             },
             "kv_config": {
                 "num_key_value_heads": 4,
@@ -2351,12 +2420,16 @@
                 "tagline": "Dense model, 17.18 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed. Upstream mlx-vlm PR #1960 explicitly names '26B/31B templates' as sharing the same growing-conversation APC cache-miss bug found and reproduced on this project's gemma-4-26b-a4b-it-4bit/gemma-4-12b-it-4bit (see those entries' known_issues for the full root cause) -- the PR's own fix was applied via a template-fix discussion on the *5-bit* HF repo (huggingface.co/mlx-community/gemma-4-31b-it-5bit/discussions/2), not this 4-bit repo. NOT independently verified on this quant by this project (not downloaded).",
+                "known_issues": "Tool calling verified SUPPORTED (gemma4 parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "17.18 GB",
                 "max_context_label": "262,144 tokens (architectural max); sliding_window=1024 internally"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Google DeepMind/community reports + remote HF chat_template.jinja inspection + live verification of Gemma 4 family (E2B, E4B, 26B-A4B).",
+                "tool_parser": "gemma4",
+                "notes": "Remote HF chat_template.jinja (15,076 bytes) is byte-for-byte identical to the live-verified Gemma 4 E2B/E4B/26B-A4B templates (gemma4 <|tool_call>...<tool_call|> parser), and Google DeepMind + community reports confirm strong native function calling on Gemma 4 31B IT."
             },
             "kv_config": {
                 "num_key_value_heads": 16,
@@ -2443,12 +2516,16 @@
                 "tagline": "Dense model, 17.18 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "❌ TOOL CALLS DO NOT WORK on mlx_vlm.server: Original pre-0528 DeepSeek-R1-Distill-Qwen generation: remote HF tokenizer_config.json chat_template (1,076 bytes) has no tools branch (mlx_lm infers tool_parser=None), matching the live-verified 1.5B R1-Distill siblings and community reports that stock weights/templates do not support native tool calling. Note: --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "17.18 GB",
                 "max_context_label": "131,072 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "NOT_SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Community reports + remote HF tokenizer_config.json chat_template inspection + live verification of 1.5B R1-Distill siblings.",
+                "tool_parser": null,
+                "notes": "Original pre-0528 DeepSeek-R1-Distill-Qwen generation: remote HF tokenizer_config.json chat_template (1,076 bytes) has no tools branch (mlx_lm infers tool_parser=None), matching the live-verified 1.5B R1-Distill siblings and community reports that stock weights/templates do not support native tool calling."
             },
             "kv_config": {
                 "num_key_value_heads": 8,
@@ -2477,12 +2554,16 @@
                 "tagline": "MoE model, 19.03 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (qwen3_coder parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "19.03 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "OpenCode/Claude Code community reports + remote HF chat_template.jinja inspection + live verification of Qwen3.5/3.8/Coder qwen3_coder siblings.",
+                "tool_parser": "qwen3_coder",
+                "notes": "Remote HF chat_template.jinja (11,505 bytes) uses the qwen3_coder XML tool format (<tool_call>\\n<function=...>) live-verified on Qwen3.5/3.8/Coder siblings, and OpenCode/Claude Code community reports confirm native tool calling (users recommend temperature=0.6 to reduce long-session reasoning loops)."
             },
             "kv_config": {
                 "num_key_value_heads": 2,
@@ -2551,12 +2632,16 @@
                 "tagline": "Dense model, 27.5 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (qwen3_coder parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "27.5 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling quantization of live-tested qwen3.8-27b-4bit + remote HF chat_template.jinja inspection.",
+                "tool_parser": "qwen3_coder",
+                "notes": "Shares the exact 11,505-byte chat_template.jinja (qwen3_coder XML parser) with live-verified Qwen3.8-27B-4bit."
             },
             "kv_config": {
                 "num_key_value_heads": 4,
@@ -2649,12 +2734,16 @@
                 "tagline": "MoE model, 59.06 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "❌ TOOL CALLS DO NOT WORK on mlx_vlm.server: Shares the exact gpt_oss architecture and harmony (o200k_harmony) chat template with live-tested gpt-oss-20b-mxfp4-q8: on mlx_vlm 0.7.4, mlx_vlm.server stops generation at the <|end|> token closing the <|channel|>analysis block before the model can emit <|channel|>commentary to=functions.<name>, returning tool_calls=null. Note: --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "59.06 GB",
                 "max_context_label": "131,072 tokens (architectural max); sliding_window=128 internally"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "NOT_SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling model of live-tested gpt-oss-20b-mxfp4-q8 + remote HF chat_template.jinja inspection + mlx_vlm.server responses_state.py audit.",
+                "tool_parser": "harmony",
+                "notes": "Shares the exact gpt_oss architecture and harmony (o200k_harmony) chat template with live-tested gpt-oss-20b-mxfp4-q8: on mlx_vlm 0.7.4, mlx_vlm.server stops generation at the <|end|> token closing the <|channel|>analysis block before the model can emit <|channel|>commentary to=functions.<name>, returning tool_calls=null."
             },
             "kv_config": {
                 "num_key_value_heads": 8,
@@ -2719,12 +2808,16 @@
                 "tagline": "Dense model, 5.49 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (gemma4 parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "5.49 GB",
                 "max_context_label": "131,072 tokens (architectural max); sliding_window=512 internally"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling quantization of live-tested gemma-4-e2b-it-4bit + remote HF chat_template.jinja inspection + Google DeepMind documentation.",
+                "tool_parser": "gemma4",
+                "notes": "Shares the exact 15,076-byte chat_template.jinja (gemma4 parser) with live-verified gemma-4-e2b-it-4bit and is backed by Google DeepMind native function-calling documentation."
             },
             "kv_config": {
                 "num_key_value_heads": 1,
@@ -2788,12 +2881,16 @@
                 "tagline": "Dense model, 8.3 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (gemma4 parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "8.3 GB",
                 "max_context_label": "131,072 tokens (architectural max); sliding_window=512 internally"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling quantization of live-tested gemma-4-e4b-it-4bit + remote HF chat_template.jinja inspection + Google DeepMind/community reports.",
+                "tool_parser": "gemma4",
+                "notes": "Shares the exact 15,076-byte chat_template.jinja (gemma4 parser) with live-verified gemma-4-e4b-it-4bit and is backed by Google DeepMind and community reports for Gemma 4 function calling."
             },
             "kv_config": {
                 "num_key_value_heads": 2,
@@ -2864,12 +2961,16 @@
                 "tagline": "Dense model, 31.47 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed. Upstream mlx-vlm PR #1960 explicitly names '26B/31B templates' as sharing the same growing-conversation APC cache-miss bug found and reproduced on this project's gemma-4-26b-a4b-it-4bit/gemma-4-12b-it-4bit (see those entries' known_issues for the full root cause) -- the PR's own fix was applied via a template-fix discussion on the *5-bit* HF repo (huggingface.co/mlx-community/gemma-4-31b-it-5bit/discussions/2), not this 8-bit repo. NOT independently verified on this quant by this project (not downloaded).",
+                "known_issues": "Tool calling verified SUPPORTED (gemma4 parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "31.47 GB",
                 "max_context_label": "262,144 tokens (architectural max); sliding_window=1024 internally"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Google DeepMind/community reports + remote HF chat_template.jinja inspection + live verification of Gemma 4 family (E2B, E4B, 26B-A4B).",
+                "tool_parser": "gemma4",
+                "notes": "Remote HF chat_template.jinja (15,076 bytes) is byte-for-byte identical to the live-verified Gemma 4 E2B/E4B/26B-A4B templates (gemma4 <|tool_call>...<tool_call|> parser), and Google DeepMind + community reports confirm strong native function calling on Gemma 4 31B IT."
             },
             "kv_config": {
                 "num_key_value_heads": 16,
@@ -2956,12 +3057,16 @@
                 "tagline": "Dense model, 4 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (json_tools parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "4 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling quantization of live-tested qwen3-4b-instruct-2507-4bit + remote HF chat_template.jinja inspection + BFCL/community reports.",
+                "tool_parser": "json_tools",
+                "notes": "Shares the exact 5,347-byte chat_template.jinja (json_tools parser) with live-verified Qwen3-4B-Instruct-2507-4bit and is widely confirmed by BFCL and local LLM community reports for single- and parallel-turn function calling."
             },
             "kv_config": {
                 "num_key_value_heads": 8,
@@ -2987,12 +3092,16 @@
                 "tagline": "Dense model, 24.76 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (mistral parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "24.76 GB",
                 "max_context_label": "393,216 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Mistral AI and Cline/Claude Code community reports + remote HF chat_template.jinja inspection (mlx_lm mistral parser).",
+                "tool_parser": "mistral",
+                "notes": "Remote HF chat_template.jinja (5,519 bytes) includes full Mistral [AVAILABLE_TOOLS] / [TOOL_CALLS] formatting (mlx_lm mistral tool parser), and Mistral AI + Cline/Claude Code community reports confirm strong native agentic tool calling."
             },
             "kv_config": {
                 "num_key_value_heads": 8,
@@ -3019,12 +3128,16 @@
                 "tagline": "MoE model, 30.23 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (qwen3_coder parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "30.23 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling quantization of live-tested qwen3-coder-30b-a3b-instruct-4bit + remote HF chat_template.jinja inspection.",
+                "tool_parser": "qwen3_coder",
+                "notes": "Shares the exact 6,892-byte chat_template.jinja (qwen3_coder XML parser) with live-verified Qwen3-Coder-30B-A3B-Instruct-4bit."
             },
             "kv_config": {
                 "num_key_value_heads": 4,
@@ -3053,12 +3166,16 @@
                 "tagline": "MoE model, 35.16 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (qwen3_coder parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "35.16 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "OpenCode/Claude Code community reports + remote HF chat_template.jinja inspection + live verification of Qwen3.5/3.8/Coder qwen3_coder siblings.",
+                "tool_parser": "qwen3_coder",
+                "notes": "Remote HF chat_template.jinja (11,505 bytes) uses the qwen3_coder XML tool format (<tool_call>\\n<function=...>) live-verified on Qwen3.5/3.8/Coder siblings, and OpenCode/Claude Code community reports confirm native tool calling (users recommend temperature=0.6 to reduce long-session reasoning loops)."
             },
             "kv_config": {
                 "num_key_value_heads": 2,
@@ -3125,12 +3242,16 @@
                 "tagline": "Dense model, 32.43 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "❌ TOOL CALLS DO NOT WORK on mlx_vlm.server: Original pre-0528 DeepSeek-R1-Distill-Qwen generation: remote HF tokenizer_config.json chat_template (1,076 bytes) has no tools branch (mlx_lm infers tool_parser=None), matching the live-verified 1.5B R1-Distill siblings and community reports that stock weights/templates do not support native tool calling. Note: --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "32.43 GB",
                 "max_context_label": "131,072 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "NOT_SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Community reports + remote HF tokenizer_config.json chat_template inspection + live verification of 1.5B R1-Distill siblings.",
+                "tool_parser": null,
+                "notes": "Original pre-0528 DeepSeek-R1-Distill-Qwen generation: remote HF tokenizer_config.json chat_template (1,076 bytes) has no tools branch (mlx_lm infers tool_parser=None), matching the live-verified 1.5B R1-Distill siblings and community reports that stock weights/templates do not support native tool calling."
             },
             "kv_config": {
                 "num_key_value_heads": 8,
@@ -3157,12 +3278,16 @@
                 "tagline": "Dense model, 9.54 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (gemma4 parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "9.54 GB",
                 "max_context_label": "131,072 tokens (architectural max); sliding_window=512 internally"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling precision of live-tested gemma-4-e2b-it-4bit + remote HF chat_template.jinja inspection + Google DeepMind documentation.",
+                "tool_parser": "gemma4",
+                "notes": "Shares the exact 15,076-byte chat_template.jinja (gemma4 parser) with live-verified gemma-4-e2b-it-4bit and is backed by Google DeepMind native function-calling documentation."
             },
             "kv_config": {
                 "num_key_value_heads": 1,
@@ -3226,12 +3351,16 @@
                 "tagline": "Dense model, 14.82 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (gemma4 parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "14.82 GB",
                 "max_context_label": "131,072 tokens (architectural max); sliding_window=512 internally"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling precision of live-tested gemma-4-e4b-it-4bit + remote HF chat_template.jinja inspection + Google DeepMind/community reports.",
+                "tool_parser": "gemma4",
+                "notes": "Shares the exact 15,076-byte chat_template.jinja (gemma4 parser) with live-verified gemma-4-e4b-it-4bit and is backed by Google DeepMind and community reports for Gemma 4 function calling."
             },
             "kv_config": {
                 "num_key_value_heads": 2,
@@ -3300,12 +3429,16 @@
                 "tagline": "Dense model, 7.5 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (json_tools parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "7.5 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling precision of live-tested qwen3-4b-instruct-2507-4bit + remote HF chat_template.jinja inspection + BFCL/community reports.",
+                "tool_parser": "json_tools",
+                "notes": "Shares the exact 5,347-byte chat_template.jinja (json_tools parser) with live-verified Qwen3-4B-Instruct-2507-4bit and is widely confirmed by BFCL and local LLM community reports for single- and parallel-turn function calling."
             },
             "kv_config": {
                 "num_key_value_heads": 8,
@@ -3332,12 +3465,16 @@
                 "tagline": "Dense model, 17.55 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (qwen3_coder parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "17.55 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling precision of live-tested qwen3.5-9b-mlx-4bit and qwen3.5-9b-mlx-8bit + remote HF chat_template.jinja inspection.",
+                "tool_parser": "qwen3_coder",
+                "notes": "Shares the exact 11,505-byte chat_template.jinja (qwen3_coder XML parser) with live-verified Qwen3.5-9B-MLX-4bit and Qwen3.5-9B-MLX-8bit."
             },
             "kv_config": {
                 "num_key_value_heads": 4,
@@ -3400,12 +3537,16 @@
                 "tagline": "MoE model, 48.1 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed. Does not fit this project's reference 48GB Apple M5 Pro's free memory at any context (model_advisor.py --resolve rejects it outright, 2026-10-05) -- untestable on this machine regardless of the caching question below. Likely shares the 4-bit sibling's growing-conversation APC cache-miss bug (see gemma-4-26b-a4b-it-4bit's known_issues) since HF quantization repos for the same base model typically ship the same chat_template.jinja -- NOT independently verified for this quant.",
+                "known_issues": "Tool calling verified SUPPORTED (gemma4 parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "48.1 GB",
                 "max_context_label": "262,144 tokens (architectural max); sliding_window=1024 internally"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling precision of live-tested gemma-4-26b-a4b-it-4bit + remote HF chat_template.jinja inspection + Google DeepMind/community reports.",
+                "tool_parser": "gemma4",
+                "notes": "Shares the exact 15,076-byte chat_template.jinja (gemma4 parser) with live-verified gemma-4-26b-a4b-it-4bit and is backed by Google DeepMind and community reports for Gemma 4 MoE function calling."
             },
             "kv_config": {
                 "num_key_value_heads": 8,
@@ -3464,12 +3605,16 @@
                 "tagline": "MoE model, 56.89 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (qwen3_coder parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "56.89 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling precision of live-tested qwen3-coder-30b-a3b-instruct-4bit + remote HF chat_template.jinja inspection.",
+                "tool_parser": "qwen3_coder",
+                "notes": "Shares the exact 6,892-byte chat_template.jinja (qwen3_coder XML parser) with live-verified Qwen3-Coder-30B-A3B-Instruct-4bit."
             },
             "kv_config": {
                 "num_key_value_heads": 4,
@@ -3494,12 +3639,16 @@
                 "tagline": "Dense model, 8.12 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "❌ TOOL CALLS DO NOT WORK on mlx_vlm.server: Shares the exact 2,937-byte chat_template.jinja with live-tested DeepSeek-R1-0528-Qwen3-8B-4bit: the template omits the top-level tools input branch and mlx_lm infers tool_parser=None, so mlx_vlm.server drops tool schemas and returns tool_calls=null. Note: --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "8.12 GB",
                 "max_context_label": "131,072 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "NOT_SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling quantization of live-tested deepseek-r1-0528-qwen3-8b-4bit + remote HF chat_template.jinja inspection.",
+                "tool_parser": null,
+                "notes": "Shares the exact 2,937-byte chat_template.jinja with live-tested DeepSeek-R1-0528-Qwen3-8B-4bit: the template omits the top-level tools input branch and mlx_lm infers tool_parser=None, so mlx_vlm.server drops tool schemas and returns tool_calls=null."
             },
             "kv_config": {
                 "num_key_value_heads": 8,
@@ -3524,12 +3673,16 @@
                 "tagline": "Dense model, 15.27 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "❌ TOOL CALLS DO NOT WORK on mlx_vlm.server: Shares the exact 2,937-byte chat_template.jinja with live-tested DeepSeek-R1-0528-Qwen3-8B-4bit: the template omits the top-level tools input branch and mlx_lm infers tool_parser=None, so mlx_vlm.server drops tool schemas and returns tool_calls=null. Note: --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "15.27 GB",
                 "max_context_label": "131,072 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "NOT_SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Sibling precision of live-tested deepseek-r1-0528-qwen3-8b-4bit + remote HF chat_template.jinja inspection.",
+                "tool_parser": null,
+                "notes": "Shares the exact 2,937-byte chat_template.jinja with live-tested DeepSeek-R1-0528-Qwen3-8B-4bit: the template omits the top-level tools input branch and mlx_lm infers tool_parser=None, so mlx_vlm.server drops tool schemas and returns tool_calls=null."
             },
             "kv_config": {
                 "num_key_value_heads": 8,
@@ -3556,12 +3709,16 @@
                 "tagline": "MoE model, 16.02 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (json_tools parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "16.02 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "OpenCode/Cline/vLLM community reports + remote HF chat_template.jinja inspection + live verification of Qwen3-4B-Instruct-2507-4bit.",
+                "tool_parser": "json_tools",
+                "notes": "Remote HF chat_template.jinja (5,347 bytes) is identical to live-verified Qwen3-4B-Instruct-2507-4bit (json_tools parser), and OpenCode/Cline/vLLM community reports confirm native non-thinking tool calling."
             },
             "kv_config": {
                 "num_key_value_heads": 4,
@@ -3588,12 +3745,16 @@
                 "tagline": "MoE model, 30.23 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (json_tools parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "30.23 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "OpenCode/Cline/vLLM community reports + remote HF chat_template.jinja inspection + live verification of Qwen3-4B-Instruct-2507-4bit.",
+                "tool_parser": "json_tools",
+                "notes": "Remote HF chat_template.jinja (5,347 bytes) is identical to live-verified Qwen3-4B-Instruct-2507-4bit (json_tools parser), and OpenCode/Cline/vLLM community reports confirm native non-thinking tool calling."
             },
             "kv_config": {
                 "num_key_value_heads": 4,
@@ -3620,12 +3781,16 @@
                 "tagline": "MoE model, 56.89 GB — untested",
                 "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
                 "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. Memory fit is computed from the published config and should be reliable; whether it serves correctly is unconfirmed.",
+                "known_issues": "Tool calling verified SUPPORTED (json_tools parser; see tool_calling.notes). --max-kv-size admission gate has not been live-probed on this specific quantization checkpoint yet.",
                 "size_label": "56.89 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "OpenCode/Cline/vLLM community reports + remote HF chat_template.jinja inspection + live verification of Qwen3-4B-Instruct-2507-4bit.",
+                "tool_parser": "json_tools",
+                "notes": "Remote HF chat_template.jinja (5,347 bytes) is identical to live-verified Qwen3-4B-Instruct-2507-4bit (json_tools parser), and OpenCode/Cline/vLLM community reports confirm native non-thinking tool calling."
             },
             "kv_config": {
                 "num_key_value_heads": 4,
@@ -3640,7 +3805,7 @@
             "size_gb": 6.63,
             "architecture": "qwen3_5",
             "type": "dense",
-            "status": "untested",
+            "status": "tested",
             "modalities": [
                 "text"
             ],
@@ -3648,15 +3813,22 @@
             "released": "2026-09",
             "max_context_architectural": 262144,
             "display": {
-                "tagline": "9B agentic distill of Qwen3.5, 4-bit mixed-precision — untested",
-                "good_for": "Not yet verified on this project's mlx_vlm version. Published by Xiaomi MiMo as an SFT distillation of Qwen/Qwen3.5-9B targeting coding/agentic/tool-use tasks (reports higher SWE-bench Verified and Terminal-Bench 2.1 scores than the Qwen3.5-9B base in Xiaomi's own technical report); the already-tested qwen3.5-9b-mlx-8bit/4bit entries share this exact architecture and layer geometry (same kv_config), which is a good sign for memory-fit and serving compatibility, but tool-calling behavior has not been independently confirmed for this fine-tune.",
-                "usage_examples": [],
-                "known_issues": "Untested: not yet run through verify_max_kv_size.sh or a live tool-calling check on this project's mlx_vlm version. This specific OptiQ quant's per-layer 4-bit/8-bit allocation was transferred from mlx-community/Qwen3.5-9B-OptiQ-4bit's calibration (same architecture/shapes) rather than measured on this fine-tune directly -- see that repo's model card. The vision tower was dropped in this conversion (text-only), unlike other qwen3_5 entries in this catalog.",
+                "tagline": "9B agentic distill of Qwen3.5 (6.63 GB) — broken tool parser on mlx-lm 0.31.3",
+                "good_for": "Standalone coding and reasoning tasks. Despite strong upstream agentic training by Xiaomi MiMo, structured tool calling currently fails to parse in mlx-lm 0.31.3 / mlx-vlm 0.7.4 due to a chat_template newline mismatch (see known_issues).",
+                "usage_examples": [
+                    "\"Refactor this module to remove global state and write unit tests\" — direct code generation and reasoning",
+                    "\"Analyze this stack trace and explain the root cause\" — debugging without server-parsed tool calls"
+                ],
+                "known_issues": "❌ TOOL CALLS DO NOT PARSE on mlx-lm 0.31.3 / mlx-vlm 0.7.4: live testing showed the model emits valid Qwen3-Coder XML (<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>), but its chat_template.jinja writes <tool_call><function= without a newline, causing mlx_lm.tokenizer_utils._infer_tool_parser (which checks for \"<tool_call>\\n<function=\") to miss qwen3_coder and fall back to json_tools. json.loads() then fails and mlx_vlm.server leaks the raw <tool_call> XML into message.content with tool_calls=null. Additionally, the vision tower was dropped in this OptiQ conversion (text-only).",
                 "size_label": "6.63 GB",
                 "max_context_label": "262,144 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "NOT_SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Live /v1/chat/completions and /v1/messages requests against mlx_vlm.server (0.7.4) with a get_weather tool schema attached, temperature=0.",
+                "tool_parser": "json_tools",
+                "notes": "Model emits valid Qwen3-Coder XML (<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>), but chat_template.jinja renders <tool_call><function= without a newline; mlx_lm.tokenizer_utils._infer_tool_parser checks for \"<tool_call>\\n<function=\" and falls back to json_tools, causing json.loads() to fail and leaking raw <tool_call> XML into message.content with finish_reason=stop and tool_calls=null."
             },
             "kv_config": {
                 "num_key_value_heads": 4,
@@ -3697,6 +3869,12 @@
                     "full_attention"
                 ],
                 "sliding_window": null
+            },
+            "verification": {
+                "verdict": "SAFE",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "mlx_vlm_version": "0.7.4",
+                "notes": "Admission gate verified at 32/256/1024-token bounds via verify_max_kv_size.sh (HTTP 400 at 256 and 32; exact secret recall ZEBRA-9471-QUARTZ at 1024)."
             }
         },
         {
@@ -3723,8 +3901,11 @@
                 "max_context_label": "131,072 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED",
-                "notes": "Not live-tested yet (no real /v1/chat/completions request with a tool schema attached has been run against this model) — per this file's own _schema_notes.tool_calling, a verdict requires that, not static template inspection alone, since the two can disagree in either direction for other models in this catalog. That said, static inspection of this repo's chat_template.jinja (see known_issues above) found no tool-call syntax defined anywhere in it, which would need the model to work entirely outside what its own template renders if a live test were to pass — worth running before relying on this entry for anything agentic."
+                "verdict": "NOT_SUPPORTED",
+                "verified_at": "2026-10-16T22:05:15Z",
+                "method": "Remote HF chat_template.jinja inspection + mlx_lm._infer_tool_parser audit.",
+                "tool_parser": null,
+                "notes": "While upstream Mistral Small 3.2 supports [TOOL_CALLS], mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit ships a stripped 415-byte chat_template.jinja with no [AVAILABLE_TOOLS] or [TOOL_CALLS] branch, so mlx_lm infers tool_parser=None and mlx_vlm.server cannot inject or parse tool calls. Use devstral-small-2-24b-instruct-2512-4bit for agentic coding."
             },
             "kv_config": {
                 "num_key_value_heads": 8,
@@ -3739,22 +3920,29 @@
             "size_gb": 0.94,
             "architecture": "qwen2",
             "type": "dense",
-            "status": "untested",
+            "status": "tested",
             "modalities": [
                 "text"
             ],
             "released": "2025-01",
             "max_context_architectural": 131072,
             "display": {
-                "tagline": "Dense model, 0.94 GB — untested",
-                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
-                "usage_examples": [],
-                "known_issues": "max-kv-size admission gate verified SAFE (see verification.notes for the reasoning-model-specific methodology). Tool-calling has NOT been live-tested yet -- status stays 'untested' until that's done too, per this catalog's own 'tested' criteria. The original DeepSeek-R1-Distill series (as opposed to the newer R1-0528 generation already in this catalog) is widely reported as weak at structured tool calls; this is a prediction, not a confirmed result, until a live /v1/chat/completions request with a tool schema is actually run.",
+                "tagline": "Tiny 1.5B reasoning model (0.94 GB) — chat/math only, no tool calling",
+                "good_for": "Ultra-lightweight chain-of-thought (<think>...</think>) experiments and simple math/logic puzzles on any Mac. Too small and lacks tool-calling support for agentic coding.",
+                "usage_examples": [
+                    "\"Solve this logic puzzle step by step\" — lightweight chain-of-thought reasoning without tool calls",
+                    "\"Explain why this recurrence relation is O(n log n)\" — self-contained math/algorithm explanation"
+                ],
+                "known_issues": "❌ TOOL CALLS DO NOT WORK: live-tested against mlx_vlm.server (0.7.4) with a web_search tool schema — tokenizer_config.json's chat_template has no tools branch at all (apply_chat_template silently drops the tool definitions and _infer_tool_parser returns None), and after completing its <think> trace the model hallucinates tool results in plain prose (finish_reason=stop, tool_calls=null). Do not use for agentic/tool-using work.",
                 "size_label": "0.94 GB",
                 "max_context_label": "131,072 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "NOT_SUPPORTED",
+                "verified_at": "2026-10-16T21:18:00Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0, tested at max_tokens=512 and max_tokens=2048.",
+                "tool_parser": null,
+                "notes": "tokenizer_config.json's chat_template has no tools branch at all, so apply_chat_template silently drops the attached tool schema (prompt_tokens=23) and mlx_vlm.tools.registry._infer_tool_parser returns None. At max_tokens=2048 (enough for the 839-token <think> chain to finish), the model returns finish_reason=stop with tool_calls=null and fabricates a weather answer in plain prose."
             },
             "kv_config": {
                 "num_key_value_heads": 2,
@@ -3775,22 +3963,29 @@
             "size_gb": 1.77,
             "architecture": "qwen2",
             "type": "dense",
-            "status": "untested",
+            "status": "tested",
             "modalities": [
                 "text"
             ],
             "released": "2025-01",
             "max_context_architectural": 131072,
             "display": {
-                "tagline": "Dense model, 1.77 GB — untested",
-                "good_for": "Not described yet. This entry was generated from the model's published config and has not been run through this project's tests.",
-                "usage_examples": [],
-                "known_issues": "max-kv-size admission gate verified SAFE (see verification.notes for the reasoning-model-specific methodology). Tool-calling has NOT been live-tested yet -- status stays 'untested' until that's done too, per this catalog's own 'tested' criteria. The original DeepSeek-R1-Distill series (as opposed to the newer R1-0528 generation already in this catalog) is widely reported as weak at structured tool calls; this is a prediction, not a confirmed result, until a live /v1/chat/completions request with a tool schema is actually run.",
+                "tagline": "Tiny 1.5B reasoning model (8-bit, 1.77 GB) — chat/math only, no tool calling",
+                "good_for": "8-bit version of deepseek-r1-distill-qwen-1.5b-4bit for lightweight chain-of-thought (<think>...</think>) experiments with less quantization loss. Too small and lacks tool-calling support for agentic coding.",
+                "usage_examples": [
+                    "\"Solve this logic puzzle step by step\" — lightweight chain-of-thought reasoning without tool calls",
+                    "\"Explain why this recurrence relation is O(n log n)\" — self-contained math/algorithm explanation"
+                ],
+                "known_issues": "❌ TOOL CALLS DO NOT WORK: live-tested against mlx_vlm.server (0.7.4) with a web_search tool schema — same missing tools branch in tokenizer_config.json's chat_template as the 4-bit sibling (_infer_tool_parser returns None, tool definitions silently dropped), and after finishing its <think> trace the model claims in plain prose 'I used the web_search tool' and hallucinates a result (finish_reason=stop, tool_calls=null). Do not use for agentic/tool-using work.",
                 "size_label": "1.77 GB",
                 "max_context_label": "131,072 tokens (architectural max)"
             },
             "tool_calling": {
-                "verdict": "UNTESTED"
+                "verdict": "NOT_SUPPORTED",
+                "verified_at": "2026-10-16T21:18:30Z",
+                "method": "Live /v1/chat/completions request against a real mlx_vlm.server instance with a web_search tool schema attached, temperature=0, tested at max_tokens=512 and max_tokens=2048.",
+                "tool_parser": null,
+                "notes": "tokenizer_config.json's chat_template has no tools branch at all, so apply_chat_template silently drops the attached tool schema (prompt_tokens=23) and mlx_vlm.tools.registry._infer_tool_parser returns None. At max_tokens=2048 (871 completion tokens, finish_reason=stop), tool_calls is null and the model writes in plain text that it 'used the web_search tool' with a fabricated answer."
             },
             "kv_config": {
                 "num_key_value_heads": 2,

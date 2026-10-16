@@ -59,7 +59,7 @@ MLX_VENV="$HOME/pip_env/mlx_lm/venv"
 MLX_PYTHON="$MLX_VENV/bin/python"
 export HF_HOME="${HF_HOME:-$HOME/MLX_Models}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESULTS_FILE="$SCRIPT_DIR/mlx_long_context_stress_results.json"
+RESULTS_FILE="$SCRIPT_DIR/docs/mlx_long_context_stress_results.json"
 SERVER_LOG="/tmp/verify_long_context_$$.log"
 MONITOR_LOG="/tmp/verify_long_context_monitor_$$.log"
 
