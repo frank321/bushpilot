@@ -96,7 +96,7 @@ def count_tokens_rough(text):
     return max(0, len(text) // 4)
 
 
-def measure_doc_preload(cwd):
+def measure_doc_preload(cwd, tool=None):
     """REAL measurement (not an estimate) of CLAUDE.md/AGENTS.md token cost — these
     files get read verbatim into context, so their actual size is directly countable."""
     total = 0
@@ -104,8 +104,9 @@ def measure_doc_preload(cwd):
     candidates = [
         os.path.join(cwd, "CLAUDE.md"),
         os.path.join(cwd, "AGENTS.md"),
-        os.path.expanduser("~/.claude/CLAUDE.md"),
     ]
+    if tool not in ("aider", "cline", "pi"):
+        candidates.append(os.path.expanduser("~/.claude/CLAUDE.md"))
     for path in candidates:
         if os.path.isfile(path):
             try:
@@ -193,10 +194,16 @@ def estimate_preload_overhead(tool, cwd):
     per-unit cost (MCP_SERVER_TOKENS_ESTIMATE) with everything else measured for real
     on this machine, for the given launch directory."""
     baseline = TOOL_BASELINE_PRELOAD_TOKENS.get(tool, 0)
-    doc_tokens, doc_files = measure_doc_preload(cwd)
-    skill_tokens, skill_count = measure_skills_preload(cwd)
-    mcp_count = measure_mcp_servers(cwd)
-    mcp_tokens = mcp_count * MCP_SERVER_TOKENS_ESTIMATE
+    doc_tokens, doc_files = measure_doc_preload(cwd, tool=tool)
+    if tool in ("aider", "cline", "pi"):
+        # Confirmed live (see TOOL_BASELINE_PRELOAD_TOKENS comments): these tools do not
+        # load Claude Code's global ~/.claude/skills listing or Claude's MCP server configs.
+        skill_tokens, skill_count = 0, 0
+        mcp_tokens, mcp_count = 0, 0
+    else:
+        skill_tokens, skill_count = measure_skills_preload(cwd)
+        mcp_count = measure_mcp_servers(cwd)
+        mcp_tokens = mcp_count * MCP_SERVER_TOKENS_ESTIMATE
     return {
         "tool": tool,
         "cwd": cwd,

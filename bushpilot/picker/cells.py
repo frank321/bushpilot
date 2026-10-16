@@ -72,7 +72,7 @@ def compact_row_cells(r, reason=None):
     else:
         ctx_str = kv_str = "—"
     mark = "○" if m.get("status") == "untested" else "✓"
-    speed = f"~{r['estimated_tok_s']} tok/s" if r["estimated_tok_s"] is not None else (
+    speed = f"~{round(r['estimated_tok_s'], 1)} tok/s" if r["estimated_tok_s"] is not None else (
         "speed unknown" if r["fits"] else "—")
     return [
         f"{mark} {model_display_name(m)}",

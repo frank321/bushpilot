@@ -26,6 +26,7 @@ from bushpilot import calibration as _calibration
 # Same reasoning as _calibration above, for mlx_vlm_apc_pool_bytes's own module
 # globals (MLX_VLM_APC_NUM_BLOCKS/MLX_VLM_APC_BLOCK_SIZE, both defined in bushpilot/kv.py).
 from bushpilot import kv as _kv
+from bushpilot import preload as _preload
 
 # --- effective_size_gb --------------------------------------------------------------
 
@@ -648,3 +649,34 @@ def test_build_recommendations_mlx_vlm_apc_pool_shrinks_recommended_context(dens
     assert with_real_apc_pool[0]["recommended_context"] < without_apc_pool[0]["recommended_context"]
     assert with_real_apc_pool[0]["recommended_context"] == 65536
     assert without_apc_pool[0]["recommended_context"] == 131072
+
+
+def test_estimate_speed_tok_s_rounds_calibrated_decode_speed(dense_model, tmp_path, monkeypatch):
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
+    ma.save_calibration("Apple M3 Max", dense_model["id"], 28.866437544926224, context_tokens=4096)
+    speed, reason = ma.estimate_speed_tok_s(dense_model, "Apple M3 Max", 40)
+    assert speed == 28.9
+
+
+def test_estimate_preload_overhead_excludes_skills_and_mcp_for_lightweight_tools(tmp_path, monkeypatch):
+    # Mock non-zero skills and MCP servers
+    monkeypatch.setattr(_preload, "measure_skills_preload", lambda cwd: (3500, 32))
+    monkeypatch.setattr(_preload, "measure_mcp_servers", lambda cwd: 3)
+    for tool in ("aider", "cline", "pi"):
+        res = ma.estimate_preload_overhead(tool, str(tmp_path))
+        assert res["skill_tokens"] == 0
+        assert res["skill_count"] == 0
+        assert res["mcp_tokens"] == 0
+        assert res["mcp_count"] == 0
+        assert res["total"] == res["baseline_tokens"] + res["doc_tokens"]
+
+
+def test_estimate_preload_overhead_includes_skills_and_mcp_for_claude(tmp_path, monkeypatch):
+    monkeypatch.setattr(_preload, "measure_skills_preload", lambda cwd: (3500, 32))
+    monkeypatch.setattr(_preload, "measure_mcp_servers", lambda cwd: 3)
+    res = ma.estimate_preload_overhead("claude", str(tmp_path))
+    assert res["skill_tokens"] == 3500
+    assert res["skill_count"] == 32
+    assert res["mcp_tokens"] == 3 * ma.MCP_SERVER_TOKENS_ESTIMATE
+    assert res["mcp_count"] == 3
+    assert res["total"] == res["baseline_tokens"] + res["doc_tokens"] + 3500 + 3 * ma.MCP_SERVER_TOKENS_ESTIMATE

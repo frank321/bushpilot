@@ -58,7 +58,7 @@ def estimate_speed_tok_s(model_entry, chip_name, gpu_cores):
             f" at ~{calibrated['context_tokens']:,} tokens of context"
             if isinstance(calibrated.get("context_tokens"), (int, float)) else ""
         )
-        return calibrated["decode_tok_s"], (
+        return round(calibrated["decode_tok_s"], 1), (
             f"measured on this machine ({chip_name}){ctx_note}, saved {calibrated.get('saved_at', 'previously')} "
             "— overrides the physics-based estimate below until this model, quantization, "
             "or drafter config changes on this chip (re-run to refresh)"
