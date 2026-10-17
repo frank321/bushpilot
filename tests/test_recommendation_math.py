@@ -821,3 +821,138 @@ def test_cap_free_by_metal_limit_enforces_metal_wired_ceiling(monkeypatch):
     # When OS free memory is already below the Metal wired ceiling + buffer, OS free wins.
     assert _hw._cap_free_by_metal_limit(total_ram_gb=64.0, raw_free_gb=30.0) == 30.0
 
+
+def test_estimate_speed_tok_s_calibration_drafter_scoping(drafter_model, tmp_path, monkeypatch):
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
+    expected_drafter = (
+        drafter_model["serving"].get("drafter")
+        or drafter_model["serving"].get("draft_model")
+    )
+
+    # 1. Calibrated with matching drafter -> uses calibrated speed
+    ma.save_calibration("Apple M3 Max", drafter_model["id"], 91.4, context_tokens=4096,
+                         drafter=expected_drafter)
+    speed, reason = ma.estimate_speed_tok_s(drafter_model, "Apple M3 Max", 40)
+    assert speed == 91.4
+    assert "measured on this machine" in reason
+
+    # 2. Calibrated with no drafter ("") while model entry expects a drafter -> falls back to physics
+    ma.save_calibration("Apple M3 Max", drafter_model["id"], 55.0, context_tokens=4096,
+                         drafter="")
+    speed_mismatch, reason_mismatch = ma.estimate_speed_tok_s(drafter_model, "Apple M3 Max", 40)
+    assert speed_mismatch != 55.0
+    assert "speculative-decoding multiplier" in reason_mismatch
+
+
+def test_measure_doc_preload_deduplicates_symlinks(tmp_path, monkeypatch):
+    # Isolate HOME so global ~/.claude/CLAUDE.md doesn't affect the test
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    agents_md = proj / "AGENTS.md"
+    content = "x" * 4000  # 4000 bytes -> 1000 tokens
+    agents_md.write_text(content)
+    claude_md = proj / "CLAUDE.md"
+    claude_md.symlink_to(agents_md)
+
+    tokens, found = _preload.measure_doc_preload(str(proj))
+    assert len(found) == 1
+    assert tokens == _preload.count_tokens_rough(content) == 1000
+
+
+def test_parse_skill_frontmatter_supports_multiline_descriptions():
+    folded_text = (
+        "---\n"
+        "name: test-folded\n"
+        "description: >\n"
+        "  First line of folded description\n"
+        "  second line with extra details.\n"
+        "---\n"
+        "# Body\n"
+    )
+    name, desc = _preload._parse_skill_frontmatter(folded_text)
+    assert name == "test-folded"
+    assert desc == "First line of folded description second line with extra details."
+
+    literal_text = (
+        "---\n"
+        "name: test-literal\n"
+        "description: |\n"
+        "  Line one.\n"
+        "  Line two.\n"
+        "---\n"
+    )
+    name2, desc2 = _preload._parse_skill_frontmatter(literal_text)
+    assert name2 == "test-literal"
+    assert desc2 == "Line one. Line two."
+
+
+def test_add_model_extract_kv_config_and_binary_gib(monkeypatch):
+    import add_model as am
+    cfg = {
+        "hidden_size": 4096,
+        "intermediate_size": 11008,
+        "moe_intermediate_size": 1408,
+        "num_hidden_layers": 32,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "num_experts_per_tok": 2,
+        "num_local_experts": 8,
+        "vocab_size": 32000,
+        "quantization": {"bits": 4, "group_size": 64},
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 32,
+        "linear_key_head_dim": 128,
+        "linear_value_head_dim": 128,
+        "linear_conv_kernel_dim": 4,
+        "full_attention_interval": 4,
+        "kv_lora_rank": 512,
+        "qk_rope_head_dim": 64,
+        "global_head_dim": 512,
+        "num_global_key_value_heads": 4,
+        "num_kv_shared_layers": 18,
+    }
+    kv_cfg = am.extract_kv_config(cfg)
+    assert kv_cfg["linear_num_key_heads"] == 16
+    assert kv_cfg["linear_num_value_heads"] == 32
+    assert kv_cfg["linear_key_head_dim"] == 128
+    assert kv_cfg["linear_value_head_dim"] == 128
+    assert kv_cfg["linear_conv_kernel_dim"] == 4
+    assert kv_cfg["full_attention_interval"] == 4
+    assert kv_cfg["kv_lora_rank"] == 512
+    assert kv_cfg["qk_rope_head_dim"] == 64
+    assert kv_cfg["global_head_dim"] == 512
+    assert kv_cfg["num_global_key_value_heads"] == 4
+    assert kv_cfg["num_kv_shared_layers"] == 18
+
+    # Verify active_weight_gb uses binary GiB (2**30) matching size_gb
+    monkeypatch.setattr(am, "safetensors_header", lambda repo, f: {"model.layers.0.self_attn.q_proj.weight": 4 * 2**30})
+    active_gb, other_bytes, expert_bytes = am.active_weight_gb("test/repo", ["model.safetensors"], 1, 1)
+    assert active_gb == 4.0
+    assert other_bytes == 4 * 2**30
+    assert expert_bytes == 0
+
+
+def test_models_json_catalog_integrity():
+    import json
+    with open(ma.MODELS_JSON) as f:
+        catalog = json.load(f)
+    models = catalog.get("models", [])
+    assert len(models) > 0
+    seen_ids = set()
+    for m in models:
+        mid = m["id"]
+        assert mid not in seen_ids, f"Duplicate model id: {mid}"
+        seen_ids.add(mid)
+        assert m.get("status") in ("tested", "untested"), f"Invalid status on {mid}"
+        assert isinstance(m.get("size_gb"), (int, float)) and m["size_gb"] > 0
+        if m.get("active_weight_gb") is not None:
+            assert m["active_weight_gb"] <= m["size_gb"] + 0.5, f"active_weight_gb > size_gb on {mid}"
+        bpt, fixed, _ = ma.compute_kv_formula(m["kv_config"], kv_bits=16)
+        assert bpt > 0, f"Zero bytes_per_token for {mid}"
+        assert fixed >= 0
+

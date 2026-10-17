@@ -119,7 +119,59 @@ tool_install_hint() {
     esac
 }
 
+tool_description() {
+    case "$1" in
+        claude) echo "Anthropic agentic coding CLI" ;;
+        opencode) echo "Open-source terminal coding agent" ;;
+        aider) echo "Git-integrated AI pair programmer" ;;
+        cline) echo "Autonomous terminal coding agent" ;;
+        pi) echo "Minimal extensible coding agent" ;;
+        *) echo "" ;;
+    esac
+}
+
 check_tool_installed() { is_command_available "$(tool_command "$1")"; }
+
+tool_picker_server_summary() {
+    local bold="${1:-}" dim="${2:-}" green="${3:-}" yellow="${4:-}" cyan="${5:-}" reset="${6:-}"
+    if [[ ! -f "$MLX_STATE_FILE" ]]; then
+        printf '%sServer: not running on %s:%s (selecting a tool will offer to start it)%s' \
+            "$dim" "$MLX_HOST" "$MLX_PORT" "$reset"
+        return
+    fi
+    local st_model="" st_ctx="" st_kv="" st_id="" st_backend=""
+    IFS='|' read -r st_model st_ctx st_kv st_id st_backend < "$MLX_STATE_FILE" || true
+    if [[ -z "$st_model" ]]; then
+        printf '%sServer: state file empty on %s:%s%s' "$dim" "$MLX_HOST" "$MLX_PORT" "$reset"
+        return
+    fi
+    local ctx_label="${st_ctx} tok"
+    if [[ "$st_ctx" =~ ^[0-9]+$ ]] && (( st_ctx >= 1024 && st_ctx % 1024 == 0 )); then
+        ctx_label="$((st_ctx / 1024))k ctx"
+    fi
+    local line="${green}●${reset} Server: ${bold}${st_model}${reset} ${dim}(${ctx_label} · ${MLX_HOST}:${MLX_PORT})${reset}"
+
+    local verdict=""
+    if [[ -f "$SCRIPT_DIR/models.json" ]]; then
+        verdict="$("$MLX_PYTHON" -c '
+import json, sys
+path, m_id, hf_id = sys.argv[1:4]
+try:
+    with open(path) as f:
+        models = json.load(f).get("models", [])
+    for m in models:
+        if m.get("id") == m_id or m.get("hf_model_id") == hf_id:
+            print((m.get("tool_calling") or {}).get("verdict") or "")
+            break
+except Exception:
+    pass
+' "$SCRIPT_DIR/models.json" "${st_id:-}" "$st_model" 2>/dev/null || true)"
+    fi
+    if [[ "$verdict" == "NOT_SUPPORTED" ]]; then
+        line+=$'\n'"${yellow}⚠ Loaded model does not support tool calling — agentic coding tools may fail.${reset}"
+    fi
+    printf '%s' "$line"
+}
 
 # Same "on writable $PATH" pattern as start_mlx_server.sh's ensure_symlinked_on_path.
 ensure_symlinked_on_path() {
@@ -144,31 +196,53 @@ ensure_symlinked_on_path() {
 # it's shown with a "(not installed)" note, and selecting it fails with a clear
 # install hint instead of silently disappearing.
 pick_tool() {
-    local rows=() t label
+    local bold="" dim="" green="" yellow="" cyan="" reset=""
+    if [[ -z "${NO_COLOR:-}" ]]; then
+        bold=$'\033[1m'
+        dim=$'\033[2m'
+        green=$'\033[32m'
+        yellow=$'\033[33m'
+        cyan=$'\033[36m'
+        reset=$'\033[0m'
+    fi
+
+    local srv_summary
+    srv_summary="$(tool_picker_server_summary "$bold" "$dim" "$green" "$yellow" "$cyan" "$reset")"
+
+    local rows=() t name desc label
     for t in "${TOOLS[@]}"; do
-        label="$(tool_display_name "$t")"
-        if ! check_tool_installed "$t"; then
-            label="$label (not installed)"
+        name="$(tool_display_name "$t")"
+        desc="$(tool_description "$t")"
+        if check_tool_installed "$t"; then
+            label="$(printf "%s✓%s %-13s  %s%s%s" "$green" "$reset" "$name" "$dim" "$desc" "$reset")"
+        else
+            label="$(printf "%s· %-13s  (not installed) — %s%s" "$dim" "$name" "$desc" "$reset")"
         fi
         rows+=("$t"$'\t'"$label")
     done
 
     if is_command_available fzf; then
-        local selection
-        selection="$(printf '%s\n' "${rows[@]}" | fzf --delimiter=$'\t' --with-nth=2.. \
+        local header selection
+        header="${srv_summary}"$'\n'"${dim}↑↓ move · Enter select · Esc cancel${reset}"
+        selection="$(printf '%s\n' "${rows[@]}" | fzf --ansi --delimiter=$'\t' --with-nth=2.. \
             --border=rounded --pointer="▶" \
-            --header="↑↓ move · Enter select · Esc cancel" \
-            --prompt="Launch which tool> " --height=~40% --layout=reverse)" || exit 1
+            --header="$header" \
+            --prompt="Launch which tool> " --height=~45% --layout=reverse)" || exit 1
         printf '%s' "$selection" | cut -f1
         return
     fi
 
     log_info "fzf not found -- falling back to a plain numbered menu."
+    echo "  $srv_summary" >&2
     local i=1
     for t in "${TOOLS[@]}"; do
-        label="$(tool_display_name "$t")"
-        check_tool_installed "$t" || label="$label (not installed)"
-        echo "  $i) $label" >&2
+        name="$(tool_display_name "$t")"
+        desc="$(tool_description "$t")"
+        if check_tool_installed "$t"; then
+            printf "  %d) %-13s  %s%s%s\n" "$i" "$name" "$dim" "$desc" "$reset" >&2
+        else
+            printf "  %d) %s%-13s  (not installed) — %s%s\n" "$i" "$dim" "$name" "$desc" "$reset" >&2
+        fi
         i=$((i + 1))
     done
     local choice
@@ -207,15 +281,18 @@ ensure_proxy_running() {
     exec "$START_PROXY_SCRIPT" --interactive
 }
 
-# Populates MLX_MODEL / CONTEXT_WINDOW / KV_BITS from the supervisor's state file --
-# MLX_MODEL here is already the real HF repo id (what start_mlx_server.sh writes),
-# not a friendly models.json id.
+# Populates MLX_MODEL / CONTEXT_WINDOW / KV_BITS (plus optional LOADED_LOCAL_MODEL /
+# LOADED_BACKEND when present) from the supervisor's state file -- MLX_MODEL here is
+# already the real HF repo id (what start_mlx_server.sh writes), not a friendly
+# models.json id.
+LOADED_LOCAL_MODEL=""
+LOADED_BACKEND=""
 read_loaded_state() {
     if [[ ! -f "$MLX_STATE_FILE" ]]; then
         log_error "No state file at $MLX_STATE_FILE -- the server doesn't look like it was started by start_mlx_server.sh."
         exit 1
     fi
-    IFS='|' read -r MLX_MODEL CONTEXT_WINDOW KV_BITS < "$MLX_STATE_FILE"
+    IFS='|' read -r MLX_MODEL CONTEXT_WINDOW KV_BITS LOADED_LOCAL_MODEL LOADED_BACKEND < "$MLX_STATE_FILE"
 }
 
 # Validates preload fit at attach-time, not just liveness (docs/PHASE_PLAN.md Phase 3):
@@ -296,8 +373,8 @@ launch_aider() {
 
     local usable_context=$(( CONTEXT_WINDOW - AIDER_OUTPUT_TOKENS_RESERVE ))
     (( usable_context < MIN_USABLE_CONTEXT )) && usable_context=$MIN_USABLE_CONTEXT
-    local metadata_file
-    metadata_file="$(mktemp)"
+    mkdir -p "$BUSHPILOT_HOME/state"
+    local metadata_file="$BUSHPILOT_HOME/state/aider-model-metadata.json"
     "$MLX_PYTHON" -c '
 import json, sys
 model_id, max_input, max_output = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
@@ -487,6 +564,9 @@ import re
 import sys
 
 config_path, model_id, context_window, base_url, models_json_path = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
+local_model_id = sys.argv[6] if len(sys.argv) > 6 else ""
+loaded_backend = sys.argv[7] if len(sys.argv) > 7 else ""
+output_limit = min(32768, max(4096, context_window // 4))
 
 # Display strings for the OpenCode model picker. Provider name is the project name;
 # the model name is just its id (see the note at the assignment site for why the old
@@ -510,26 +590,32 @@ MLX_DIRECT_MODEL_NAME = lambda mid: mid
 # model_input_label() helper in model_advisor.py: serving.multimodal_capable=False
 # (every mlx_dspark/DFlash-text-only entry) narrows to text-only even if the underlying
 # model has a vision tower; otherwise use that models "modalities" list directly.
-def image_capable_modalities(models_json_path, hf_id):
+def image_capable_modalities(models_json_path, hf_id, local_id="", backend=""):
     try:
         with open(models_json_path) as f:
             catalog = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return None
-    entries = [m for m in catalog.get("models", []) if m.get("huggingface") == hf_id]
+    all_models = catalog.get("models", [])
+    entries = []
+    if local_id:
+        entries = [m for m in all_models if m.get("id") == local_id]
+    if not entries:
+        entries = [m for m in all_models if m.get("huggingface") == hf_id]
+        if backend and len(entries) > 1:
+            filtered = [
+                m for m in entries
+                if ((m.get("serving") or {}).get("backend") or "mlx_vlm") == backend
+            ]
+            if filtered:
+                entries = filtered
     if not entries:
         return None
-    # Known limitation: this script only has the resolved huggingface id, not the
-    # local model id the catalog itself uses for whichever serving mode is actually
-    # running -- the state file written by start_mlx_server.sh does not carry it. Several
-    # catalog entries share one huggingface id across serving modes with DIFFERENT
-    # multimodal capability (e.g. gemma-4-12b-it-4bit vs its mlx-dspark "dflash"
-    # text-only sibling, which silently drops the vision tower). When those entries
-    # disagree, guessing wrong in the image-capable direction would be worse than
-    # todays no-image-support status quo -- OpenCode would then happily try to send
-    # an image that the dflash backend silently ignores, a confusing new failure mode
-    # instead of todays understood one. So: require unanimous agreement across every
-    # matching entry before turning this on at all.
+    # When local_id (or backend) is recorded in mlx-loaded.txt, entries narrows to the
+    # exact catalog variant running. If neither was recorded (e.g. legacy 3-field state
+    # file) and multiple catalog entries share one huggingface id across serving modes
+    # with different multimodal capability, require unanimous agreement before enabling
+    # image input.
     capable_votes = set()
     all_mods = set()
     for entry in entries:
@@ -546,7 +632,7 @@ def image_capable_modalities(models_json_path, hf_id):
     return ["text"] + extra
 
 
-ATTACHMENT_MODALITIES = image_capable_modalities(models_json_path, model_id)
+ATTACHMENT_MODALITIES = image_capable_modalities(models_json_path, model_id, local_model_id, loaded_backend)
 
 
 def strip_jsonc(s):
@@ -616,6 +702,7 @@ already_correct = (
     and model_id in existing.get("models", {})
     and existing_model.get("name") == MLX_DIRECT_MODEL_NAME(model_id)
     and existing_model.get("limit", {}).get("context") == context_window
+    and existing_model.get("limit", {}).get("output") == output_limit
     and existing_model.get("attachment") == (ATTACHMENT_MODALITIES is not None)
     and existing_model.get("modalities", {}).get("input") == ATTACHMENT_MODALITIES
 )
@@ -643,7 +730,7 @@ mlx_direct["options"] = {"baseURL": base_url, "apiKey": "sk-mlx-direct-local"}
 models = mlx_direct.setdefault("models", {})
 models[model_id] = {
     "name": MLX_DIRECT_MODEL_NAME(model_id),
-    "limit": {"context": context_window, "output": 4096},
+    "limit": {"context": context_window, "output": output_limit},
 }
 models[model_id]["attachment"] = ATTACHMENT_MODALITIES is not None
 if ATTACHMENT_MODALITIES is not None:
@@ -654,7 +741,7 @@ with open(config_path, "w") as f:
     f.write("\n")
 print("REGISTERED")
 PYEOF
-    result="$("$MLX_PYTHON" "$pyscript" "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json")" || true
+    result="$("$MLX_PYTHON" "$pyscript" "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" "${LOADED_LOCAL_MODEL:-}" "${LOADED_BACKEND:-}")" || true
     rm -f "$pyscript"
 
     case "$result" in
@@ -703,32 +790,36 @@ import re
 import sys
 
 config_path, model_id, context_window, base_url, models_json_path = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
+local_model_id = sys.argv[6] if len(sys.argv) > 6 else ""
+loaded_backend = sys.argv[7] if len(sys.argv) > 7 else ""
+output_limit = min(32768, max(4096, context_window // 4))
 
 MLX_DIRECT_PROVIDER_NAME = "BushPilot"
 MLX_DIRECT_PACKAGE = "@opencode/ai/providers/openai-compatible"
 MLX_DIRECT_MODEL_STRING = f"mlx-direct/{model_id}"
 
 
-def image_capable_modalities(models_json_path, hf_id):
+def image_capable_modalities(models_json_path, hf_id, local_id="", backend=""):
     try:
         with open(models_json_path) as f:
             catalog = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return None
-    entries = [m for m in catalog.get("models", []) if m.get("huggingface") == hf_id]
+    all_models = catalog.get("models", [])
+    entries = []
+    if local_id:
+        entries = [m for m in all_models if m.get("id") == local_id]
+    if not entries:
+        entries = [m for m in all_models if m.get("huggingface") == hf_id]
+        if backend and len(entries) > 1:
+            filtered = [
+                m for m in entries
+                if ((m.get("serving") or {}).get("backend") or "mlx_vlm") == backend
+            ]
+            if filtered:
+                entries = filtered
     if not entries:
         return None
-    # Known limitation: this script only has the resolved huggingface id, not the
-    # catalog's own local model id for whichever serving mode is actually running --
-    # the state file written by start_mlx_server.sh does not carry it. Several
-    # catalog entries share one huggingface id across serving modes with DIFFERENT
-    # multimodal capability (e.g. gemma-4-12b-it-4bit vs its mlx-dspark "dflash"
-    # text-only sibling, which silently drops the vision tower). When those entries
-    # disagree, guessing wrong in the image-capable direction would be worse than
-    # todays no-image-support status quo -- OpenCode would then happily try to send
-    # an image that the dflash backend silently ignores, a confusing new failure mode
-    # instead of todays understood one. So: require unanimous agreement across every
-    # matching entry before turning this on at all.
     capable_votes = set()
     all_mods = set()
     for entry in entries:
@@ -745,7 +836,7 @@ def image_capable_modalities(models_json_path, hf_id):
     return ["text"] + extra
 
 
-ATTACHMENT_MODALITIES = image_capable_modalities(models_json_path, model_id)
+ATTACHMENT_MODALITIES = image_capable_modalities(models_json_path, model_id, local_model_id, loaded_backend)
 
 
 # Same comment-stripping approach as the v1 register_opencode_model, kept in sync
@@ -831,6 +922,7 @@ already_correct = (
     and model_id in existing.get("models", {})
     and existing_model.get("modelID") == model_id
     and existing_model.get("limit", {}).get("context") == context_window
+    and existing_model.get("limit", {}).get("output") == output_limit
     and existing_model.get("attachment") == (ATTACHMENT_MODALITIES is not None)
     and existing_model.get("modalities", {}).get("input") == ATTACHMENT_MODALITIES
     and parsed.get("model") == MLX_DIRECT_MODEL_STRING
@@ -846,7 +938,7 @@ mlx_direct["settings"] = {"baseURL": base_url, "apiKey": "sk-mlx-direct-local"}
 models = mlx_direct.setdefault("models", {})
 models[model_id] = {
     "modelID": model_id,
-    "limit": {"context": context_window, "output": 4096},
+    "limit": {"context": context_window, "output": output_limit},
 }
 models[model_id]["attachment"] = ATTACHMENT_MODALITIES is not None
 if ATTACHMENT_MODALITIES is not None:
@@ -858,7 +950,7 @@ with open(config_path, "w") as f:
     f.write("\n")
 print("REGISTERED")
 PYEOF
-    result="$("$MLX_PYTHON" "$pyscript" "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json")" || true
+    result="$("$MLX_PYTHON" "$pyscript" "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" "${LOADED_LOCAL_MODEL:-}" "${LOADED_BACKEND:-}")" || true
     rm -f "$pyscript"
 
     case "$result" in

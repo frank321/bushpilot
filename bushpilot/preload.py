@@ -101,6 +101,7 @@ def measure_doc_preload(cwd, tool=None):
     files get read verbatim into context, so their actual size is directly countable."""
     total = 0
     found = []
+    seen_realpaths = set()
     candidates = [
         os.path.join(cwd, "CLAUDE.md"),
         os.path.join(cwd, "AGENTS.md"),
@@ -109,6 +110,10 @@ def measure_doc_preload(cwd, tool=None):
         candidates.append(os.path.expanduser("~/.claude/CLAUDE.md"))
     for path in candidates:
         if os.path.isfile(path):
+            real = os.path.realpath(path)
+            if real in seen_realpaths:
+                continue
+            seen_realpaths.add(real)
             try:
                 with open(path, encoding="utf-8", errors="ignore") as f:
                     text = f.read()
@@ -128,11 +133,34 @@ def _parse_skill_frontmatter(text):
     if not m:
         return None, None
     name = description = None
-    for line in m.group(1).splitlines():
+    lines = m.group(1).splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
         if line.startswith("name:"):
-            name = line.split(":", 1)[1].strip()
+            name = line.split(":", 1)[1].strip().strip("'\"")
+            i += 1
         elif line.startswith("description:"):
-            description = line.split(":", 1)[1].strip()
+            val = line.split(":", 1)[1].strip()
+            i += 1
+            if val in ("|", ">", "|-", ">-", "|+", ">+") or val == "":
+                cont = []
+                while i < len(lines) and (lines[i].startswith((" ", "\t")) or not lines[i].strip()):
+                    stripped = lines[i].strip()
+                    if stripped:
+                        cont.append(stripped)
+                    i += 1
+                description = " ".join(cont) if cont else ""
+            else:
+                parts = [val.strip("'\"")]
+                while i < len(lines) and lines[i].startswith((" ", "\t")):
+                    stripped = lines[i].strip()
+                    if stripped:
+                        parts.append(stripped)
+                    i += 1
+                description = " ".join(parts)
+        else:
+            i += 1
     return name, description
 
 

@@ -1,7 +1,22 @@
 """One picker row's cell contents and column layout -- compact_row_cells, column
 widths, which columns fit a given terminal width, and name truncation. The
 --list-compact table's row model."""
+import glob
+import os
+
 from ..kv import UNQUANTIZED_KV_BITS
+
+
+def is_model_cached(m):
+    """True when the model's HuggingFace repo already has a downloaded snapshot in
+    HF_HOME (defaults to ~/.bushpilot/models). Pure local filesystem check."""
+    hf_repo = m.get("huggingface")
+    if not hf_repo or "/" not in hf_repo:
+        return False
+    hf_home = os.path.expanduser(os.environ.get("HF_HOME", "~/.bushpilot/models"))
+    repo_dir = f"models--{hf_repo.replace('/', '--')}"
+    pattern = os.path.join(hf_home, "hub", repo_dir, "snapshots", "*", "config.json")
+    return bool(glob.glob(pattern))
 
 
 def format_context_k(tokens):
@@ -72,8 +87,17 @@ def compact_row_cells(r, reason=None):
     else:
         ctx_str = kv_str = "—"
     mark = "○" if m.get("status") == "untested" else "✓"
-    speed = f"~{round(r['estimated_tok_s'], 1)} tok/s" if r["estimated_tok_s"] is not None else (
-        "speed unknown" if r["fits"] else "—")
+    if r["estimated_tok_s"] is not None:
+        prefix = "" if r.get("speed_source") == "calibrated" else "~"
+        speed = f"{prefix}{round(r['estimated_tok_s'], 1)} tok/s"
+    else:
+        speed = "speed unknown" if r["fits"] else "—"
+    if reason:
+        notes = reason
+    else:
+        notes = f"×{r['concurrency']} concurrent" if r["concurrency"] > 1 else "1 concurrent"
+        if is_model_cached(m):
+            notes += " · cached"
     return [
         f"{mark} {model_display_name(m)}",
         "MoE" if m.get("type") == "moe" else "Dense",
@@ -86,7 +110,7 @@ def compact_row_cells(r, reason=None):
         ctx_str,
         kv_str,
         speed,
-        reason or (f"×{r['concurrency']} concurrent" if r["concurrency"] > 1 else "1 concurrent"),
+        notes,
     ]
 
 

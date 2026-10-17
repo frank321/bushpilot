@@ -25,9 +25,21 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 BUSHPILOT_HOME="$HOME/.bushpilot"
 OPENCODE_CONFIG="$HOME/.config/opencode/opencode.jsonc"
 
-# Must match start_mlx_server.sh's own defaults/overrides -- this script never reads
-# the running server's actual config, so an env override is the only way to point it
-# at a non-default port if one was ever used.
+# Read the configured port from ~/.bushpilot/config.json when MLX_PORT wasn't
+# explicitly overridden in the environment, falling back to start_mlx_server.sh's
+# default (38472).
+if [[ -z "${MLX_PORT:-}" ]] && [[ -f "$BUSHPILOT_HOME/config.json" ]] && command -v python3 > /dev/null 2>&1; then
+    MLX_PORT="$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        p = json.load(f).get("port")
+    if isinstance(p, int) and p > 0:
+        print(p)
+except Exception:
+    pass
+' "$BUSHPILOT_HOME/config.json" 2>/dev/null || true)"
+fi
 MLX_PORT="${MLX_PORT:-38472}"
 MLX_PROC_PATTERN="mlx_vlm\.server|mlx-dspark serve"
 
@@ -151,14 +163,12 @@ remove_opencode_provider() {
         return 0
     fi
 
-    local result
-    # NOTE for future edits: this heredoc is quoted ('PYEOF', no bash expansion inside)
-    # AND nested inside a $(...) command substitution -- bash's parser needs the TOTAL
-    # count of literal ' characters anywhere in the body below to stay EVEN, or it
-    # mis-detects where $(...) ends (confirmed live: a single apostrophe in a comment,
-    # e.g. "doesn't", broke `bash -n` entirely). Prefer "does not" over "doesn't" etc.
-    # in comments here, or double-check the quote count if you add one anyway.
-    result="$(python3 - "$OPENCODE_CONFIG" <<'PYEOF'
+    local pyscript result
+    # Two-step temp-file pattern rather than `$(python3 - ... <<'PYEOF')`: stock macOS
+    # /bin/bash is 3.2, whose parser mis-counts single quotes inside heredocs nested
+    # in $(...) command substitutions.
+    pyscript="$(mktemp)"
+    cat <<'PYEOF' > "$pyscript"
 import json
 import re
 import sys
@@ -251,7 +261,8 @@ with open(config_path, "w") as f:
     f.write("\n")
 print("REMOVED")
 PYEOF
-    )" || true
+    result="$(python3 "$pyscript" "$OPENCODE_CONFIG" 2>/dev/null)" || true
+    rm -f "$pyscript"
 
     case "$result" in
         REMOVED) log_success "Removed mlx-direct provider from $OPENCODE_CONFIG" ;;
@@ -276,8 +287,9 @@ remove_pi_provider() {
         return 0
     fi
 
-    local result
-    result="$(python3 - "$pi_config" <<'PYEOF'
+    local pyscript result
+    pyscript="$(mktemp)"
+    cat <<'PYEOF' > "$pyscript"
 import json
 import sys
 
@@ -301,7 +313,8 @@ with open(config_path, "w") as f:
     f.write("\n")
 print("REMOVED")
 PYEOF
-    )" || true
+    result="$(python3 "$pyscript" "$pi_config" 2>/dev/null)" || true
+    rm -f "$pyscript"
 
     if [[ "$result" == "REMOVED" ]]; then
         log_success "Removed mlx-direct provider from $pi_config"

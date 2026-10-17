@@ -55,15 +55,16 @@ MODEL_ID="${1:?Usage: $0 <huggingface-model-id> [max_kv_size] [port]}"
 MAX_KV_SIZE="${2:-131072}"
 PORT="${3:-8296}"
 
-MLX_VENV="$HOME/pip_env/mlx_lm/venv"
+BUSHPILOT_HOME="${BUSHPILOT_HOME:-$HOME/.bushpilot}"
+MLX_VENV="$BUSHPILOT_HOME/venv"
 MLX_PYTHON="$MLX_VENV/bin/python"
-export HF_HOME="${HF_HOME:-$HOME/MLX_Models}"
+export HF_HOME="${HF_HOME:-$BUSHPILOT_HOME/models}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS_FILE="$SCRIPT_DIR/docs/mlx_long_context_stress_results.json"
 SERVER_LOG="/tmp/verify_long_context_$$.log"
 MONITOR_LOG="/tmp/verify_long_context_monitor_$$.log"
 
-# Same production defaults as start_litellm_proxy.sh (KV_BITS/KV_GROUP_SIZE/etc.) — kept
+# Same production defaults as start_mlx_server.sh (KV_BITS/KV_GROUP_SIZE/etc.) — kept
 # in sync deliberately, since testing anything other than the real production flags would
 # defeat the point of this script.
 KV_BITS=8
@@ -149,15 +150,24 @@ start_server() {
         return 1
     fi
 
+    # mlx_vlm >= 0.4.4 enumerates every model cached in HF_HOME on /v1/models with a
+    # `loaded` boolean flag; match either a loaded entry or the legacy single-entry format.
     local served_model
     served_model=$(curl -fsS "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null | "$MLX_PYTHON" -c "
-import json,sys
+import json, sys
+want = sys.argv[1]
 try:
-    d=json.load(sys.stdin)
-    print(d.get('data',[{}])[0].get('id',''))
+    d = json.load(sys.stdin)
+    items = d.get('data', [])
+    for m in items:
+        if m.get('id') == want and m.get('loaded', True):
+            print(want)
+            break
+    else:
+        print(items[0].get('id', '') if items else '')
 except Exception:
     print('')
-" 2>/dev/null)
+" "$MODEL_ID" 2>/dev/null)
     if [[ "$served_model" != "$MODEL_ID" ]]; then
         log "ERROR: health check answered but /v1/models reports '$served_model', expected '$MODEL_ID'."
         return 1
@@ -178,16 +188,32 @@ stop_server() {
 }
 
 start_monitor() {
-    # No per-machine GB math needed — monitor_memory.sh's thresholds are percent-free
-    # (kern.memorystatus_level), already machine-size-normalized. See monitor_memory.sh's own
-    # header comment for the real data (from this exact model) behind that design.
-    log "Starting monitor_memory.sh on PID $SERVER_PID (percent-free-based thresholds — see monitor_memory.sh) — real safety net for this test, not a formality."
-    "$SCRIPT_DIR/monitor_memory.sh" \
-        --pid "$SERVER_PID" \
-        --interval 5 \
-        --log-file "$MONITOR_LOG" \
-        --litellm-pattern "definitely-not-a-real-process-litellm-not-running-during-this-test" \
-        > /dev/null 2>&1 &
+    # Inline percent-free memory backstop (replaces the historical standalone
+    # monitor_memory.sh removed in Phase 4, mirroring start_mlx_server.sh's
+    # check_memory_backstop consecutive-poll debouncing).
+    log "Starting inline memory backstop monitor on PID $SERVER_PID (kern.memorystatus_level < 10% for 3 consecutive 5s polls)..."
+    (
+        local consecutive=0
+        local level
+        : > "$MONITOR_LOG"
+        while kill -0 "$SERVER_PID" 2>/dev/null; do
+            level="$(sysctl -n kern.memorystatus_level 2>/dev/null || echo 100)"
+            if [[ "$level" =~ ^[0-9]+$ ]] && [[ "$level" -lt 10 ]]; then
+                consecutive=$((consecutive + 1))
+                echo "[$(date +%H:%M:%S)] WARN: kern.memorystatus_level=${level}% (< 10%, strike ${consecutive}/3)" >> "$MONITOR_LOG"
+                if [[ "$consecutive" -ge 3 ]]; then
+                    echo "[$(date +%H:%M:%S)] ABORT: memory pressure sustained for 3 polls; killing PID $SERVER_PID" >> "$MONITOR_LOG"
+                    kill -TERM "$SERVER_PID" 2>/dev/null || true
+                    sleep 2
+                    kill -9 "$SERVER_PID" 2>/dev/null || true
+                    exit 0
+                fi
+            else
+                consecutive=0
+            fi
+            sleep 5
+        done
+    ) &
     MONITOR_PID=$!
 }
 

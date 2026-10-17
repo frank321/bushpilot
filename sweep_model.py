@@ -439,7 +439,8 @@ class SweepServer:
     repeatedly in a tight loop that script was never designed for."""
 
     def __init__(self, mlx_model_hf, host, port, context_window, log_path,
-                 prefill_step_size=ma.DEFAULT_PREFILL_STEP_SIZE, kv_bits=None, max_num_seqs=4):
+                 prefill_step_size=ma.DEFAULT_PREFILL_STEP_SIZE, kv_bits=None, max_num_seqs=4,
+                 apc_num_blocks=ma.MLX_VLM_APC_NUM_BLOCKS):
         self.mlx_model_hf = mlx_model_hf
         self.host = host
         self.port = port
@@ -448,6 +449,7 @@ class SweepServer:
         self.prefill_step_size = prefill_step_size
         self.kv_bits = kv_bits
         self.max_num_seqs = max_num_seqs
+        self.apc_num_blocks = apc_num_blocks if apc_num_blocks is not None else ma.MLX_VLM_APC_NUM_BLOCKS
         self.proc = None
         self.load_time_s = None
 
@@ -472,7 +474,7 @@ class SweepServer:
         env = dict(os.environ)
         env["HF_HOME"] = HF_HOME
         env["APC_ENABLED"] = "1"
-        env["APC_NUM_BLOCKS"] = "4096"
+        env["APC_NUM_BLOCKS"] = str(self.apc_num_blocks)
         env["APC_DISK_PATH"] = APC_DISK_PATH
         env["APC_DISK_MAX_GB"] = "5"
         log(f"Launching: {' '.join(args)}")
@@ -527,24 +529,36 @@ def memory_guard_ok(model_entry, safety_buffer_gb=ma.SAFETY_BUFFER_GB):
 
 
 def concurrency_memory_guard_ok(model_entry, context_tokens, concurrency, kv_bits,
-                                 safety_buffer_gb=ma.SAFETY_BUFFER_GB):
+                                 safety_buffer_gb=ma.SAFETY_BUFFER_GB, apc_num_blocks=None):
     """Tier 4's own safety rule (docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md remaining-work
-    item #5): reuses compute_kv_formula directly (the exact same math
-    compute_bonus_concurrency/recommend_max_context already trust) to check whether
-    `concurrency` identically-sized slots at `context_tokens` each would ACTUALLY fit
-    free memory before firing them all at once -- the sweep must never trigger the
-    emergency memory backstop it exists to help avoid."""
+    item #5): reuses compute_kv_formula + mlx_vlm_apc_pool_bytes directly (the exact same
+    math compute_bonus_concurrency/recommend_max_context already trust) to check whether
+    `concurrency` identically-sized slots at `context_tokens` each plus the shared APC
+    pool would ACTUALLY fit free memory before firing them all at once -- the sweep must
+    never trigger the emergency memory backstop it exists to help avoid."""
     chip_name, _gpu_cores, total_ram_gb = ma.get_chip_info()
     current_wired_gb = ma.get_current_wired_gb()
     free_wired_gb = total_ram_gb - current_wired_gb
-    formula = ma.compute_kv_formula(model_entry.get("kv_config"),
-                                     kv_bits if kv_bits else ma.UNQUANTIZED_KV_BITS)
+    effective_kv_bits = kv_bits if kv_bits else ma.UNQUANTIZED_KV_BITS
+    kv_group_size = (
+        ma.DEFAULT_KV_GROUP_SIZE if effective_kv_bits < ma.UNQUANTIZED_KV_BITS else None
+    )
+    formula = ma.compute_kv_formula(
+        model_entry.get("kv_config"), effective_kv_bits, kv_group_size=kv_group_size,
+    )
     if formula is None:
         return True  # No kv_config to check against -- can't refuse on data we don't have.
     bytes_per_growing_token, fixed_bytes, _ = formula
-    per_slot_bytes = fixed_bytes + bytes_per_growing_token * context_tokens
-    required_gb = ma.effective_size_gb(model_entry) + safety_buffer_gb + \
-        (per_slot_bytes * concurrency) / 1024**3
+    drafter_growing, drafter_fixed = ma.compute_drafter_kv_formula(
+        model_entry, kv_bits=effective_kv_bits, kv_group_size=kv_group_size,
+    )
+    raw_growing = bytes_per_growing_token + drafter_growing
+    per_slot_bytes = (fixed_bytes + drafter_fixed) + raw_growing * context_tokens
+    apc_pool_bytes = ma.mlx_vlm_apc_pool_bytes(
+        model_entry, raw_growing, apc_num_blocks=apc_num_blocks,
+    )
+    total_kv_bytes = per_slot_bytes * concurrency + apc_pool_bytes
+    required_gb = ma.effective_size_gb(model_entry) + safety_buffer_gb + total_kv_bytes / 1024**3
     return free_wired_gb >= required_gb
 
 
@@ -637,7 +651,7 @@ def run_measured_requests(host, port, model_hf_id, prompt_fn, context_tokens, ma
 
 
 def run_prefill_step_size_tier(model_entry, host, port, step_sizes, sweep_context_tokens,
-                                max_num_seqs, log_dir):
+                                max_num_seqs, log_dir, apc_num_blocks=ma.MLX_VLM_APC_NUM_BLOCKS):
     """Tier 1 headline metric: launches the server once per candidate step size (with
     --kv-bits 8 held constant, matching §12's exact methodology so step size is the
     only variable), sends the warmup+measured discipline at a fixed deep-ish context,
@@ -649,7 +663,7 @@ def run_prefill_step_size_tier(model_entry, host, port, step_sizes, sweep_contex
             model_entry["huggingface"], host, port, context_window=sweep_context_tokens + 4096,
             log_path=os.path.join(log_dir, f"step{step_size}.log"),
             prefill_step_size=step_size, kv_bits=ma.MEMORY_CONSTRAINED_KV_BITS,
-            max_num_seqs=max_num_seqs,
+            max_num_seqs=max_num_seqs, apc_num_blocks=apc_num_blocks,
         )
         if not server.start():
             entries.append({"step_size": step_size, "ttft_s": None, "error": "launch_failed"})
@@ -672,7 +686,8 @@ def run_prefill_step_size_tier(model_entry, host, port, step_sizes, sweep_contex
 
 
 def run_decode_vs_context_and_kv_bits_tier(model_entry, host, port, context_depths,
-                                            best_step_size, max_num_seqs, log_dir):
+                                            best_step_size, max_num_seqs, log_dir,
+                                            apc_num_blocks=ma.MLX_VLM_APC_NUM_BLOCKS):
     """Tier 1's remaining metrics (decode speed vs. context depth curve, real peak
     memory at each depth) PLUS the KV-bits-at-long-context comparison -- two server
     launches at best_step_size (one unquantized, one with --kv-bits 8), each sent
@@ -712,6 +727,7 @@ def run_decode_vs_context_and_kv_bits_tier(model_entry, host, port, context_dept
             model_entry["huggingface"], host, port, context_window=deepest + 4096,
             log_path=os.path.join(log_dir, f"depth_{label}.log"),
             prefill_step_size=best_step_size, kv_bits=kv_bits, max_num_seqs=max_num_seqs,
+            apc_num_blocks=apc_num_blocks,
         )
         if not server.start():
             for depth in context_depths:
@@ -894,7 +910,8 @@ def run_drafter_tier(model_entry):
     }
 
 
-def run_concurrency_tier(model_entry, host, port, levels, context_tokens, kv_bits):
+def run_concurrency_tier(model_entry, host, port, levels, context_tokens, kv_bits,
+                         apc_num_blocks=ma.MLX_VLM_APC_NUM_BLOCKS):
     """Tier 4: fires `concurrency` simultaneous requests at a SHALLOWER context depth
     than the step-size/decode-curve tiers' deepest point (remaining-work item #5),
     guarded by concurrency_memory_guard_ok before ever firing. Aggregate tok/s = total
@@ -920,7 +937,9 @@ def run_concurrency_tier(model_entry, host, port, levels, context_tokens, kv_bit
     import concurrent.futures
     results = []
     for concurrency in levels:
-        if not concurrency_memory_guard_ok(model_entry, context_tokens, concurrency, kv_bits):
+        if not concurrency_memory_guard_ok(
+            model_entry, context_tokens, concurrency, kv_bits, apc_num_blocks=apc_num_blocks
+        ):
             results.append({"concurrency": concurrency, "error": "memory_guard_refused"})
             continue
         prompts = [build_filler_prompt(
@@ -1039,6 +1058,9 @@ def run_sweep(model_id, host=DEFAULT_HOST, port=DEFAULT_PORT,
             f"{free_gb:.1f}GB available. Close other apps/models and retry.")
         return 1
 
+    rec = ma.recommend_kv_bits_and_context(model_entry, free_gb)
+    apc_num_blocks = rec.get("apc_num_blocks") or ma.MLX_VLM_APC_NUM_BLOCKS
+
     out_path = output_path or sweep_path(chip_name, model_id)
     # Model-specific subdirectory -- confirmed live this session: a shared
     # ~/.bushpilot/logs/sweeps/ directory meant two different models' step512.log
@@ -1084,7 +1106,7 @@ def run_sweep(model_id, host=DEFAULT_HOST, port=DEFAULT_PORT,
         log(f"=== Tier 1a: prefill-step-size sweep {step_sizes} @ {sweep_context_tokens} tokens ===")
         entries, best_step_size = run_prefill_step_size_tier(
             model_entry, host, port, step_sizes, sweep_context_tokens=sweep_context_tokens,
-            max_num_seqs=max_num_seqs, log_dir=log_dir,
+            max_num_seqs=max_num_seqs, log_dir=log_dir, apc_num_blocks=apc_num_blocks,
         )
         data["prefill_step_size_sweep"] = entries
         log(f"Winning step size: {best_step_size}")
@@ -1097,6 +1119,7 @@ def run_sweep(model_id, host=DEFAULT_HOST, port=DEFAULT_PORT,
             f"tool-calling + multimodal (depths={context_depths}) ===")
         bundle = run_decode_vs_context_and_kv_bits_tier(
             model_entry, host, port, context_depths, best_step_size, max_num_seqs, log_dir,
+            apc_num_blocks=apc_num_blocks,
         )
         data.update(bundle)
         write_sweep_json(out_path, data)
@@ -1107,6 +1130,7 @@ def run_sweep(model_id, host=DEFAULT_HOST, port=DEFAULT_PORT,
             model_entry["huggingface"], host, port, context_window=concurrency_context + 2048,
             log_path=os.path.join(log_dir, "tier4.log"),
             prefill_step_size=best_step_size, kv_bits=None, max_num_seqs=max(concurrency_levels),
+            apc_num_blocks=apc_num_blocks,
         )
         if server.start():
             try:
@@ -1115,6 +1139,7 @@ def run_sweep(model_id, host=DEFAULT_HOST, port=DEFAULT_PORT,
                         f"@ {concurrency_context} tokens ===")
                     data["concurrency_throughput"] = run_concurrency_tier(
                         model_entry, host, port, concurrency_levels, concurrency_context, kv_bits=None,
+                        apc_num_blocks=apc_num_blocks,
                     )
                     write_sweep_json(out_path, data)
                 if "thermal" not in skip_tiers:

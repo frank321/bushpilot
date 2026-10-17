@@ -7,7 +7,7 @@ import os
 import sys
 
 from ..hardware import log
-from ..kv import MIN_USABLE_CONTEXT, SAFETY_BUFFER_GB, effective_size_gb
+from ..kv import MIN_USABLE_CONTEXT, SAFETY_BUFFER_GB, UNQUANTIZED_KV_BITS, effective_size_gb
 from ..preload import MCP_SERVER_TOKENS_ESTIMATE
 from ..recommend import MIN_SPEED_TOK_S
 from .cells import (
@@ -16,12 +16,19 @@ from .cells import (
     COL_KV,
     COL_LAST,
     COL_NAME,
+    COL_SPEED,
+    COL_TOOLS,
     COMPACT_HEADERS,
     COMPACT_RIGHT_ALIGNED,
     _truncate_cell,
     cap_name_width,
     compact_row_cells,
     compact_row_widths,
+    is_model_cached,
+    model_drafter_label,
+    model_engine,
+    model_input_label,
+    model_tools_label,
     visible_columns,
 )
 from .sort import COLUMN_SORT_KEYS, next_sort, sort_key_for_click, sort_rows
@@ -29,8 +36,10 @@ from .sort import COLUMN_SORT_KEYS, next_sort, sort_key_for_click, sort_rows
 DIM = "\033[2m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
+RED = "\033[31m"
 GREEN = "\033[32m"
 YELLOW = "\033[33m"
+CYAN = "\033[36m"
 
 
 def use_color(force=False):
@@ -111,13 +120,17 @@ def format_model_body_lines(m, r=None):
     the KV-cache note. The text itself doesn't change between the two renderers, only
     where/how it's displayed -- indentation and surrounding chrome are each caller's
     own job."""
-    lines = [m["display"]["good_for"], ""]
-    for ex in m["display"]["usage_examples"]:
+    disp = m.get("display") or {}
+    lines = []
+    if disp.get("good_for"):
+        lines.extend([disp["good_for"], ""])
+    for ex in disp.get("usage_examples") or []:
         lines.append(f"e.g. {ex}")
-    if m["display"].get("known_issues"):
-        lines.append(f"⚠ {m['display']['known_issues']}")
+    if disp.get("known_issues"):
+        lines.append(f"⚠ {disp['known_issues']}")
     if r is not None:
-        lines.append("")
+        if lines:
+            lines.append("")
         if r["kv_bits"]:
             lines.append(f"[KV cache quantized to {r['kv_bits']}-bit — needed to fit this context in free memory]")
             if r.get("kv_bits_apc_caveat"):
@@ -131,6 +144,79 @@ def format_model_body_lines(m, r=None):
         if r.get("concurrency", 1) > 1:
             lines.append(f"[{r['concurrency']} concurrent requests supported at this context size, without exceeding safe memory]")
     return lines
+
+
+def format_model_detail_lines(row, free_wired_gb, preload=None, force_color=False):
+    """Full lines for `model_advisor.py --detail MODEL_ID` (fzf's preview pane).
+    Includes the status/cache badges, the full metadata spec bar (so columns dropped on
+    narrow terminals are always visible here), the live hardware fit summary or
+    unavailable reason, and the descriptive body lines."""
+    m = row["model"]
+    disp = m.get("display") or {}
+    color = use_color(force_color)
+    b_on = BOLD if color else ""
+    d_on = DIM if color else ""
+    g_on = GREEN if color else ""
+    y_on = YELLOW if color else ""
+    c_on = CYAN if color else ""
+    rst = RESET if color else ""
+
+    status_badge = f"{d_on}[○ untested]{rst}" if m.get("status") == "untested" else f"{g_on}[✓ tested]{rst}"
+    cached = is_model_cached(m)
+    cache_badge = f"{g_on}[cached on disk]{rst}" if cached else f"{d_on}[download ~{m['size_gb']:g} GB]{rst}"
+    hf_str = f"  {d_on}({m.get('huggingface', '')}){rst}" if m.get("huggingface") else ""
+
+    header = f"{b_on}{m['id']}{rst}  {status_badge}  {cache_badge}{hf_str}"
+    tagline = f"{c_on}{disp.get('tagline', '')}{rst}" if disp.get("tagline") else ""
+
+    mtype = "MoE" if m.get("type") == "moe" else "Dense"
+    engine = model_engine(m)
+    drafter = model_drafter_label(m)
+    inp = model_input_label(m)
+    tools = model_tools_label(m)
+    released = m.get("released") or "—"
+    specs = (
+        f"{d_on}Type:{rst} {mtype}  ·  "
+        f"{d_on}Engine:{rst} {engine}  ·  "
+        f"{d_on}Drafter:{rst} {drafter}  ·  "
+        f"{d_on}Input:{rst} {inp}  ·  "
+        f"{d_on}Tools:{rst} {y_on + tools + rst if tools == 'no tools' else tools}  ·  "
+        f"{d_on}Released:{rst} {released}  ·  "
+        f"{d_on}Size:{rst} {m['size_gb']:g} GB"
+    )
+
+    if row["fits"]:
+        kv_bits = row["kv_bits"] or UNQUANTIZED_KV_BITS
+        kv_hue = y_on if row["kv_bits"] else g_on
+        if row["estimated_tok_s"] is not None:
+            if row.get("speed_source") == "calibrated":
+                spd_str = f"{b_on}{row['estimated_tok_s']} tok/s{rst} (measured on this Mac)"
+            else:
+                spd_str = f"~{row['estimated_tok_s']} tok/s (estimated)"
+        else:
+            spd_str = "speed unknown"
+        fit_line = (
+            f"{kv_hue}● Fits this Mac:{rst} {kv_hue}{row['recommended_context']:,} tok context "
+            f"({kv_bits}-bit KV){rst}  ·  {spd_str}  ·  "
+            f"{row.get('concurrency', 1)} concurrent"
+        )
+    else:
+        reason = short_unavailable_reason(row, free_wired_gb, preload)
+        fit_line = f"{y_on}✗ Does not fit current free memory:{rst} {reason}"
+
+    out = [header, tagline, specs, fit_line, ""]
+    for line in format_model_body_lines(m, row if row["fits"] else None):
+        if color and line.startswith("⚠"):
+            out.append(f"{y_on}{line}{rst}")
+        elif color and line.startswith("[⚠"):
+            out.append(f"{y_on}{line}{rst}")
+        elif color and line.startswith("["):
+            out.append(f"{d_on}{line}{rst}")
+        elif color and line.startswith("e.g. "):
+            out.append(f"{d_on}e.g.{rst} {line[5:]}")
+        else:
+            out.append(line)
+    return out
 
 
 def short_unavailable_reason(r, free_wired_gb, preload=None):
@@ -210,6 +296,13 @@ def format_model_compact_row(r, widths=None, cols=None, reason=None, term_width=
                 colored[COL_KV] = f"{hue}{colored[COL_KV]}{RESET}"
             if COL_ENGINE in colored:
                 colored[COL_ENGINE] = f"{DIM}{colored[COL_ENGINE]}{RESET}"
+            if COL_TOOLS in colored:
+                if cells[COL_TOOLS] == "no tools":
+                    colored[COL_TOOLS] = f"{YELLOW}{colored[COL_TOOLS]}{RESET}"
+                elif cells[COL_TOOLS] == "tools?":
+                    colored[COL_TOOLS] = f"{DIM}{colored[COL_TOOLS]}{RESET}"
+            if COL_SPEED in colored and r.get("speed_source") == "calibrated":
+                colored[COL_SPEED] = f"{BOLD}{colored[COL_SPEED]}{RESET}"
             line = "  ".join([colored[k] for k in cols] + [f"{DIM}{notes}{RESET}"])
     return f"{r['model']['id']}\t{line}\t{reason or ''}"
 
@@ -286,7 +379,13 @@ def print_menu(rows, free_wired_gb, chip_name, gpu_cores, total_ram_gb, preload=
         m = r["model"]
         if r["fits"]:
             i += 1
-            speed_str = f"~{r['estimated_tok_s']} tok/s (estimated)" if r["estimated_tok_s"] else "speed unknown"
+            if r["estimated_tok_s"]:
+                if r.get("speed_source") == "calibrated":
+                    speed_str = f"{r['estimated_tok_s']} tok/s (measured on this machine)"
+                else:
+                    speed_str = f"~{r['estimated_tok_s']} tok/s (estimated)"
+            else:
+                speed_str = "speed unknown"
             headroom_str = ""
             if r["context_after_preload"] is not None:
                 headroom_str = f"  (~{r['context_after_preload']:,} left for conversation after preload)"

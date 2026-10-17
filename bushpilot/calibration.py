@@ -47,7 +47,7 @@ def load_calibration(chip_name, model_id):
 
 def save_calibration(chip_name, model_id, decode_tok_s, context_tokens=None,
                       ttft_s=None, peak_memory_gb=None, prefill_step_size=None,
-                      kv_bits_safe_at_long_context=None):
+                      kv_bits_safe_at_long_context=None, drafter=None):
     """Persists one real observation of this model actually decoding on this chip, so
     a FUTURE launch of the identical (chip, model) pair can report a measured tok/s
     instead of SPEED_CORRECTION_FACTOR's physics estimate -- whose own documented
@@ -65,6 +65,11 @@ def save_calibration(chip_name, model_id, decode_tok_s, context_tokens=None,
     this keeps a plain teardown-time save_calibration_snapshot() call (which never has
     sweep data) byte-identical to before this was added, and keeps load_calibration's
     existing "ignore unknown keys" contract the only thing a reader needs to rely on.
+
+    drafter (optional): when provided (e.g. from start_mlx_server.sh's
+    save_calibration_snapshot), records the active speculative-decoding drafter id so
+    estimate_speed_tok_s can verify the saved speed matches the entry's current
+    serving.drafter/draft_model configuration.
 
     Deliberately last-write-wins (overwrites any prior file for this exact pair), not
     an average across sessions -- a more recent measurement (different context load,
@@ -89,6 +94,8 @@ def save_calibration(chip_name, model_id, decode_tok_s, context_tokens=None,
         payload["prefill_step_size"] = prefill_step_size
     if kv_bits_safe_at_long_context is not None:
         payload["kv_bits_safe_at_long_context"] = kv_bits_safe_at_long_context
+    if drafter is not None:
+        payload["drafter"] = drafter
     tmp_path = f"{path}.tmp"
     with open(tmp_path, "w") as f:
         json.dump(payload, f)

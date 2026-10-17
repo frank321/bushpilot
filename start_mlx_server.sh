@@ -671,7 +671,7 @@ run_fzf_model_picker() {
     # array idiom can't be used inline here -- build it conditionally instead
     # (the ${#arr[@]} length expansion is safe on empty arrays under set -u even
     # on bash 3.2).
-    local preview_cmd="\"$MLX_PYTHON\" \"$SCRIPT_DIR/model_advisor.py\" --detail {1}"
+    local preview_cmd="\"$MLX_PYTHON\" \"$SCRIPT_DIR/model_advisor.py\" --detail {1} --color"
     [[ ${#ADVISOR_FLAGS[@]} -gt 0 ]] && preview_cmd+=" ${ADVISOR_FLAGS[*]}"
     # system_profiler prints a hw.cpufamily line to stderr on every call; fzf would show it.
     preview_cmd+=" 2>/dev/null"
@@ -713,13 +713,13 @@ run_fzf_model_picker() {
     # fzf exists (and gets immediately superseded by the `start` reload anyway).
     list_cmd+="--term-width \"\${FZF_COLUMNS:-$term_width}\""
 
-    local header_text=$'Models fit, context size and speed are calculated live for your hardware (chip + free memory); speed is an estimate.\n↑↓ move · type to filter · Enter select · Esc cancel\nSort: click a column header (again to reverse), or ^R newest · ^S fastest · ^T largest · ^O name\ngreen = fits as-is · yellow = KV-quantized to fit · dim = does not fit · ✓ tested · ○ untested'
+    local header_text=$'Models fit, context size and speed are calculated live for your hardware (chip + free memory).\n↑↓ move · type to filter · Enter select · Esc cancel\nSort: click a column header (again to reverse), or ^R newest · ^S fastest · ^T largest · ^O name\ngreen = fits as-is · yellow = KV-quantized · dim = does not fit · 71 tok/s = measured · ~71 tok/s = est · ✓ tested · ○ untested'
     # The column-header row sits right below fzf's --header lines; a click-header event
     # reports which line was clicked, and only that row should trigger a re-sort.
     local header_row=$(( $(printf '%s\n' "$header_text" | wc -l) + 1 ))
 
+    : > "$sort_state"   # start from the default sort, preserved if reopened after picking a dimmed row
     while true; do
-        : > "$sort_state"   # every (re)opened picker starts from the default sort
         selection="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact --color --term-width "$term_width" --sort-state "$sort_state" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} | fzf \
             --delimiter=$'\t' --with-nth=2 \
             --preview "$preview_cmd" --preview-window down:50%:wrap \
@@ -975,7 +975,8 @@ run_startup_smoke_check() {
 ensure_mlx_running() {
     log_info "Checking MLX server on $MLX_HOST:$MLX_PORT..."
 
-    local desired_state="$MLX_MODEL|$CONTEXT_WINDOW|$KV_BITS"
+    local desired_state="$MLX_MODEL|$CONTEXT_WINDOW|$KV_BITS|${LOCAL_MODEL:-}|${MLX_BACKEND:-mlx_vlm}"
+    local legacy_desired_state="$MLX_MODEL|$CONTEXT_WINDOW|$KV_BITS"
     local server_up=false
 
     if curl -fsS --max-time 5 "http://$MLX_HOST:$MLX_PORT/health" > /dev/null 2>&1; then
@@ -1010,7 +1011,7 @@ ensure_mlx_running() {
         local loaded_state=""
         [[ -f "$MLX_STATE_FILE" ]] && loaded_state="$(cat "$MLX_STATE_FILE" 2>/dev/null)"
 
-        if [[ "$loaded_state" == "$desired_state" ]]; then
+        if [[ "$loaded_state" == "$desired_state" || "$loaded_state" == "$legacy_desired_state" ]]; then
             log_success "MLX server already healthy with $MLX_MODEL (context: ${CONTEXT_WINDOW} tokens)"
             # Append-only (do NOT truncate -- the running server's own log must survive,
             # and its fd keeps writing to this file). Notes the attach plus a fresh
@@ -1317,6 +1318,8 @@ PYEOF
     [[ -n "$context_tokens" ]] && save_args+=(--context-tokens "$context_tokens")
     [[ -n "$ttft_s" ]] && save_args+=(--ttft-s "$ttft_s")
     [[ -n "$peak_mem_gb" ]] && save_args+=(--peak-memory-gb "$peak_mem_gb")
+    local active_drafter="${MLX_DRAFTER:-${MLX_DRAFT_MODEL:-}}"
+    [[ -n "$active_drafter" ]] && save_args+=(--drafter "$active_drafter")
 
     "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" "${save_args[@]}" 2>/dev/null || true
 }
@@ -1324,6 +1327,7 @@ PYEOF
 full_teardown() {
     local reason="${1:-}"
     local mode="${2:-normal}"
+    [[ -t 1 ]] && printf '\033[?25h' 2>/dev/null || true
     [[ -n "$reason" ]] && echo -e "\n[!] Stopping: $reason"
     log_teardown "$reason"
     if [[ "$mode" == "emergency" ]]; then
@@ -1333,9 +1337,11 @@ full_teardown() {
         wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" "${MEM_EMERGENCY_KILL_TIMEOUT:-3}" || true
         rm -f "$MLX_STATE_FILE"
         render_dashboard || true
+        [[ -t 1 ]] && printf '\033[?25h' 2>/dev/null || true
         stty sane 2>/dev/null || true
     else
         save_calibration_snapshot || true
+        [[ -t 1 ]] && printf '\033[?25h' 2>/dev/null || true
         stty sane 2>/dev/null || true
         wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 20 || true
         rm -f "$MLX_STATE_FILE"
@@ -1367,7 +1373,7 @@ get_mlx_rss_gb() {
 # its /metrics response, so we can't learn this from the API. What we CAN see
 # ourselves: every tool talks to $MLX_PORT over a local TCP socket, so lsof on that
 # port surfaces the PIDs holding a connection to it. Exclude the server's own PID
-# (identified by matching $MLX_SERVER_MODULE in its command line, since $MLX_PID
+# (identified by matching $MLX_PROC_PATTERN in its command line, since $MLX_PID
 # isn't set when we attached to an already-running server) and resolve the rest to
 # process names -- that's "what tool is connected", best-effort, not request-level.
 get_connected_clients() {
@@ -1377,7 +1383,7 @@ get_connected_clients() {
 
     server_pid=""
     for pid in $pids; do
-        if ps -p "$pid" -o command= 2>/dev/null | grep -q "$MLX_SERVER_MODULE"; then
+        if ps -p "$pid" -o command= 2>/dev/null | grep -q "$MLX_PROC_PATTERN"; then
             server_pid="$pid"
             break
         fi
@@ -1409,7 +1415,7 @@ render_dashboard() {
         cache_json="$(curl -fsS --max-time 1 "http://$MLX_HOST:$MLX_PORT/v1/cache/stats" 2>/dev/null || echo '{}')"
     fi
 
-    local pct_free pressure pressure_name mlx_rss now_ts elapsed elapsed_fmt connected_clients
+    local pct_free pressure pressure_name mlx_rss now_ts elapsed elapsed_fmt connected_clients term_cols
     pct_free="$(get_percent_free)"
     pressure="$(get_pressure_level)"
     pressure_name="$(pressure_level_name "${pressure:-0}")"
@@ -1418,31 +1424,34 @@ render_dashboard() {
     now_ts=$(date +%s)
     elapsed=$((now_ts - DASHBOARD_START_TS))
     elapsed_fmt=$(printf "%02d:%02d:%02d" $((elapsed/3600)) $((elapsed%3600/60)) $((elapsed%60)))
+    term_cols="${COLUMNS:-$(tput cols 2>/dev/null || echo 90)}"
 
-    clear
+    # mlx-dspark's /metrics shape is genuinely different from mlx_vlm's, not just a
+    # field-renaming exercise -- confirmed live: no separate "latest request" vs.
+    # "lifetime summary" split (only running means), no requests_failed/in_flight
+    # counters, but real speculative-decoding stats (mean_accept_len, draft
+    # acceptance rate, PER-POSITION acceptance showing where in the draft block
+    # accuracy decays) mlx_vlm has no equivalent of, a real memory.peak_bytes/
+    # active_bytes/cache_bytes breakdown, and real system.swap_used_bytes -- none of
+    # which mlx_vlm's own dashboard can get from its API either. Deliberately
+    # OMITTED: "auto_cap" (metrics field only populates when --max-draft auto is
+    # passed; this script never passes it, so it's always null here -- not worth a
+    # permanent "—"), and mlx-dspark's own "verdict.headline" (live-tested and found
+    # it can say "No decode measured yet" even while mean_decode_tokens_per_sec and
+    # mean_accept_len are already populated in the same response, so it isn't
+    # trustworthy as a live-updating signal).
+    "$MLX_PYTHON" - "$MLX_BACKEND" "$metrics_json" "$cache_json" "$MLX_MODEL" "$MLX_PORT" \
+        "$CONTEXT_WINDOW" "$elapsed_fmt" "${APC_ENABLED}" "${pct_free:-?}" "$pressure_name" \
+        "${mlx_rss:-?}" "$TEARDOWN_REASON" "$SCRIPT_DIR/launch_tool.sh" "${connected_clients:-}" \
+        "$MLX_HOST" "$CONCURRENCY" "${MLX_DRAFTER:-}" "${MLX_DSPARK_MODE:-dflash}" \
+        "${MEM_WARNING_STATUS:-}" "$term_cols" <<'PYEOF'
+import json, os, re, sys
 
-    if [[ "$MLX_BACKEND" == "mlx_dspark" ]]; then
-        # mlx-dspark's /metrics shape is genuinely different from mlx_vlm's, not just a
-        # field-renaming exercise -- confirmed live: no separate "latest request" vs.
-        # "lifetime summary" split (only running means), no requests_failed/in_flight
-        # counters, but real speculative-decoding stats (mean_accept_len, draft
-        # acceptance rate, PER-POSITION acceptance showing where in the draft block
-        # accuracy decays) mlx_vlm has no equivalent of, a real memory.peak_bytes/
-        # active_bytes/cache_bytes breakdown, and real system.swap_used_bytes -- none of
-        # which mlx_vlm's own dashboard can get from its API either. Deliberately
-        # OMITTED: "auto_cap" (metrics field only populates when --max-draft auto is
-        # passed; this script never passes it, so it's always null here -- not worth a
-        # permanent "—"), and mlx-dspark's own "verdict.headline" (live-tested and found
-        # it can say "No decode measured yet" even while mean_decode_tokens_per_sec and
-        # mean_accept_len are already populated in the same response, so it isn't
-        # trustworthy as a live-updating signal).
-        "$MLX_PYTHON" - "$metrics_json" "$MLX_MODEL" "$MLX_PORT" "$CONTEXT_WINDOW" \
-            "$elapsed_fmt" "${pct_free:-?}" "$pressure_name" "${mlx_rss:-?}" "$TEARDOWN_REASON" \
-            "$SCRIPT_DIR/launch_tool.sh" "${connected_clients:-}" "$MLX_HOST" "$CONCURRENCY" \
-            "$MLX_DRAFTER" "${MLX_DSPARK_MODE:-dflash}" "${MEM_WARNING_STATUS:-}" <<'PYEOF-DSPARK'
-import json, sys
-
-metrics_raw, model, port, context, uptime, pct_free, pressure, rss, teardown_reason, launch_cmd, connected, host, concurrency, drafter, mode, mem_warning = sys.argv[1:17]
+(
+    backend, metrics_raw, cache_raw, model, port, context, uptime, apc_on,
+    pct_free, pressure, rss, teardown_reason, launch_cmd, connected, host,
+    concurrency, drafter, mode, mem_warning, term_cols_raw
+) = sys.argv[1:21]
 
 def safe_json(s):
     try:
@@ -1451,11 +1460,7 @@ def safe_json(s):
         return {}
 
 metrics = safe_json(metrics_raw)
-rounds = metrics.get("rounds", {})
-prefix_cache = metrics.get("prefix_cache", {})
-mem = metrics.get("memory", {})
-system = metrics.get("system", {})
-guard = metrics.get("memory_guard", {})
+cache = safe_json(cache_raw)
 
 def num(v, default="—"):
     return f"{v:,}" if isinstance(v, (int, float)) else default
@@ -1469,8 +1474,8 @@ def pct(v, default="—"):
 # Unlike pct() above (which formats an already-computed 0-1 fraction straight from
 # /metrics), this derives the fraction itself from two raw counts -- mlx-dspark's
 # /metrics has no precomputed cache-hit-rate field the way mlx_vlm's /v1/cache/stats
-# does (token_hit_rate, see the mlx_vlm dashboard branch below), so "what % of prompt
-# tokens were served from cache" has to be computed here instead of just displayed.
+# does (token_hit_rate), and for mlx_vlm deriving it from the same two raw counts
+# displayed on that line (prompt/reused) avoids trusting a separately-computed field.
 def pct_ratio(numerator, denominator, default="—"):
     if not isinstance(numerator, (int, float)) or not isinstance(denominator, (int, float)) or denominator <= 0:
         return default
@@ -1484,172 +1489,204 @@ def pos_accept(vals):
         return "—"
     return "/".join(f"{v*100:.0f}%" for v in vals)
 
-W = 90
+try:
+    tc = int(term_cols_raw)
+except ValueError:
+    tc = 90
+W = max(72, min(tc - 2, 110))
+
+is_tty = sys.stdout.isatty()
+use_color = is_tty and not os.environ.get("NO_COLOR")
+BOLD = "\033[1m" if use_color else ""
+DIM = "\033[2m" if use_color else ""
+GREEN = "\033[32m" if use_color else ""
+YELLOW = "\033[33m" if use_color else ""
+RED = "\033[31m" if use_color else ""
+CYAN = "\033[36m" if use_color else ""
+RESET = "\033[0m" if use_color else ""
+
+ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+def vis_len(s):
+    return len(ANSI_RE.sub("", s))
+
+def vis_trunc(s, max_vis):
+    if vis_len(s) <= max_vis:
+        return s
+    out = []
+    vis = 0
+    pos = 0
+    for m in ANSI_RE.finditer(s):
+        chunk = s[pos:m.start()]
+        take = min(len(chunk), max_vis - vis)
+        out.append(chunk[:take])
+        vis += take
+        out.append(m.group(0))
+        pos = m.end()
+        if vis >= max_vis:
+            break
+    if vis < max_vis and pos < len(s):
+        chunk = s[pos:]
+        out.append(chunk[:max_vis - vis])
+    if RESET and "\033[" in s:
+        out.append(RESET)
+    return "".join(out)
+
+out_lines = []
+eol = "\033[K" if is_tty else ""
+
+def emit(raw):
+    out_lines.append(raw + eol)
+
 def line(s=""):
-    s = s[:W - 4]
-    print("│ " + s.ljust(W - 4) + " │")
-def wrap_line(s="", indent="                "):
-    # For free-text that must not be lost (teardown reasons): wraps onto as many
-    # boxed lines as needed instead of line()'s silent hard truncation.
-    width = W - 4
-    if not s:
-        line("")
-        return
-    first = True
-    while s:
-        avail = width - (0 if first else len(indent))
-        chunk, s = s[:avail], s[avail:]
-        line(chunk if first else indent + chunk)
-        first = False
-def rule(ch="─"):
-    print("├" + ch * (W - 2) + "┤")
+    inner_w = W - 4
+    s_fit = vis_trunc(s, inner_w)
+    pad = max(0, inner_w - vis_len(s_fit))
+    emit(f"{DIM}│{RESET} {s_fit}{' ' * pad} {DIM}│{RESET}")
 
-print("┌" + "─" * (W - 2) + "┐")
-line(f"BushPilot  {model}  up {uptime}   [mlx-dspark]")
-line(f"API endpoint  http://{host}:{port}/v1   (OpenAI-compatible -- point any tool here)")
-line(f"context {context}   concurrency {concurrency}")
-rule()
-line(f"REQUESTS        completed {num(metrics.get('requests'), 0)}   (failed/in-flight not reported by mlx-dspark)")
-line(f"LIFETIME        generated {num(metrics.get('completion_tokens'), 0)} tok   "
-     f"overall {rate(metrics.get('mean_tokens_per_sec'))} tok/s   decode {rate(metrics.get('mean_decode_tokens_per_sec'))} tok/s")
-rule()
-line(f"SPECULATION     mode {mode or '—'}   drafter {drafter or '—'}")
-line(f"                accept_len {rate(metrics.get('mean_accept_len'))}   draft_acceptance {pct(rounds.get('draft_acceptance'))}   "
-     f"rounds {num(rounds.get('rounds'), 0)}   lookup_rounds {num(rounds.get('lookup_rounds'), 0)}")
-line(f"                position accept: {pos_accept(rounds.get('position_acceptance'))}")
-rule()
-line(f"PREFIX CACHE    mode {prefix_cache.get('mode', '—')}   l2 {'on' if prefix_cache.get('l2') else 'off'}")
-line(f"                prompt {num(metrics.get('prompt_tokens'), 0)} tok   "
-     f"reused {num(prefix_cache.get('reused_tokens'), 0)} tok   "
-     f"cached {pct_ratio(prefix_cache.get('reused_tokens'), metrics.get('prompt_tokens'))}")
-line(f"                cached_tokens {num(prefix_cache.get('cached_tokens'), 0)}   hits {num(prefix_cache.get('hits'), 0)}   "
-     f"partial_hits {num(prefix_cache.get('partial_hits'), 0)}")
-rule()
-line(f"MEMORY          active {gb(mem.get('active_bytes'))} GB   cache {gb(mem.get('cache_bytes'))} GB   peak {gb(mem.get('peak_bytes'))} GB")
-line(f"SYSTEM          free mem {pct_free}%   pressure: {pressure}   MLX RSS {rss} GB   swap {gb(system.get('swap_used_bytes'))} GB")
-rule()
-line(f"CONNECTED       {connected if connected else 'no tool connected yet'}")
-sheds = guard.get("sheds")
-if isinstance(sheds, (int, float)) and sheds > 0:
-    rule()
-    line(f"⚠ memory guard has shed cache {int(sheds)} time(s) — last: {guard.get('last_shed') or 'unknown'}")
-rule()
-line("last error: none")
-if mem_warning and not teardown_reason:
-    rule()
-    wrap_line(f"⚠ {mem_warning}", indent="  ")
-if teardown_reason:
-    rule()
-    wrap_line(f"⚠ {teardown_reason}", indent="  ")
-print("└" + "─" * (W - 2) + "┘")
-print(f"  To connect a tool: open another terminal and run {launch_cmd}")
-print("  Ctrl-C / q : stop everything")
-PYEOF-DSPARK
-        return
-    fi
-
-    "$MLX_PYTHON" - "$metrics_json" "$cache_json" "$MLX_MODEL" "$MLX_PORT" "$CONTEXT_WINDOW" \
-        "$elapsed_fmt" "${APC_ENABLED}" "${pct_free:-?}" "$pressure_name" "${mlx_rss:-?}" "$TEARDOWN_REASON" \
-        "$SCRIPT_DIR/launch_tool.sh" "${connected_clients:-}" "$MLX_HOST" "$CONCURRENCY" "${MEM_WARNING_STATUS:-}" <<'PYEOF'
-import json, sys
-
-metrics_raw, cache_raw, model, port, context, uptime, apc_on, pct_free, pressure, rss, teardown_reason, launch_cmd, connected, host, concurrency, mem_warning = sys.argv[1:17]
-
-def safe_json(s):
-    try:
-        return json.loads(s)
-    except Exception:
-        return {}
-
-metrics = safe_json(metrics_raw)
-cache = safe_json(cache_raw)
-summary = metrics.get("summary", {})
-latest = metrics.get("latest", {})
-
-def num(v, default="—"):
-    return f"{v:,}" if isinstance(v, (int, float)) else default
-
-def rate(v, default="—"):
-    return f"{v:.1f}" if isinstance(v, (int, float)) else default
-
-# mlx_vlm's own token_hit_rate (below) is matched_tokens / (matched_tokens +
-# stored_tokens) -- same ratio in spirit, but derived here from the same two raw
-# counts this line displays (prompt/reused) rather than trusting a second,
-# separately-computed server-side field to stay in lockstep with them. Mirrors the
-# mlx-dspark dashboard branch's own pct_ratio (that one has no server-computed hit
-# rate to fall back on at all -- mlx_vlm's APC is the one backend that already had
-# this, just not displayed next to the raw counts it's built from).
-def pct_ratio(numerator, denominator, default="—"):
-    if not isinstance(numerator, (int, float)) or not isinstance(denominator, (int, float)) or denominator <= 0:
-        return default
-    return f"{numerator / denominator * 100:.1f}%"
-
-W = 90
-def line(s=""):
-    s = s[:W - 4]
-    print("│ " + s.ljust(W - 4) + " │")
-def wrap_line(s="", indent="                "):
+def wrap_line(s="", indent="                ", style=""):
     # For free-text that must not be lost (error messages, teardown reasons): wraps
     # onto as many boxed lines as needed instead of line()'s silent hard truncation.
     # Continuation lines are prefixed with `indent` to line up under the value column.
     width = W - 4
-    if not s:
+    plain = ANSI_RE.sub("", s)
+    if not plain:
         line("")
         return
     first = True
-    while s:
+    while plain:
         avail = width - (0 if first else len(indent))
-        chunk, s = s[:avail], s[avail:]
-        line(chunk if first else indent + chunk)
+        chunk, plain = plain[:avail], plain[avail:]
+        text = chunk if first else indent + chunk
+        line(f"{style}{text}{RESET}" if style else text)
         first = False
-def rule(ch="─"):
-    print("├" + ch * (W - 2) + "┤")
-def gb(v):
-    return f"{v/1e9:.1f}" if isinstance(v, (int, float)) else "—"
 
-print("┌" + "─" * (W - 2) + "┐")
-line(f"BushPilot  {model}  up {uptime}")
-line(f"API endpoint  http://{host}:{port}/v1   (OpenAI-compatible -- point any tool here)")
-line(f"context {context}   concurrency {concurrency}   APC: {'on' if apc_on == '1' else 'off'}")
-rule()
-line(f"REQUESTS        completed {num(summary.get('requests_completed'), 0)}   "
-     f"failed {num(summary.get('requests_failed'), 0)}   in-flight {num(summary.get('in_flight'), 0)}")
-line(f"LIFETIME        generated {num(summary.get('generated_tokens_total'), 0)} tok   "
-     f"avg decode {rate(summary.get('avg_decode_tok_s'), '—')} tok/s")
-rule()
-line(f"LATEST REQUEST  prefill {rate(latest.get('prefill_tok_s'))} tok/s   "
-     f"decode {rate(latest.get('decode_tok_s'))} tok/s   ttft {rate(latest.get('ttft_s'))}s")
-line(f"                elapsed {rate(latest.get('request_elapsed_s'))}s   "
-     f"finish_reason: {latest.get('finish_reason', '—')}")
-rule()
-hits = cache.get("lookups_hit")
-misses = cache.get("lookups_miss")
-hit_rate = cache.get("token_hit_rate")
-hit_rate_s = f"{hit_rate*100:.0f}%" if isinstance(hit_rate, (int, float)) else "—"
-line(f"APC CACHE       hit rate {hit_rate_s}   hits {num(hits, 0)} / misses {num(misses, 0)}   "
-     f"evictions {num(cache.get('evictions'), 0)}")
-line(f"                prompt {num(summary.get('prompt_tokens_total'), 0)} tok   "
-     f"reused {num(cache.get('matched_tokens'), 0)} tok   "
-     f"cached {pct_ratio(cache.get('matched_tokens'), summary.get('prompt_tokens_total'))}")
-line(f"                mem pool {num(cache.get('pool_used'), 0)}/{num(cache.get('num_blocks'), 0)} blocks   "
-     f"disk {gb(cache.get('disk_bytes'))}/{gb(cache.get('disk_max_bytes'))} GB")
-rule()
-line(f"SYSTEM          free mem {pct_free}%   pressure: {pressure}   MLX RSS {rss} GB   "
-     f"peak {rate(latest.get('peak_memory_gb'))} GB")
-rule()
-line(f"CONNECTED       {connected if connected else 'no tool connected yet'}")
-rule()
-err = summary.get("last_error") or "none"
-wrap_line(f"last error: {err}", indent="            ")
+def rule(ch="─"):
+    emit(f"{DIM}├{ch * (W - 2)}┤{RESET}")
+
+def fmt_mem_status(pct_s, press_s):
+    try:
+        pf = int(pct_s)
+    except ValueError:
+        pf = -1
+    bar_w = 10
+    if 0 <= pf <= 100:
+        used_pct = 100 - pf
+        filled = max(0, min(bar_w, round(used_pct * bar_w / 100)))
+        bar = "█" * filled + "░" * (bar_w - filled)
+    else:
+        bar = "░" * bar_w
+    if press_s == "critical" or (0 <= pf < 15):
+        c = f"{BOLD}{RED}"
+    elif press_s == "warn" or (0 <= pf < 25):
+        c = YELLOW
+    else:
+        c = GREEN
+    return f"{c}[{bar}] {pct_s}%{RESET}", f"{c}{press_s}{RESET}"
+
+mem_gauge, press_styled = fmt_mem_status(pct_free, pressure)
+conn_styled = f"{GREEN}● {connected}{RESET}" if connected else f"{DIM}no tool connected yet{RESET}"
+
+emit(f"{DIM}┌{'─' * (W - 2)}┐{RESET}")
+
+if backend == "mlx_dspark":
+    rounds = metrics.get("rounds", {})
+    prefix_cache = metrics.get("prefix_cache", {})
+    mem = metrics.get("memory", {})
+    system = metrics.get("system", {})
+    guard = metrics.get("memory_guard", {})
+
+    line(f"{BOLD}{CYAN}BushPilot{RESET}  {BOLD}{model}{RESET}  {DIM}up {uptime}{RESET}   {CYAN}[mlx-dspark]{RESET}")
+    line(f"{DIM}API endpoint{RESET}  {CYAN}http://{host}:{port}/v1{RESET}   {DIM}(OpenAI-compatible -- point any tool here){RESET}")
+    line(f"{DIM}context{RESET} {context}   {DIM}concurrency{RESET} {concurrency}")
+    rule()
+    line(f"{BOLD}REQUESTS{RESET}        completed {num(metrics.get('requests'), 0)}   {DIM}(failed/in-flight not reported by mlx-dspark){RESET}")
+    line(f"{BOLD}LIFETIME{RESET}        generated {num(metrics.get('completion_tokens'), 0)} tok   "
+         f"overall {rate(metrics.get('mean_tokens_per_sec'))} tok/s   decode {BOLD}{rate(metrics.get('mean_decode_tokens_per_sec'))} tok/s{RESET}")
+    rule()
+    line(f"{BOLD}SPECULATION{RESET}     mode {mode or '—'}   drafter {drafter or '—'}")
+    line(f"                accept_len {BOLD}{rate(metrics.get('mean_accept_len'))}{RESET}   draft_acceptance {pct(rounds.get('draft_acceptance'))}   "
+         f"rounds {num(rounds.get('rounds'), 0)}   lookup_rounds {num(rounds.get('lookup_rounds'), 0)}")
+    line(f"                position accept: {pos_accept(rounds.get('position_acceptance'))}")
+    rule()
+    line(f"{BOLD}PREFIX CACHE{RESET}    mode {prefix_cache.get('mode', '—')}   l2 {'on' if prefix_cache.get('l2') else 'off'}")
+    line(f"                prompt {num(metrics.get('prompt_tokens'), 0)} tok   "
+         f"reused {num(prefix_cache.get('reused_tokens'), 0)} tok   "
+         f"cached {pct_ratio(prefix_cache.get('reused_tokens'), metrics.get('prompt_tokens'))}")
+    line(f"                cached_tokens {num(prefix_cache.get('cached_tokens'), 0)}   hits {num(prefix_cache.get('hits'), 0)}   "
+         f"partial_hits {num(prefix_cache.get('partial_hits'), 0)}")
+    rule()
+    line(f"{BOLD}MEMORY{RESET}          active {gb(mem.get('active_bytes'))} GB   cache {gb(mem.get('cache_bytes'))} GB   peak {gb(mem.get('peak_bytes'))} GB")
+    line(f"{BOLD}SYSTEM{RESET}          free mem {mem_gauge}   pressure: {press_styled}   MLX RSS {rss} GB   swap {gb(system.get('swap_used_bytes'))} GB")
+    rule()
+    line(f"{BOLD}CONNECTED{RESET}       {conn_styled}")
+    sheds = guard.get("sheds")
+    if isinstance(sheds, (int, float)) and sheds > 0:
+        rule()
+        line(f"{YELLOW}⚠ memory guard has shed cache {int(sheds)} time(s) — last: {guard.get('last_shed') or 'unknown'}{RESET}")
+    rule()
+    line(f"{DIM}last error: none{RESET}")
+else:
+    summary = metrics.get("summary", {})
+    latest = metrics.get("latest", {})
+    apc_styled = f"{GREEN}on{RESET}" if apc_on == "1" else f"{DIM}off{RESET}"
+
+    line(f"{BOLD}{CYAN}BushPilot{RESET}  {BOLD}{model}{RESET}  {DIM}up {uptime}{RESET}   {CYAN}[mlx-vlm]{RESET}")
+    line(f"{DIM}API endpoint{RESET}  {CYAN}http://{host}:{port}/v1{RESET}   {DIM}(OpenAI-compatible -- point any tool here){RESET}")
+    line(f"{DIM}context{RESET} {context}   {DIM}concurrency{RESET} {concurrency}   {DIM}APC:{RESET} {apc_styled}")
+    rule()
+    failed_n = summary.get("requests_failed")
+    failed_s = f"{RED}{num(failed_n, 0)}{RESET}" if isinstance(failed_n, (int, float)) and failed_n > 0 else num(failed_n, 0)
+    inflight_n = summary.get("in_flight")
+    inflight_s = f"{CYAN}{num(inflight_n, 0)}{RESET}" if isinstance(inflight_n, (int, float)) and inflight_n > 0 else num(inflight_n, 0)
+    line(f"{BOLD}REQUESTS{RESET}        completed {num(summary.get('requests_completed'), 0)}   "
+         f"failed {failed_s}   in-flight {inflight_s}")
+    line(f"{BOLD}LIFETIME{RESET}        generated {num(summary.get('generated_tokens_total'), 0)} tok   "
+         f"avg decode {BOLD}{rate(summary.get('avg_decode_tok_s'), '—')} tok/s{RESET}")
+    rule()
+    line(f"{BOLD}LATEST REQUEST{RESET}  prefill {rate(latest.get('prefill_tok_s'))} tok/s   "
+         f"decode {BOLD}{rate(latest.get('decode_tok_s'))} tok/s{RESET}   ttft {rate(latest.get('ttft_s'))}s")
+    line(f"                elapsed {rate(latest.get('request_elapsed_s'))}s   "
+         f"finish_reason: {latest.get('finish_reason', '—')}")
+    rule()
+    hits = cache.get("lookups_hit")
+    misses = cache.get("lookups_miss")
+    hit_rate = cache.get("token_hit_rate")
+    hit_rate_s = f"{hit_rate*100:.0f}%" if isinstance(hit_rate, (int, float)) else "—"
+    line(f"{BOLD}APC CACHE{RESET}       hit rate {hit_rate_s}   hits {num(hits, 0)} / misses {num(misses, 0)}   "
+         f"evictions {num(cache.get('evictions'), 0)}")
+    line(f"                prompt {num(summary.get('prompt_tokens_total'), 0)} tok   "
+         f"reused {num(cache.get('matched_tokens'), 0)} tok   "
+         f"cached {pct_ratio(cache.get('matched_tokens'), summary.get('prompt_tokens_total'))}")
+    line(f"                mem pool {num(cache.get('pool_used'), 0)}/{num(cache.get('num_blocks'), 0)} blocks   "
+         f"disk {gb(cache.get('disk_bytes'))}/{gb(cache.get('disk_max_bytes'))} GB")
+    rule()
+    line(f"{BOLD}SYSTEM{RESET}          free mem {mem_gauge}   pressure: {press_styled}   MLX RSS {rss} GB   "
+         f"peak {rate(latest.get('peak_memory_gb'))} GB")
+    rule()
+    line(f"{BOLD}CONNECTED{RESET}       {conn_styled}")
+    rule()
+    err = summary.get("last_error") or "none"
+    if err == "none":
+        line(f"{DIM}last error: none{RESET}")
+    else:
+        wrap_line(f"last error: {err}", indent="            ", style=RED)
+
 if mem_warning and not teardown_reason:
     rule()
-    wrap_line(f"⚠ {mem_warning}", indent="  ")
+    wrap_line(f"⚠ {mem_warning}", indent="  ", style=YELLOW)
 if teardown_reason:
     rule()
-    wrap_line(f"⚠ {teardown_reason}", indent="  ")
-print("└" + "─" * (W - 2) + "┘")
-print(f"  To connect a tool: open another terminal and run {launch_cmd}")
-print("  Ctrl-C / q : stop everything")
+    wrap_line(f"⚠ {teardown_reason}", indent="  ", style=f"{BOLD}{RED}")
+
+emit(f"{DIM}└{'─' * (W - 2)}┘{RESET}")
+emit(f"  {DIM}To connect a tool: open another terminal and run{RESET} {BOLD}{launch_cmd}{RESET}")
+emit(f"  {DIM}Ctrl-C / q : stop everything{RESET}")
+
+prefix = "\033[H" if is_tty else ""
+suffix = "\033[J\n" if is_tty else "\n"
+sys.stdout.write(prefix + "\n".join(out_lines) + suffix)
+sys.stdout.flush()
 PYEOF
 }
 
@@ -1790,6 +1827,7 @@ run_dashboard() {
     local old_stty
     old_stty=$(stty -g 2>/dev/null) || old_stty=""
     [[ -n "$old_stty" ]] && stty -icanon -echo min 0 time 0 2>/dev/null || true
+    [[ -t 1 ]] && printf '\033[2J\033[H\033[?25l' 2>/dev/null || true
 
     while true; do
         local loop_start_ts loop_elapsed sleep_rem

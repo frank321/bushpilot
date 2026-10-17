@@ -52,17 +52,21 @@ def estimate_speed_tok_s(model_entry, chip_name, gpu_cores):
     in opposite directions, than one global number can represent. Leave unset in
     models.json until a model has its own live calibration point; the global constant
     remains the right default for anything not yet measured."""
+    serving = model_entry.get("serving") or {}
+    expected_drafter = serving.get("drafter") or serving.get("draft_model") or ""
     calibrated = load_calibration(chip_name, model_entry.get("id", ""))
     if calibrated is not None:
-        ctx_note = (
-            f" at ~{calibrated['context_tokens']:,} tokens of context"
-            if isinstance(calibrated.get("context_tokens"), (int, float)) else ""
-        )
-        return round(calibrated["decode_tok_s"], 1), (
-            f"measured on this machine ({chip_name}){ctx_note}, saved {calibrated.get('saved_at', 'previously')} "
-            "— overrides the physics-based estimate below until this model, quantization, "
-            "or drafter config changes on this chip (re-run to refresh)"
-        )
+        recorded_drafter = calibrated.get("drafter")
+        if recorded_drafter is None or recorded_drafter == expected_drafter:
+            ctx_note = (
+                f" at ~{calibrated['context_tokens']:,} tokens of context"
+                if isinstance(calibrated.get("context_tokens"), (int, float)) else ""
+            )
+            return round(calibrated["decode_tok_s"], 1), (
+                f"measured on this machine ({chip_name}){ctx_note}, saved {calibrated.get('saved_at', 'previously')} "
+                "— overrides the physics-based estimate below until this model, quantization, "
+                "or drafter config changes on this chip (re-run to refresh)"
+            )
 
     bandwidth = CHIP_BANDWIDTH_GB_S.get(chip_name)
     if bandwidth is None:
@@ -77,7 +81,6 @@ def estimate_speed_tok_s(model_entry, chip_name, gpu_cores):
     factor = model_entry.get("speed_correction_factor", SPEED_CORRECTION_FACTOR)
     base = factor * bandwidth / active_gb
 
-    serving = model_entry.get("serving") or {}
     speedup = serving.get("measured_speedup")
     if speedup:
         measured_on = serving.get("measured_on", "reference hardware")

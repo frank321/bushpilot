@@ -8,7 +8,7 @@ import sys
 from .calibration import save_calibration
 from .hardware import get_chip_info, get_current_wired_gb, log
 from .kv import MIN_USABLE_CONTEXT
-from .picker.display import format_model_body_lines, print_list_compact, print_menu
+from .picker.display import format_model_detail_lines, print_list_compact, print_menu
 from .picker.sort import SORT_KEYS
 from .preload import estimate_preload_overhead
 from .recommend import build_recommendations
@@ -156,6 +156,7 @@ def main():
         # save_calibration_snapshot() path, which has no sweep data to offer.
         prefill_step_size_flag = _flag_value(argv, "--prefill-step-size")
         kv_bits_safe_flag = _flag_value(argv, "--kv-bits-safe-at-long-context")
+        drafter_flag = _flag_value(argv, "--drafter")
         try:
             prefill_step_size = int(prefill_step_size_flag) if prefill_step_size_flag else None
         except ValueError:
@@ -165,10 +166,11 @@ def main():
             kv_bits_safe_at_long_context = kv_bits_safe_flag.strip().lower() in ("1", "true", "yes")
         chip_name, _, _ = get_chip_info()
         save_calibration(chip_name, save_calibration_id, decode_tok_s,
-                          context_tokens=context_tokens, ttft_s=ttft_s,
-                          peak_memory_gb=peak_memory_gb,
-                          prefill_step_size=prefill_step_size,
-                          kv_bits_safe_at_long_context=kv_bits_safe_at_long_context)
+                         context_tokens=context_tokens, ttft_s=ttft_s,
+                         peak_memory_gb=peak_memory_gb,
+                         prefill_step_size=prefill_step_size,
+                         kv_bits_safe_at_long_context=kv_bits_safe_at_long_context,
+                         drafter=drafter_flag)
         log(f"Saved calibration for '{save_calibration_id}' on '{chip_name}': {decode_tok_s} tok/s")
         return
 
@@ -201,10 +203,8 @@ def main():
         if row is None:
             log(f"ERROR: unknown model id '{detail_id}'")
             sys.exit(2)
-        print(row["model"]["id"])
-        print(row["model"]["display"]["tagline"])
-        print("")
-        for line in format_model_body_lines(row["model"], row):
+        for line in format_model_detail_lines(row, free_wired_gb, preload=preload,
+                                              force_color="--color" in argv):
             print(line)
         return
 

@@ -318,3 +318,67 @@ def test_use_color_no_color_env_wins_even_when_forced(monkeypatch):
     assert ma.use_color(force=True) is False
     assert ma.use_color() is False
 
+
+def test_calibrated_speed_omits_tilde_and_bolds_cell(dense_model, monkeypatch):
+    monkeypatch.setattr(_display, "use_color", lambda force=False: True)
+    rows = ma.build_recommendations([dense_model], free_wired_gb=24, chip_name="Apple M3 Max", gpu_cores=40)
+    rows[0]["speed_source"] = "calibrated"
+    rows[0]["estimated_tok_s"] = 84.2
+    cells = ma.compact_row_cells(rows[0], None)
+    assert cells[ma.COL_SPEED] == "84.2 tok/s"
+    widths = ma.compact_row_widths(rows)
+    cols = list(range(ma.COL_LAST))
+    line = ma.format_model_compact_row(rows[0], widths, cols, None)
+    assert f"{ma.BOLD}84.2 tok/s{ma.RESET}" in line
+
+
+def test_is_model_cached_detects_hf_hub_snapshot_and_appends_note(dense_model, tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    rows = ma.build_recommendations([dense_model], free_wired_gb=24, chip_name="Apple M3 Max", gpu_cores=40)
+    assert ma.is_model_cached(rows[0]["model"]) is False
+    assert "cached" not in ma.compact_row_cells(rows[0], None)[ma.COL_LAST]
+
+    snap = tmp_path / "hub" / "models--mlx-community--Test-Dense-4bit" / "snapshots" / "abc123"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+
+    assert ma.is_model_cached(rows[0]["model"]) is True
+    assert "· cached" in ma.compact_row_cells(rows[0], None)[ma.COL_LAST]
+
+
+def test_color_styles_tools_column_for_no_tools_and_untested(
+    moe_model_no_active_weight, sliding_window_model, monkeypatch
+):
+    monkeypatch.setattr(_display, "use_color", lambda force=False: True)
+    untested_fit = dict(moe_model_no_active_weight, size_gb=4.0, active_weight_gb=4.0)
+    rows = ma.build_recommendations([untested_fit], free_wired_gb=48, chip_name="Apple M3 Max", gpu_cores=40)
+    widths = ma.compact_row_widths(rows)
+    cols = list(range(ma.COL_LAST))
+    line = ma.format_model_compact_row(rows[0], widths, cols, None)
+    assert f"{ma.DIM}tools?" in line
+
+    rows2 = ma.build_recommendations([sliding_window_model], free_wired_gb=48, chip_name="Apple M3 Max", gpu_cores=40)
+    widths2 = ma.compact_row_widths(rows2)
+    line2 = ma.format_model_compact_row(rows2[0], widths2, cols, None)
+    assert f"{ma.YELLOW}no tools" in line2
+
+
+def test_format_model_detail_lines_renders_header_and_fit_summary(dense_model, monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    model_with_disp = dict(
+        dense_model,
+        display={
+            "tagline": "Fast 4-bit dense coder",
+            "good_for": "Daily coding and refactoring.",
+            "usage_examples": ["Refactor a module"],
+        },
+    )
+    rows = ma.build_recommendations([model_with_disp], free_wired_gb=24, chip_name="Apple M3 Max", gpu_cores=40)
+    lines = ma.format_model_detail_lines(rows[0], free_wired_gb=24.0, force_color=False)
+    joined = "\n".join(lines)
+    assert "test-dense-4bit" in joined
+    assert "mlx-community/Test-Dense-4bit" in joined
+    assert "Fast 4-bit dense coder" in joined
+    assert "Type: Dense" in joined
+    assert "Fits this Mac: 262,144 tok context (16-bit KV)" in joined
+

@@ -253,3 +253,28 @@ def test_write_sweep_json_is_atomic_no_leftover_tmp_file(tmp_path):
     sm.write_sweep_json(path, {"a": 1})
     assert not os.path.exists(f"{path}.tmp")
     assert os.path.exists(path)
+
+
+def test_concurrency_memory_guard_ok_accounts_for_apc_pool(dense_model, monkeypatch):
+    monkeypatch.setattr(ma, "get_chip_info", lambda: ("Apple M5 Pro", 20, 16.0))
+    # 6.3 GB weights + 3.0 GB safety buffer = 9.3 GB base.
+    # With 6.45 GB wired -> 9.55 GB free (0.25 GB headroom above base).
+    # Without APC pool (apc_num_blocks=0), 1 slot @ 2048 tokens (~0.008 GB) fits easily.
+    # With full 4096-block APC pool (~0.25 GB) + 1 slot @ 2048 tokens (~0.008 GB) = ~0.258 GB > 0.25 GB -> refused!
+    monkeypatch.setattr(ma, "get_current_wired_gb", lambda: 6.45)
+    assert sm.concurrency_memory_guard_ok(
+        dense_model, context_tokens=2048, concurrency=1, kv_bits=None, apc_num_blocks=0
+    ) is True
+    assert sm.concurrency_memory_guard_ok(
+        dense_model, context_tokens=2048, concurrency=1, kv_bits=None,
+        apc_num_blocks=ma.MLX_VLM_APC_NUM_BLOCKS,
+    ) is False
+
+
+def test_sweep_server_stores_custom_apc_num_blocks():
+    srv = sm.SweepServer(
+        "mlx-community/test", "127.0.0.1", 38472, 16384, "/tmp/test.log",
+        prefill_step_size=2048, kv_bits=8, max_num_seqs=1, apc_num_blocks=1024,
+    )
+    assert srv.apc_num_blocks == 1024
+
