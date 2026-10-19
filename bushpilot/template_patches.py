@@ -66,17 +66,15 @@ _GENERATION_PROMPT_BUG_SIGNATURE = (
 
 _PATCH_MARKER = "BUSHPILOT PATCH"
 
-# Adds exactly one elif branch: when this is a model/assistant turn that just started
-# (not continue_same_model_turn -- otherwise the marker would already have been
-# emitted earlier in this same turn), has no tool_calls and no reasoning_text, and
-# non-thinking mode is active, reproduce the identical empty marker add_generation_prompt
-# would have injected when this turn was originally generated. Deliberately scoped to
-# exactly this one verified case (plain conversational turns) -- NOT extended to cover
-# tool-call-only turns or reasoning-without-tool_calls turns, since those paths were not
-# directly tested and this patch should never be a bigger behavioral change than what
-# was actually verified live (see the correctness check cited in models.json: identical
-# secret-recall output with and without this patch, same chip, same prompt).
-_PATCHED_REPLACEMENT = (
+# Earlier 2026-10-05 patch that gated the empty thought marker on `not message.get('tool_calls')`.
+# Live OpenCode sessions (2026-10-19, mlx-server.log) revealed that on tool-calling turns,
+# add_generation_prompt STILL injected `<|channel>thought\n<channel|>` at the start of the
+# fresh model turn before the model emitted `<|tool_call>...<tool_call|>`. Excluding
+# `message.get('tool_calls')` caused history serialization on the very next turn (when the
+# tool result was sent back) to omit `<|channel>thought\n<channel|>`, breaking APC prefix
+# matching across every tool call (`cached_tokens=4096` on a 26,356-token prompt). Kept
+# here so check_and_patch_chat_template() can transparently upgrade already-patched caches.
+_LEGACY_PATCHED_REPLACEMENT = (
     "    {%- set thinking_text = message.get('reasoning') or message.get('reasoning_content') -%}\n"
     "    {%- if thinking_text and loop.index0 > ns_turn.last_user_idx and message.get('tool_calls') -%}\n"
     "        {{- '<|channel>thought\\n' + thinking_text + '\\n<channel|>' -}}\n"
@@ -92,6 +90,30 @@ _PATCHED_REPLACEMENT = (
     "            this model id for the root-cause writeup and mlx-vlm PR #1960 (upstream fixed the\n"
     "            same bug for the 26b-a4b-it-5bit/31b-it-5bit repos via a template discussion; this\n"
     "            repo's template was not covered by that fix). -#}\n"
+    "        {{- '<|channel>thought\\n<channel|>' -}}\n"
+    "    {%- endif -%}\n"
+)
+
+# Adds one elif branch: when this is a model/assistant turn that just started
+# (not continue_same_model_turn -- otherwise the marker was already emitted at the start
+# of the turn before the tool_response continuation), has no reasoning_text, and
+# non-thinking mode is active, reproduce the identical empty marker add_generation_prompt
+# injected when this turn was originally generated (both for plain turns and tool-calling
+# turns, since add_generation_prompt runs before the model decides whether to emit text
+# or a tool call).
+_PATCHED_REPLACEMENT = (
+    "    {%- set thinking_text = message.get('reasoning') or message.get('reasoning_content') -%}\n"
+    "    {%- if thinking_text and loop.index0 > ns_turn.last_user_idx and message.get('tool_calls') -%}\n"
+    "        {{- '<|channel>thought\\n' + thinking_text + '\\n<channel|>' -}}\n"
+    "    {%- elif role == 'model' and not continue_same_model_turn "
+    "and not thinking_text and not (enable_thinking | default(false)) -%}\n"
+    "        {#- " + _PATCH_MARKER + " 2026-10-19: add_generation_prompt (below) injects an empty\n"
+    "            '<|channel>thought\\n<channel|>' marker before every fresh non-thinking generation\n"
+    "            (including turns that subsequently emit tool_calls), but this history-serialization\n"
+    "            branch never reproduced it when thinking_text was empty -- so a growing\n"
+    "            conversation's reconstructed prefix diverged from what was actually prefilled, and\n"
+    "            mlx_vlm's APC exact-checkpoint match missed on every turn. See models.json's\n"
+    "            known_issues on this model id for the root-cause writeup and mlx-vlm PR #1960. -#}\n"
     "        {{- '<|channel>thought\\n<channel|>' -}}\n"
     "    {%- endif -%}\n"
 )
@@ -153,10 +175,11 @@ def check_and_patch_chat_template(hf_home, repo_id):
     (never fuzzy), means this is always either a precise, verified fix or a safe no-op,
     never a corrupting edit of an unrecognized template structure. Idempotent:
     re-running on an already-patched file is a no-op (checked via _PATCH_MARKER), safe
-    to call on every launch without tracking patch state separately. Written atomically
-    (tmp file + os.replace), same safety pattern as calibration.py's save_calibration,
-    so a process killed mid-write never leaves a half-written, syntactically-broken
-    template for the next launch (or the server itself) to trip over.
+    to call on every launch without tracking patch state separately, while an earlier
+    2026-10-05 patch (_LEGACY_PATCHED_REPLACEMENT) is automatically upgraded in place.
+    Written atomically (tmp file + os.replace), same safety pattern as calibration.py's
+    save_calibration, so a process killed mid-write never leaves a half-written,
+    syntactically-broken template for the next launch (or the server itself) to trip over.
 
     Never raises on a missing/unreadable file or directory -- a model that fails this
     check (not downloaded yet, no standalone template, permission error) serves exactly
@@ -164,7 +187,7 @@ def check_and_patch_chat_template(hf_home, repo_id):
     never a requirement for serving to work.
 
     Returns one of:
-      "patched"         -- both signatures found, bug fixed just now
+      "patched"         -- both signatures found (or legacy patch upgraded), bug fixed now
       "already_patched" -- this patch (or an identical one) was already applied
       "not_affected"     -- template exists but doesn't match both required signatures
       "no_template"      -- model not downloaded yet, or no standalone chat_template.jinja
@@ -178,12 +201,15 @@ def check_and_patch_chat_template(hf_home, repo_id):
     except OSError:
         return "no_template"
 
-    if _PATCH_MARKER in content:
+    if _LEGACY_PATCHED_REPLACEMENT in content and _GENERATION_PROMPT_BUG_SIGNATURE in content:
+        patched = content.replace(_LEGACY_PATCHED_REPLACEMENT, _PATCHED_REPLACEMENT, 1)
+    elif _PATCH_MARKER in content:
         return "already_patched"
-    if _BUGGY_SNIPPET not in content or _GENERATION_PROMPT_BUG_SIGNATURE not in content:
+    elif _BUGGY_SNIPPET not in content or _GENERATION_PROMPT_BUG_SIGNATURE not in content:
         return "not_affected"
+    else:
+        patched = content.replace(_BUGGY_SNIPPET, _PATCHED_REPLACEMENT, 1)
 
-    patched = content.replace(_BUGGY_SNIPPET, _PATCHED_REPLACEMENT, 1)
     tmp_path = f"{path}.bushpilot-tmp"
     try:
         with open(tmp_path, "w") as f:

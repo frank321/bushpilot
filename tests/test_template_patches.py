@@ -11,7 +11,9 @@ import pytest
 from bushpilot.template_patches import (
     _BUGGY_SNIPPET,
     _GENERATION_PROMPT_BUG_SIGNATURE,
+    _LEGACY_PATCHED_REPLACEMENT,
     _PATCH_MARKER,
+    _PATCHED_REPLACEMENT,
     check_and_patch_chat_template,
     find_chat_template_path,
 )
@@ -128,10 +130,28 @@ def test_check_and_patch_fixes_known_buggy_snippet(tmp_path):
     # The buggy snippet's literal text is no longer present verbatim (it's been
     # replaced by the elif-extended version) -- confirms this isn't a no-op append.
     assert _BUGGY_SNIPPET not in patched_content
-    # The real fix line is present, and the generation-prompt signature this fix
-    # mirrors is left completely untouched.
+    # The real fix line is present, covers tool-calling turns too (no
+    # `not message.get('tool_calls')` exclusion), and the generation-prompt signature
+    # this fix mirrors is left completely untouched.
+    assert _PATCHED_REPLACEMENT in patched_content
+    assert "not message.get('tool_calls')" not in patched_content
     assert "{{- '<|channel>thought\\n<channel|>' -}}" in patched_content
     assert _GENERATION_PROMPT_BUG_SIGNATURE in patched_content
+
+
+def test_check_and_patch_upgrades_legacy_2026_10_05_patch(tmp_path):
+    legacy_template = _buggy_template().replace(_BUGGY_SNIPPET, _LEGACY_PATCHED_REPLACEMENT, 1)
+    path = _write_template(str(tmp_path), REPO_ID, legacy_template)
+
+    first = check_and_patch_chat_template(str(tmp_path), REPO_ID)
+    second = check_and_patch_chat_template(str(tmp_path), REPO_ID)
+
+    assert first == "patched"
+    assert second == "already_patched"
+    with open(path) as f:
+        upgraded = f.read()
+    assert _LEGACY_PATCHED_REPLACEMENT not in upgraded
+    assert _PATCHED_REPLACEMENT in upgraded
 
 
 def test_check_and_patch_is_idempotent(tmp_path):

@@ -343,11 +343,21 @@ launch_claude() {
     export ANTHROPIC_DEFAULT_SONNET_MODEL="$MLX_MODEL"
     export ANTHROPIC_DEFAULT_OPUS_MODEL="$MLX_MODEL"
 
-    local usable_context=$(( CONTEXT_WINDOW - CLAUDE_OUTPUT_TOKENS_RESERVE ))
+    # Scale the output reserve proportionally for smaller context windows (1/4 of
+    # CONTEXT_WINDOW, clamped to [4096, CLAUDE_OUTPUT_TOKENS_RESERVE]) and export
+    # CLAUDE_CODE_MAX_OUTPUT_TOKENS to match, so a 32k context window doesn't
+    # reserve 32k for output and trip mlx_vlm.server's prompt_tokens + max_tokens
+    # <= MAX_KV_SIZE check.
+    local output_reserve=$(( CONTEXT_WINDOW / 4 ))
+    (( output_reserve < 4096 )) && output_reserve=4096
+    (( output_reserve > CLAUDE_OUTPUT_TOKENS_RESERVE )) && output_reserve=$CLAUDE_OUTPUT_TOKENS_RESERVE
+
+    local usable_context=$(( CONTEXT_WINDOW - output_reserve ))
     (( usable_context < MIN_USABLE_CONTEXT )) && usable_context=$MIN_USABLE_CONTEXT
     export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$usable_context"
+    export CLAUDE_CODE_MAX_OUTPUT_TOKENS="$output_reserve"
 
-    log_success "Launching Claude Code against $MLX_MODEL (context cap ${usable_context} tokens, reserving ${CLAUDE_OUTPUT_TOKENS_RESERVE} for output)"
+    log_success "Launching Claude Code against $MLX_MODEL (context cap ${usable_context} tokens, reserving ${output_reserve} for output)"
     exec claude --model "$MLX_MODEL" "$@"
 }
 
@@ -360,36 +370,48 @@ launch_claude() {
 # presence client-side before ever making a request -- but its value is never
 # validated against the local server, so any dummy string works.
 #
-# Aider never enforces context-window limits itself (it only relays whatever error the
-# provider returns), so this would still run with no further setup. The
-# --model-metadata-file below is purely to avoid aider's generic "unknown model, cost
-# unknown" warning and to give its own token-budget UI (shown via /tokens) accurate
-# numbers, by registering this exact model's real architectural context size.
-AIDER_OUTPUT_TOKENS_RESERVE=8192
+# --model-metadata-file populates aider's self.info (used for /tokens UI and repo-map
+# sizing), while --model-settings-file populates self.extra_params so aider's
+# send_completion() actually passes max_tokens in the /v1/chat/completions HTTP body
+# (without extra_params.max_tokens, aider omits max_tokens from the request and
+# mlx_vlm.server falls back to DEFAULT_MAX_TOKENS=2048, truncating large edits).
+AIDER_OUTPUT_TOKENS_RESERVE=32768
 
 launch_aider() {
     export OPENAI_API_BASE="http://$MLX_HOST:$MLX_PORT/v1"
     export OPENAI_API_KEY="sk-mlx-direct-local"
 
-    local usable_context=$(( CONTEXT_WINDOW - AIDER_OUTPUT_TOKENS_RESERVE ))
+    local output_reserve=$(( CONTEXT_WINDOW / 4 ))
+    (( output_reserve < 4096 )) && output_reserve=4096
+    (( output_reserve > AIDER_OUTPUT_TOKENS_RESERVE )) && output_reserve=$AIDER_OUTPUT_TOKENS_RESERVE
+
+    local usable_context=$(( CONTEXT_WINDOW - output_reserve ))
     (( usable_context < MIN_USABLE_CONTEXT )) && usable_context=$MIN_USABLE_CONTEXT
     mkdir -p "$BUSHPILOT_HOME/state"
     local metadata_file="$BUSHPILOT_HOME/state/aider-model-metadata.json"
+    local settings_file="$BUSHPILOT_HOME/state/aider-model-settings.yml"
     "$MLX_PYTHON" -c '
 import json, sys
 model_id, max_input, max_output = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+full_name = f"openai/{model_id}"
 with open(sys.argv[4], "w") as f:
-    json.dump({f"openai/{model_id}": {
+    json.dump({full_name: {
         "max_tokens": max_output,
         "max_input_tokens": max_input,
         "max_output_tokens": max_output,
         "litellm_provider": "openai",
         "mode": "chat",
     }}, f)
-' "$MLX_MODEL" "$usable_context" "$AIDER_OUTPUT_TOKENS_RESERVE" "$metadata_file"
+with open(sys.argv[5], "w") as f:
+    f.write(
+        f"- name: {json.dumps(full_name)}\n"
+        f"  extra_params:\n"
+        f"    max_tokens: {max_output}\n"
+    )
+' "$MLX_MODEL" "$usable_context" "$output_reserve" "$metadata_file" "$settings_file"
 
-    log_success "Launching Aider against openai/$MLX_MODEL (context cap ${usable_context} tokens, reserving ${AIDER_OUTPUT_TOKENS_RESERVE} for output)"
-    exec aider --model "openai/$MLX_MODEL" --model-metadata-file "$metadata_file" "$@"
+    log_success "Launching Aider against openai/$MLX_MODEL (context cap ${usable_context} tokens, reserving ${output_reserve} for output)"
+    exec aider --model "openai/$MLX_MODEL" --model-metadata-file "$metadata_file" --model-settings-file "$settings_file" "$@"
 }
 
 # Cline (cline.bot / github.com/cline/cline) CLI persists provider credentials via a
@@ -417,13 +439,13 @@ launch_cline() {
 # (pi.dev/docs/latest/models#configure-a-compatible-endpoint, pi.dev/docs/latest/
 # configuration#agent-directory):
 #   {"providers": {"<name>": {"baseUrl", "api": "openai-completions", "apiKey",
-#     "models": [{"id": "<model-id>"}]}}}
+#     "compat": {"maxTokensField": "max_tokens"},
+#     "models": [{"id": "<model-id>", "contextWindow": ..., "maxTokens": ..., "input": [...]}]}}}
 # Same provider-registration shape this project already uses for OpenCode's
-# mlx-direct provider (register_opencode_model above), just a different file/schema.
-# "mlx-direct/<model_id>" also works directly as a --model pattern (confirmed live --
-# Pi splits on the first "/" to separate provider from id, so this works even though
-# MLX_MODEL itself contains a "/", e.g. "mlx-community/Qwen3.5-9B-MLX-4bit"), mirroring
-# launch_opencode's own "mlx-direct/$MLX_MODEL" convention below.
+# mlx-direct provider (register_opencode_model below), just a different file/schema.
+# Explicitly sets compat.maxTokensField="max_tokens" because Pi's detectCompat()
+# defaults custom providers to "max_completion_tokens", which mlx_vlm.server's
+# /v1/chat/completions schema ignores (falling back to max_tokens=2048).
 register_pi_model() {
     local base_url="$1"
     local pi_models_config="$HOME/.pi/agent/models.json"
@@ -440,7 +462,58 @@ register_pi_model() {
 import json
 import sys
 
-config_path, model_id, base_url = sys.argv[1], sys.argv[2], sys.argv[3]
+config_path, model_id, context_window, base_url, models_json_path = (
+    sys.argv[1],
+    sys.argv[2],
+    int(sys.argv[3]),
+    sys.argv[4],
+    sys.argv[5],
+)
+local_model_id = sys.argv[6] if len(sys.argv) > 6 else ""
+loaded_backend = sys.argv[7] if len(sys.argv) > 7 else ""
+output_limit = min(32768, max(4096, context_window // 4))
+
+
+def pi_input_modalities(models_json_path, hf_id, local_id="", backend=""):
+    try:
+        with open(models_json_path) as f:
+            catalog = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return ["text"]
+    all_models = catalog.get("models", [])
+    entries = []
+    if local_id:
+        entries = [m for m in all_models if m.get("id") == local_id]
+    if not entries:
+        entries = [m for m in all_models if m.get("huggingface") == hf_id]
+        if backend and len(entries) > 1:
+            filtered = [
+                m for m in entries
+                if ((m.get("serving") or {}).get("backend") or "mlx_vlm") == backend
+            ]
+            if filtered:
+                entries = filtered
+    if not entries:
+        return ["text"]
+    capable_votes = set()
+    all_mods = set()
+    for entry in entries:
+        if (entry.get("serving") or {}).get("multimodal_capable") is False:
+            capable_votes.add(False)
+        else:
+            capable_votes.add(True)
+            all_mods |= set(entry.get("modalities") or ["text"])
+    if capable_votes == {True} and "image" in all_mods:
+        return ["text", "image"]
+    return ["text"]
+
+
+expected_model = {
+    "id": model_id,
+    "contextWindow": context_window,
+    "maxTokens": output_limit,
+    "input": pi_input_modalities(models_json_path, model_id, local_model_id, loaded_backend),
+}
 
 try:
     with open(config_path) as f:
@@ -454,8 +527,8 @@ existing_models = existing.get("models", [])
 already_correct = (
     existing.get("baseUrl") == base_url
     and existing.get("api") == "openai-completions"
-    and any(m.get("id") == model_id for m in existing_models)
-    and len(existing_models) == 1
+    and existing.get("compat", {}).get("maxTokensField") == "max_tokens"
+    and existing_models == [expected_model]
 )
 if already_correct:
     print("ALREADY_REGISTERED")
@@ -465,7 +538,8 @@ providers["mlx-direct"] = {
     "baseUrl": base_url,
     "api": "openai-completions",
     "apiKey": "sk-mlx-direct-local",
-    "models": [{"id": model_id}],
+    "compat": {"maxTokensField": "max_tokens"},
+    "models": [expected_model],
 }
 
 with open(config_path, "w") as f:
@@ -473,7 +547,7 @@ with open(config_path, "w") as f:
     f.write("\n")
 print("REGISTERED")
 PYEOF
-    result="$("$MLX_PYTHON" "$pyscript" "$pi_models_config" "$MLX_MODEL" "$base_url")" || true
+    result="$("$MLX_PYTHON" "$pyscript" "$pi_models_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" "${LOADED_LOCAL_MODEL:-}" "${LOADED_BACKEND:-}")" || true
     rm -f "$pyscript"
 
     case "$result" in
@@ -919,6 +993,7 @@ already_correct = (
     and existing.get("name") == MLX_DIRECT_PROVIDER_NAME
     and existing.get("package") == MLX_DIRECT_PACKAGE
     and existing.get("settings", {}).get("baseURL") == base_url
+    and existing.get("compatibility", {}).get("maxTokensField") == "max_tokens"
     and model_id in existing.get("models", {})
     and existing_model.get("modelID") == model_id
     and existing_model.get("limit", {}).get("context") == context_window
@@ -935,6 +1010,11 @@ mlx_direct = providers.setdefault("mlx-direct", {})
 mlx_direct["name"] = MLX_DIRECT_PROVIDER_NAME
 mlx_direct["package"] = MLX_DIRECT_PACKAGE
 mlx_direct["settings"] = {"baseURL": base_url, "apiKey": "sk-mlx-direct-local"}
+# OpenCode v2's @opencode/ai/providers/openai-compatible defaults maxTokensField to
+# "max_completion_tokens" for custom providers, which mlx_vlm.server's ChatCompletionRequest
+# ignores (falling back to DEFAULT_MAX_TOKENS=2048 and truncating large code responses
+# mid-turn). Explicitly request the classic "max_tokens" wire field.
+mlx_direct["compatibility"] = {"maxTokensField": "max_tokens"}
 models = mlx_direct.setdefault("models", {})
 models[model_id] = {
     "modelID": model_id,
