@@ -38,6 +38,7 @@ START_PROXY_SCRIPT="$SCRIPT_DIR/start_mlx_server.sh"
 # same place that script uses, including reading the same optional config.json.
 BUSHPILOT_HOME="$HOME/.bushpilot"
 MLX_STATE_FILE="$BUSHPILOT_HOME/state/mlx-loaded.txt"
+MLX_ROSTER_FILE="$BUSHPILOT_HOME/state/mlx-roster.json"
 BUSHPILOT_CONFIG_FILE="$BUSHPILOT_HOME/config.json"
 CONFIG_HOST=""
 CONFIG_PORT=""
@@ -343,6 +344,15 @@ launch_claude() {
     export ANTHROPIC_DEFAULT_SONNET_MODEL="$MLX_MODEL"
     export ANTHROPIC_DEFAULT_OPUS_MODEL="$MLX_MODEL"
 
+    local roster_file="${MLX_ROSTER_FILE:-$BUSHPILOT_HOME/state/mlx-roster.json}"
+    if [[ -f "$roster_file" ]]; then
+        # Route background Haiku checks through the bushpilot-active alias so switching
+        # the primary model via `/model <id>` in Claude Code never causes background
+        # probes to trigger a hot-swap back to the startup model.
+        export ANTHROPIC_SMALL_FAST_MODEL="bushpilot-active"
+        export ANTHROPIC_DEFAULT_HAIKU_MODEL="bushpilot-active"
+    fi
+
     # Scale the output reserve proportionally for smaller context windows (1/4 of
     # CONTEXT_WINDOW, clamped to [4096, CLAUDE_OUTPUT_TOKENS_RESERVE]) and export
     # CLAUDE_CODE_MAX_OUTPUT_TOKENS to match, so a 32k context window doesn't
@@ -390,25 +400,64 @@ launch_aider() {
     mkdir -p "$BUSHPILOT_HOME/state"
     local metadata_file="$BUSHPILOT_HOME/state/aider-model-metadata.json"
     local settings_file="$BUSHPILOT_HOME/state/aider-model-settings.yml"
-    "$MLX_PYTHON" -c '
-import json, sys
-model_id, max_input, max_output = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-full_name = f"openai/{model_id}"
-with open(sys.argv[4], "w") as f:
-    json.dump({full_name: {
-        "max_tokens": max_output,
-        "max_input_tokens": max_input,
-        "max_output_tokens": max_output,
+    local roster_file="${MLX_ROSTER_FILE:-$BUSHPILOT_HOME/state/mlx-roster.json}"
+    local pyscript
+    pyscript="$(mktemp)"
+    cat <<'PYEOF' > "$pyscript"
+import json
+import sys
+
+model_id = sys.argv[1]
+max_input = int(sys.argv[2])
+max_output = int(sys.argv[3])
+metadata_path = sys.argv[4]
+settings_path = sys.argv[5]
+roster_path = sys.argv[6] if len(sys.argv) > 6 else ""
+reserve_cap = int(sys.argv[7]) if len(sys.argv) > 7 else 32768
+min_usable = int(sys.argv[8]) if len(sys.argv) > 8 else 12288
+
+entries = [(f"openai/{model_id}", max_input, max_output)]
+
+try:
+    with open(roster_path) as f:
+        roster = json.load(f)
+    for item in roster.get("models", []):
+        ctx = int(item.get("recommended_context") or 0)
+        if ctx <= 0:
+            continue
+        out_res = min(reserve_cap, max(4096, ctx // 4))
+        in_res = max(min_usable, ctx - out_res)
+        for key in (item.get("huggingface"), item.get("id")):
+            if key:
+                full = f"openai/{key}"
+                if all(existing[0] != full for existing in entries):
+                    entries.append((full, in_res, out_res))
+except (FileNotFoundError, json.JSONDecodeError, OSError):
+    pass
+
+meta_dict = {}
+settings_lines = []
+for full_name, in_tok, out_tok in entries:
+    meta_dict[full_name] = {
+        "max_tokens": out_tok,
+        "max_input_tokens": in_tok,
+        "max_output_tokens": out_tok,
         "litellm_provider": "openai",
         "mode": "chat",
-    }}, f)
-with open(sys.argv[5], "w") as f:
-    f.write(
+    }
+    settings_lines.append(
         f"- name: {json.dumps(full_name)}\n"
         f"  extra_params:\n"
-        f"    max_tokens: {max_output}\n"
+        f"    max_tokens: {out_tok}\n"
     )
-' "$MLX_MODEL" "$usable_context" "$output_reserve" "$metadata_file" "$settings_file"
+
+with open(metadata_path, "w") as f:
+    json.dump(meta_dict, f)
+with open(settings_path, "w") as f:
+    f.write("".join(settings_lines))
+PYEOF
+    "$MLX_PYTHON" "$pyscript" "$MLX_MODEL" "$usable_context" "$output_reserve" "$metadata_file" "$settings_file" "$roster_file" "$AIDER_OUTPUT_TOKENS_RESERVE" "$MIN_USABLE_CONTEXT"
+    rm -f "$pyscript"
 
     log_success "Launching Aider against openai/$MLX_MODEL (context cap ${usable_context} tokens, reserving ${output_reserve} for output)"
     exec aider --model "openai/$MLX_MODEL" --model-metadata-file "$metadata_file" --model-settings-file "$settings_file" "$@"
@@ -449,6 +498,7 @@ launch_cline() {
 register_pi_model() {
     local base_url="$1"
     local pi_models_config="$HOME/.pi/agent/models.json"
+    local roster_file="${MLX_ROSTER_FILE:-$BUSHPILOT_HOME/state/mlx-roster.json}"
     mkdir -p "$(dirname "$pi_models_config")"
     log_info "Checking Pi's mlx-direct provider registration ($pi_models_config)..."
 
@@ -471,7 +521,7 @@ config_path, model_id, context_window, base_url, models_json_path = (
 )
 local_model_id = sys.argv[6] if len(sys.argv) > 6 else ""
 loaded_backend = sys.argv[7] if len(sys.argv) > 7 else ""
-output_limit = min(32768, max(4096, context_window // 4))
+roster_path = sys.argv[8] if len(sys.argv) > 8 else ""
 
 
 def pi_input_modalities(models_json_path, hf_id, local_id="", backend=""):
@@ -508,12 +558,35 @@ def pi_input_modalities(models_json_path, hf_id, local_id="", backend=""):
     return ["text"]
 
 
-expected_model = {
-    "id": model_id,
-    "contextWindow": context_window,
-    "maxTokens": output_limit,
-    "input": pi_input_modalities(models_json_path, model_id, local_model_id, loaded_backend),
-}
+def build_pi_entry(mid, ctx, hf_id, loc_id, backend):
+    out_lim = min(32768, max(4096, ctx // 4))
+    return {
+        "id": mid,
+        "contextWindow": ctx,
+        "maxTokens": out_lim,
+        "input": pi_input_modalities(models_json_path, hf_id, loc_id, backend),
+    }
+
+
+expected_models = []
+try:
+    with open(roster_path) as f:
+        roster_data = json.load(f)
+    for item in roster_data.get("models", []):
+        ctx = int(item.get("recommended_context") or context_window)
+        hf_id = item.get("huggingface") or model_id
+        loc_id = item.get("id") or ""
+        backend = item.get("backend") or "mlx_vlm"
+        exposed_id = loc_id if item.get("expose_catalog_id") and loc_id else hf_id
+        if all(m["id"] != exposed_id for m in expected_models):
+            expected_models.append(build_pi_entry(exposed_id, ctx, hf_id, loc_id, backend))
+except (FileNotFoundError, json.JSONDecodeError, OSError):
+    pass
+
+if not expected_models:
+    expected_models = [build_pi_entry(model_id, context_window, model_id, local_model_id, loaded_backend)]
+elif all(m["id"] != model_id for m in expected_models):
+    expected_models.insert(0, build_pi_entry(model_id, context_window, model_id, local_model_id, loaded_backend))
 
 try:
     with open(config_path) as f:
@@ -528,7 +601,7 @@ already_correct = (
     existing.get("baseUrl") == base_url
     and existing.get("api") == "openai-completions"
     and existing.get("compat", {}).get("maxTokensField") == "max_tokens"
-    and existing_models == [expected_model]
+    and existing_models == expected_models
 )
 if already_correct:
     print("ALREADY_REGISTERED")
@@ -539,7 +612,7 @@ providers["mlx-direct"] = {
     "api": "openai-completions",
     "apiKey": "sk-mlx-direct-local",
     "compat": {"maxTokensField": "max_tokens"},
-    "models": [expected_model],
+    "models": expected_models,
 }
 
 with open(config_path, "w") as f:
@@ -547,7 +620,7 @@ with open(config_path, "w") as f:
     f.write("\n")
 print("REGISTERED")
 PYEOF
-    result="$("$MLX_PYTHON" "$pyscript" "$pi_models_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" "${LOADED_LOCAL_MODEL:-}" "${LOADED_BACKEND:-}")" || true
+    result="$("$MLX_PYTHON" "$pyscript" "$pi_models_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" "${LOADED_LOCAL_MODEL:-}" "${LOADED_BACKEND:-}" "$roster_file")" || true
     rm -f "$pyscript"
 
     case "$result" in
@@ -612,6 +685,7 @@ opencode_cli_is_v2() {
 register_opencode_model() {
     local base_url="$1"
     local opencode_config="$HOME/.config/opencode/opencode.jsonc"
+    local roster_file="${MLX_ROSTER_FILE:-$BUSHPILOT_HOME/state/mlx-roster.json}"
     mkdir -p "$(dirname "$opencode_config")"
     log_info "Checking OpenCode's mlx-direct provider registration ($opencode_config)..."
 
@@ -640,6 +714,7 @@ import sys
 config_path, model_id, context_window, base_url, models_json_path = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
 local_model_id = sys.argv[6] if len(sys.argv) > 6 else ""
 loaded_backend = sys.argv[7] if len(sys.argv) > 7 else ""
+roster_path = sys.argv[8] if len(sys.argv) > 8 else ""
 output_limit = min(32768, max(4096, context_window // 4))
 
 # Display strings for the OpenCode model picker. Provider name is the project name;
@@ -706,6 +781,38 @@ def image_capable_modalities(models_json_path, hf_id, local_id="", backend=""):
     return ["text"] + extra
 
 
+def build_v1_model_entry(mid, ctx, hf_id, loc_id, backend):
+    out_lim = min(32768, max(4096, ctx // 4))
+    mods = image_capable_modalities(models_json_path, hf_id, loc_id, backend)
+    entry = {
+        "name": MLX_DIRECT_MODEL_NAME(mid),
+        "limit": {"context": ctx, "output": out_lim},
+        "attachment": mods is not None,
+    }
+    if mods is not None:
+        entry["modalities"] = {"input": mods, "output": ["text"]}
+    return entry
+
+
+roster_models_dict = {}
+try:
+    with open(roster_path) as f:
+        roster_data = json.load(f)
+    for item in roster_data.get("models", []):
+        ctx = int(item.get("recommended_context") or context_window)
+        hf_id = item.get("huggingface") or model_id
+        loc_id = item.get("id") or ""
+        backend = item.get("backend") or "mlx_vlm"
+        exposed_id = loc_id if item.get("expose_catalog_id") and loc_id else hf_id
+        if exposed_id not in roster_models_dict:
+            roster_models_dict[exposed_id] = build_v1_model_entry(exposed_id, ctx, hf_id, loc_id, backend)
+except (FileNotFoundError, json.JSONDecodeError, OSError):
+    pass
+
+has_roster = bool(roster_models_dict)
+if has_roster and model_id not in roster_models_dict:
+    roster_models_dict[model_id] = build_v1_model_entry(model_id, context_window, model_id, local_model_id, loaded_backend)
+
 ATTACHMENT_MODALITIES = image_capable_modalities(models_json_path, model_id, local_model_id, loaded_backend)
 
 
@@ -769,16 +876,22 @@ existing = provider.get("mlx-direct", {})
 # left in place forever (the earlier "...(direct, no LiteLLM)" + "MLX direct (no
 # LiteLLM)" pair concatenated into a stutter that this check never corrected).
 existing_model = existing.get("models", {}).get(model_id, {})
+if has_roster:
+    models_match = existing.get("models") == roster_models_dict
+else:
+    models_match = (
+        model_id in existing.get("models", {})
+        and existing_model.get("name") == MLX_DIRECT_MODEL_NAME(model_id)
+        and existing_model.get("limit", {}).get("context") == context_window
+        and existing_model.get("limit", {}).get("output") == output_limit
+        and existing_model.get("attachment") == (ATTACHMENT_MODALITIES is not None)
+        and existing_model.get("modalities", {}).get("input") == ATTACHMENT_MODALITIES
+    )
 already_correct = (
     not had_litellm
     and existing.get("options", {}).get("baseURL") == base_url
     and existing.get("name") == MLX_DIRECT_PROVIDER_NAME
-    and model_id in existing.get("models", {})
-    and existing_model.get("name") == MLX_DIRECT_MODEL_NAME(model_id)
-    and existing_model.get("limit", {}).get("context") == context_window
-    and existing_model.get("limit", {}).get("output") == output_limit
-    and existing_model.get("attachment") == (ATTACHMENT_MODALITIES is not None)
-    and existing_model.get("modalities", {}).get("input") == ATTACHMENT_MODALITIES
+    and models_match
 )
 if already_correct:
     print("ALREADY_REGISTERED")
@@ -801,21 +914,18 @@ mlx_direct["name"] = MLX_DIRECT_PROVIDER_NAME
 # is already a fixed constant in the supervisor, so there is nothing dynamic to gain
 # by routing this through the environment instead.
 mlx_direct["options"] = {"baseURL": base_url, "apiKey": "sk-mlx-direct-local"}
-models = mlx_direct.setdefault("models", {})
-models[model_id] = {
-    "name": MLX_DIRECT_MODEL_NAME(model_id),
-    "limit": {"context": context_window, "output": output_limit},
-}
-models[model_id]["attachment"] = ATTACHMENT_MODALITIES is not None
-if ATTACHMENT_MODALITIES is not None:
-    models[model_id]["modalities"] = {"input": ATTACHMENT_MODALITIES, "output": ["text"]}
+if has_roster:
+    mlx_direct["models"] = roster_models_dict
+else:
+    models = mlx_direct.setdefault("models", {})
+    models[model_id] = build_v1_model_entry(model_id, context_window, model_id, local_model_id, loaded_backend)
 
 with open(config_path, "w") as f:
     json.dump(parsed, f, indent=2)
     f.write("\n")
 print("REGISTERED")
 PYEOF
-    result="$("$MLX_PYTHON" "$pyscript" "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" "${LOADED_LOCAL_MODEL:-}" "${LOADED_BACKEND:-}")" || true
+    result="$("$MLX_PYTHON" "$pyscript" "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" "${LOADED_LOCAL_MODEL:-}" "${LOADED_BACKEND:-}" "$roster_file")" || true
     rm -f "$pyscript"
 
     case "$result" in
@@ -848,6 +958,7 @@ PYEOF
 register_opencode_model_v2() {
     local base_url="$1"
     local opencode_config="$HOME/.config/opencode/opencode.jsonc"
+    local roster_file="${MLX_ROSTER_FILE:-$BUSHPILOT_HOME/state/mlx-roster.json}"
     mkdir -p "$(dirname "$opencode_config")"
     log_info "Checking OpenCode's mlx-direct provider registration ($opencode_config)..."
 
@@ -866,6 +977,7 @@ import sys
 config_path, model_id, context_window, base_url, models_json_path = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
 local_model_id = sys.argv[6] if len(sys.argv) > 6 else ""
 loaded_backend = sys.argv[7] if len(sys.argv) > 7 else ""
+roster_path = sys.argv[8] if len(sys.argv) > 8 else ""
 output_limit = min(32768, max(4096, context_window // 4))
 
 MLX_DIRECT_PROVIDER_NAME = "BushPilot"
@@ -909,6 +1021,38 @@ def image_capable_modalities(models_json_path, hf_id, local_id="", backend=""):
         return None
     return ["text"] + extra
 
+
+def build_v2_model_entry(mid, ctx, hf_id, loc_id, backend):
+    out_lim = min(32768, max(4096, ctx // 4))
+    mods = image_capable_modalities(models_json_path, hf_id, loc_id, backend)
+    entry = {
+        "modelID": mid,
+        "limit": {"context": ctx, "output": out_lim},
+        "attachment": mods is not None,
+    }
+    if mods is not None:
+        entry["modalities"] = {"input": mods, "output": ["text"]}
+    return entry
+
+
+roster_models_dict = {}
+try:
+    with open(roster_path) as f:
+        roster_data = json.load(f)
+    for item in roster_data.get("models", []):
+        ctx = int(item.get("recommended_context") or context_window)
+        hf_id = item.get("huggingface") or model_id
+        loc_id = item.get("id") or ""
+        backend = item.get("backend") or "mlx_vlm"
+        exposed_id = loc_id if item.get("expose_catalog_id") and loc_id else hf_id
+        if exposed_id not in roster_models_dict:
+            roster_models_dict[exposed_id] = build_v2_model_entry(exposed_id, ctx, hf_id, loc_id, backend)
+except (FileNotFoundError, json.JSONDecodeError, OSError):
+    pass
+
+has_roster = bool(roster_models_dict)
+if has_roster and model_id not in roster_models_dict:
+    roster_models_dict[model_id] = build_v2_model_entry(model_id, context_window, model_id, local_model_id, loaded_backend)
 
 ATTACHMENT_MODALITIES = image_capable_modalities(models_json_path, model_id, local_model_id, loaded_backend)
 
@@ -987,6 +1131,17 @@ if had_v1_default_model:
 providers = parsed.setdefault("providers", {})
 existing = providers.get("mlx-direct", {})
 existing_model = existing.get("models", {}).get(model_id, {})
+if has_roster:
+    models_match = existing.get("models") == roster_models_dict
+else:
+    models_match = (
+        model_id in existing.get("models", {})
+        and existing_model.get("modelID") == model_id
+        and existing_model.get("limit", {}).get("context") == context_window
+        and existing_model.get("limit", {}).get("output") == output_limit
+        and existing_model.get("attachment") == (ATTACHMENT_MODALITIES is not None)
+        and existing_model.get("modalities", {}).get("input") == ATTACHMENT_MODALITIES
+    )
 already_correct = (
     not had_v1_mlx_direct
     and not had_v1_default_model
@@ -994,12 +1149,7 @@ already_correct = (
     and existing.get("package") == MLX_DIRECT_PACKAGE
     and existing.get("settings", {}).get("baseURL") == base_url
     and existing.get("compatibility", {}).get("maxTokensField") == "max_tokens"
-    and model_id in existing.get("models", {})
-    and existing_model.get("modelID") == model_id
-    and existing_model.get("limit", {}).get("context") == context_window
-    and existing_model.get("limit", {}).get("output") == output_limit
-    and existing_model.get("attachment") == (ATTACHMENT_MODALITIES is not None)
-    and existing_model.get("modalities", {}).get("input") == ATTACHMENT_MODALITIES
+    and models_match
     and parsed.get("model") == MLX_DIRECT_MODEL_STRING
 )
 if already_correct:
@@ -1015,14 +1165,11 @@ mlx_direct["settings"] = {"baseURL": base_url, "apiKey": "sk-mlx-direct-local"}
 # ignores (falling back to DEFAULT_MAX_TOKENS=2048 and truncating large code responses
 # mid-turn). Explicitly request the classic "max_tokens" wire field.
 mlx_direct["compatibility"] = {"maxTokensField": "max_tokens"}
-models = mlx_direct.setdefault("models", {})
-models[model_id] = {
-    "modelID": model_id,
-    "limit": {"context": context_window, "output": output_limit},
-}
-models[model_id]["attachment"] = ATTACHMENT_MODALITIES is not None
-if ATTACHMENT_MODALITIES is not None:
-    models[model_id]["modalities"] = {"input": ATTACHMENT_MODALITIES, "output": ["text"]}
+if has_roster:
+    mlx_direct["models"] = roster_models_dict
+else:
+    models = mlx_direct.setdefault("models", {})
+    models[model_id] = build_v2_model_entry(model_id, context_window, model_id, local_model_id, loaded_backend)
 parsed["model"] = MLX_DIRECT_MODEL_STRING
 
 with open(config_path, "w") as f:
@@ -1030,7 +1177,7 @@ with open(config_path, "w") as f:
     f.write("\n")
 print("REGISTERED")
 PYEOF
-    result="$("$MLX_PYTHON" "$pyscript" "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" "${LOADED_LOCAL_MODEL:-}" "${LOADED_BACKEND:-}")" || true
+    result="$("$MLX_PYTHON" "$pyscript" "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" "${LOADED_LOCAL_MODEL:-}" "${LOADED_BACKEND:-}" "$roster_file")" || true
     rm -f "$pyscript"
 
     case "$result" in

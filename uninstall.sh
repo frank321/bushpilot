@@ -41,7 +41,8 @@ except Exception:
 ' "$BUSHPILOT_HOME/config.json" 2>/dev/null || true)"
 fi
 MLX_PORT="${MLX_PORT:-38472}"
-MLX_PROC_PATTERN="mlx_vlm\.server|mlx-dspark serve"
+MLX_BACKEND_PORT="${MLX_BACKEND_PORT:-$((MLX_PORT + 1))}"
+MLX_PROC_PATTERN="mlx_vlm\.server|mlx-dspark serve|bushpilot\.router"
 
 log_info() { echo "[INFO] $*"; }
 log_error() { echo "[ERROR] $*" >&2; }
@@ -105,12 +106,12 @@ fi
 stop_running_server() {
     local pids=""
     if is_command_available lsof; then
-        pids="$(lsof -ti "tcp:$MLX_PORT" 2>/dev/null || true)"
+        pids="$(lsof -ti "tcp:$MLX_PORT" -ti "tcp:$MLX_BACKEND_PORT" 2>/dev/null | tr '\n' ' ' || true)"
     fi
-    if [[ -z "$pids" ]] && is_command_available pgrep; then
-        pids="$(pgrep -f "$MLX_PROC_PATTERN" 2>/dev/null || true)"
+    if [[ -z "${pids// /}" ]] && is_command_available pgrep; then
+        pids="$(pgrep -f "$MLX_PROC_PATTERN" 2>/dev/null | tr '\n' ' ' || true)"
     fi
-    if [[ -z "$pids" ]]; then
+    if [[ -z "${pids// /}" ]]; then
         log_info "No running model server found"
         return 0
     fi

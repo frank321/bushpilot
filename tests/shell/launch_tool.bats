@@ -197,4 +197,62 @@ assert "max_tokens: 16384" in settings, settings
     [ "$status" -eq 0 ]
     [ "$CLAUDE_CODE_MAX_OUTPUT_TOKENS" = "32000" ]
     [ "$CLAUDE_CODE_MAX_CONTEXT_TOKENS" = "230144" ]
+    [ "$ANTHROPIC_SMALL_FAST_MODEL" = "$MLX_MODEL" ]
+
+    mkdir -p "$BUSHPILOT_HOME/state"
+    echo '{"models": [{"id": "gemma-4-26b-a4b-it-4bit", "huggingface": "mlx-community/gemma-4-26b-a4b-it-4bit", "recommended_context": 262144}]}' > "$BUSHPILOT_HOME/state/mlx-roster.json"
+    call launch_claude
+    [ "$status" -eq 0 ]
+    [ "$ANTHROPIC_SMALL_FAST_MODEL" = "bushpilot-active" ]
+    [ "$ANTHROPIC_DEFAULT_HAIKU_MODEL" = "bushpilot-active" ]
+}
+
+@test "register_opencode_model_v2 and register_pi_model register all models from mlx-roster.json" {
+    source_launch_functions register_opencode_model_v2 register_pi_model
+    mkdir -p "$BUSHPILOT_HOME/state"
+    cat <<'EOF' > "$BUSHPILOT_HOME/state/mlx-roster.json"
+{
+  "models": [
+    {
+      "id": "gemma-4-26b-a4b-it-4bit",
+      "huggingface": "mlx-community/gemma-4-26b-a4b-it-4bit",
+      "backend": "mlx_vlm",
+      "recommended_context": 262144,
+      "expose_catalog_id": false
+    },
+    {
+      "id": "qwen3.5-9b-mlx-8bit",
+      "huggingface": "mlx-community/Qwen3.5-9B-MLX-8bit",
+      "backend": "mlx_vlm",
+      "recommended_context": 131072,
+      "expose_catalog_id": false
+    }
+  ]
+}
+EOF
+
+    call register_opencode_model_v2 "http://127.0.0.1:38472/v1"
+    [ "$status" -eq 0 ]
+
+    call register_pi_model "http://127.0.0.1:38472/v1"
+    [ "$status" -eq 0 ]
+
+    python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    oc = json.load(f)
+oc_models = oc["providers"]["mlx-direct"]["models"]
+assert set(oc_models.keys()) == {
+    "mlx-community/gemma-4-26b-a4b-it-4bit",
+    "mlx-community/Qwen3.5-9B-MLX-8bit",
+}, oc_models
+
+with open(sys.argv[2]) as f:
+    pi = json.load(f)
+pi_ids = [m["id"] for m in pi["providers"]["mlx-direct"]["models"]]
+assert pi_ids == [
+    "mlx-community/gemma-4-26b-a4b-it-4bit",
+    "mlx-community/Qwen3.5-9B-MLX-8bit",
+], pi_ids
+' "$HOME/.config/opencode/opencode.jsonc" "$HOME/.pi/agent/models.json"
 }

@@ -8,8 +8,9 @@ import sys
 from .calibration import save_calibration
 from .hardware import get_chip_info, get_current_wired_gb, log
 from .kv import MIN_USABLE_CONTEXT
+from .picker.cells import is_model_cached, model_engine
 from .picker.display import format_model_detail_lines, print_list_compact, print_menu
-from .picker.sort import SORT_KEYS
+from .picker.sort import SORT_KEYS, sort_rows
 from .preload import estimate_preload_overhead
 from .recommend import build_recommendations
 from .template_patches import check_and_patch_chat_template
@@ -19,6 +20,7 @@ from .template_patches import check_and_patch_chat_template
 # unlike the pre-split layout, this is not relative to this file's own directory.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_JSON = os.path.join(REPO_ROOT, "models.json")
+MAX_ROSTER_MODELS = 5
 
 
 def _flag_value(argv, flag):
@@ -27,6 +29,87 @@ def _flag_value(argv, flag):
         if idx + 1 < len(argv):
             return argv[idx + 1]
     return None
+
+
+def _row_to_roster_dict(row):
+    m = row["model"]
+    sv = m.get("serving") or {}
+    multimodal = sv.get("multimodal_capable") is not False and (
+        "image" in (m.get("modalities") or []) or "video" in (m.get("modalities") or [])
+    )
+    return {
+        "id": m["id"],
+        "huggingface": m["huggingface"],
+        "size_gb": m["size_gb"],
+        "recommended_context": row["recommended_context"],
+        "kv_bits": row["kv_bits"],
+        "kv_bits_apc_caveat": row["kv_bits_apc_caveat"],
+        "apc_num_blocks": row.get("apc_num_blocks"),
+        "estimated_tok_s": row["estimated_tok_s"],
+        "concurrency": row["concurrency"],
+        "prefill_step_size": row["prefill_step_size"],
+        "backend": model_engine(m),
+        "multimodal_capable": multimodal,
+        "modalities": ["text"] if sv.get("multimodal_capable") is False else (m.get("modalities") or ["text"]),
+    }
+
+
+def build_roster_entries(rows, selected_ids, max_models=MAX_ROSTER_MODELS):
+    """Build the curated hot-swap roster (up to `max_models` entries) from `rows`.
+
+    - If the user explicitly selected 2+ fitting models (`selected_ids`), those exact
+      models form the roster.
+    - If only 1 model was selected (the default `Enter` path), that model is first and
+      up to `max_models - 1` additional ALREADY-CACHED (`is_model_cached`) fitting
+      models with tool-calling support (`verdict != NOT_SUPPORTED`) are auto-populated
+      so the user can hot-swap from their coding tool with zero download delay.
+    """
+    by_id = {r["model"]["id"]: r for r in rows if r["fits"]}
+    chosen_rows = []
+    seen_ids = set()
+
+    for mid in selected_ids:
+        r = by_id.get(mid)
+        if r is not None and mid not in seen_ids:
+            chosen_rows.append(r)
+            seen_ids.add(mid)
+            if len(chosen_rows) >= max_models:
+                break
+
+    if len(selected_ids) <= 1 and len(chosen_rows) < max_models:
+        # Sort candidate rows newest-first (same default order as the picker) and avoid
+        # auto-adding a duplicate Hugging Face repo ID that's already in the roster, so
+        # auto-populated entries have unambiguous HF repo names in OpenCode/Pi/Cline.
+        sorted_candidates, _ = sort_rows([r for r in rows if r["fits"]], "released", False)
+        seen_hf = {r["model"].get("huggingface") for r in chosen_rows}
+        for r in sorted_candidates:
+            if len(chosen_rows) >= max_models:
+                break
+            m = r["model"]
+            mid = m["id"]
+            hf_id = m.get("huggingface")
+            if mid in seen_ids or hf_id in seen_hf:
+                continue
+            verdict = (m.get("tool_calling") or {}).get("verdict")
+            if verdict == "NOT_SUPPORTED":
+                continue
+            if not is_model_cached(m):
+                continue
+            chosen_rows.append(r)
+            seen_ids.add(mid)
+            seen_hf.add(hf_id)
+
+    roster = [_row_to_roster_dict(r) for r in chosen_rows]
+    # Mark entries that share a Hugging Face repo ID with another roster entry (e.g.
+    # when the user explicitly Tab-selected both a plain mlx_vlm variant and a dspark
+    # variant of the same weights) so coding tools expose the distinct catalog `id`.
+    hf_counts = {}
+    for entry in roster:
+        hf = entry.get("huggingface")
+        hf_counts[hf] = hf_counts.get(hf, 0) + 1
+    for entry in roster:
+        entry["expose_catalog_id"] = hf_counts.get(entry.get("huggingface"), 0) > 1
+    return roster
 
 
 def emit_selection_json(m, selected):
@@ -55,6 +138,7 @@ def main():
     list_compact = "--list-compact" in argv
     detail_id = _flag_value(argv, "--detail")
     resolve_id = _flag_value(argv, "--resolve")
+    build_roster_arg = _flag_value(argv, "--build-roster")
     tool = _flag_value(argv, "--tool")
     concurrency_flag = _flag_value(argv, "--concurrency")
     # Explicit request wins; anything absent/invalid falls back to auto mode (None)
@@ -217,6 +301,27 @@ def main():
             log(f"ERROR: '{resolve_id}' does not currently fit free memory.")
             sys.exit(3)
         emit_selection_json(row["model"], row)
+        return
+
+    if build_roster_arg is not None:
+        selected_ids = [s.strip() for s in build_roster_arg.split(",") if s.strip()]
+        if not selected_ids:
+            log("ERROR: --build-roster requires at least one model id.")
+            sys.exit(2)
+        for mid in selected_ids:
+            row = next((r for r in rows if r["model"]["id"] == mid), None)
+            if row is None:
+                log(f"ERROR: unknown model id '{mid}'")
+                sys.exit(2)
+            if not row["fits"]:
+                log(f"ERROR: '{mid}' does not currently fit free memory.")
+                sys.exit(3)
+        roster_entries = build_roster_entries(rows, selected_ids)
+        print(json.dumps({
+            "primary_id": selected_ids[0],
+            "explicit_selection": len(selected_ids) > 1,
+            "models": roster_entries,
+        }))
         return
 
     if list_compact:

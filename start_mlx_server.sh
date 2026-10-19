@@ -75,6 +75,9 @@ export HF_HOME="$BUSHPILOT_HOME/models"
 mkdir -p "$BUSHPILOT_VENV" "$BUSHPILOT_STATE_DIR" "$BUSHPILOT_LOG_DIR" "$BUSHPILOT_APC_DIR" "$HF_HOME"
 
 MLX_STATE_FILE="$BUSHPILOT_STATE_DIR/mlx-loaded.txt"
+MLX_ROSTER_FILE="$BUSHPILOT_STATE_DIR/mlx-roster.json"
+MLX_SWAP_REQUEST_FILE="$BUSHPILOT_STATE_DIR/mlx-swap-request.txt"
+MLX_SWAP_ERROR_FILE="$BUSHPILOT_STATE_DIR/mlx-swap-error.txt"
 # Written best-effort after every FRESH launch (never on an attach-to-already-healthy
 # path, which never calls wait_for_url at all) with the measured process-start → first-
 # healthy-response seconds -- "load time" per docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md's
@@ -94,6 +97,7 @@ start_run_log() {
 
 MLX_PYTHON="$BUSHPILOT_VENV/bin/python"
 MLX_SERVER_MODULE="mlx_vlm.server"
+MLX_ROUTER_MODULE="bushpilot.router"
 
 # Config file (optional): $BUSHPILOT_HOME/config.json can override host/port/preferred_model/
 # concurrency/max_context_tokens below the built-in defaults, plus the mlx-dspark
@@ -150,6 +154,7 @@ PYEOF
 fi
 MLX_HOST="${MLX_HOST:-${CONFIG_HOST:-127.0.0.1}}"
 MLX_PORT="${MLX_PORT:-${CONFIG_PORT:-38472}}"
+MLX_BACKEND_PORT="${MLX_BACKEND_PORT:-$((MLX_PORT + 1))}"
 # Resolved to an actual integer once model selection completes (interactive path) or
 # right below (fixed-model path) -- 1 is the safe fallback if nothing ever sets it.
 CONCURRENCY=1
@@ -713,7 +718,7 @@ run_fzf_model_picker() {
     # fzf exists (and gets immediately superseded by the `start` reload anyway).
     list_cmd+="--term-width \"\${FZF_COLUMNS:-$term_width}\""
 
-    local header_text=$'Models fit, context size and speed are calculated live for your hardware (chip + free memory).\n↑↓ move · type to filter · Enter select · Esc cancel\nSort: click a column header (again to reverse), or ^R newest · ^S fastest · ^T largest · ^O name\ngreen = fits as-is · yellow = KV-quantized · dim = does not fit · 71 tok/s = measured · ~71 tok/s = est · ✓ tested · ○ untested'
+    local header_text=$'Models fit, context size and speed are calculated live for your hardware (chip + free memory).\n↑↓ move · type to filter · Tab mark roster (up to 5) · Enter select · Esc cancel\nSort: click a column header (again to reverse), or ^R newest · ^S fastest · ^T largest · ^O name\ngreen = fits as-is · yellow = KV-quantized · dim = does not fit · 71 tok/s = measured · ~71 tok/s = est · ✓ tested · ○ untested'
     # The column-header row sits right below fzf's --header lines; a click-header event
     # reports which line was clicked, and only that row should trigger a re-sort.
     local header_row=$(( $(printf '%s\n' "$header_text" | wc -l) + 1 ))
@@ -721,6 +726,7 @@ run_fzf_model_picker() {
     : > "$sort_state"   # start from the default sort, preserved if reopened after picking a dimmed row
     while true; do
         selection="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --list-compact --color --term-width "$term_width" --sort-state "$sort_state" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} | fzf \
+            --multi=5 \
             --delimiter=$'\t' --with-nth=2 \
             --preview "$preview_cmd" --preview-window down:50%:wrap \
             --bind "start:reload($list_cmd 2>/dev/null)" \
@@ -731,7 +737,7 @@ run_fzf_model_picker() {
             --bind "ctrl-o:reload($list_cmd --sort name 2>/dev/null)" \
             --bind "click-header:transform:[ \"\$FZF_CLICK_HEADER_LINE\" = $header_row ] && echo \"reload($list_cmd --sort-col \$FZF_CLICK_HEADER_COLUMN 2>/dev/null)\"" \
             --header-lines=1 \
-            --ansi --border=rounded --pointer="▶" \
+            --ansi --border=rounded --pointer="▶" --marker="●" \
             --header="$header_text" \
             --prompt="Model> " --height=~80% --layout=reverse)"
         if [[ -z "$selection" ]]; then
@@ -739,12 +745,32 @@ run_fzf_model_picker() {
             return 1
         fi
 
-        selected_id="$(printf '%s' "$selection" | cut -f1)"
-        reason="$(printf '%s' "$selection" | cut -f3)"
-        if [[ -n "$reason" ]]; then
-            echo "[INFO] $selected_id doesn't fit this machine right now: $reason" >&2
+        local line bad_id="" bad_reason="" selected_ids_csv=""
+        selected_id=""
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            local row_id row_reason
+            row_id="$(printf '%s' "$line" | cut -f1)"
+            row_reason="$(printf '%s' "$line" | cut -f3)"
+            if [[ -n "$row_reason" ]]; then
+                bad_id="$row_id"
+                bad_reason="$row_reason"
+                break
+            fi
+            [[ -z "$selected_id" ]] && selected_id="$row_id"
+            selected_ids_csv+="${selected_ids_csv:+,}${row_id}"
+        done <<<"$selection"
+
+        if [[ -n "$bad_reason" ]]; then
+            echo "[INFO] $bad_id doesn't fit this machine right now: $bad_reason" >&2
             read -r -p "Press Enter to pick another model... " _ </dev/tty || true
             continue
+        fi
+
+        if ! "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --build-roster "$selected_ids_csv" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} > "${MLX_ROSTER_FILE}.tmp" 2>/dev/null; then
+            rm -f "${MLX_ROSTER_FILE}.tmp"
+        else
+            mv -f "${MLX_ROSTER_FILE}.tmp" "$MLX_ROSTER_FILE"
         fi
 
         if ! "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --resolve "$selected_id" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"}; then
@@ -755,12 +781,80 @@ run_fzf_model_picker() {
     done
 }
 
+# Builds ~/.bushpilot/state/mlx-roster.json for non-fzf or single-model paths before the
+# primary model loads (while full free memory is available).
+ensure_roster_file_built() {
+    local primary_id="${1:-$LOCAL_MODEL}"
+    [[ -z "$primary_id" ]] && return 0
+    if "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --build-roster "$primary_id" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} > "${MLX_ROSTER_FILE}.tmp" 2>/dev/null; then
+        mv -f "${MLX_ROSTER_FILE}.tmp" "$MLX_ROSTER_FILE"
+    else
+        rm -f "${MLX_ROSTER_FILE}.tmp"
+        # Fallback for fixed-model CLI invocations where primary_id does not pass the
+        # advisor fit check or isn't in models.json: synthesize a 1-entry roster so the
+        # router and coding tools still see the active model.
+        "$MLX_PYTHON" - "$MLX_ROSTER_FILE" "$primary_id" "$MLX_MODEL" "$CONTEXT_WINDOW" "${KV_BITS:-}" "${PREFILL_STEP_SIZE:-2048}" "${APC_NUM_BLOCKS:-4096}" "${CONCURRENCY:-1}" "${MLX_BACKEND:-mlx_vlm}" <<'PYEOF' 2>/dev/null || true
+import json, sys
+path, mid, hf_id, ctx, kv, prefill, apc, conc, backend = sys.argv[1:10]
+with open(path, "w") as f:
+    json.dump({
+        "primary_id": mid,
+        "explicit_selection": False,
+        "models": [{
+            "id": mid,
+            "huggingface": hf_id,
+            "recommended_context": int(ctx) if ctx.isdigit() else 131072,
+            "kv_bits": int(kv) if kv.isdigit() else None,
+            "prefill_step_size": int(prefill) if prefill.isdigit() else 2048,
+            "apc_num_blocks": int(apc) if apc.isdigit() else 4096,
+            "concurrency": int(conc) if conc.isdigit() else 1,
+            "backend": backend or "mlx_vlm",
+            "multimodal_capable": backend != "mlx_dspark",
+            "modalities": ["text"],
+            "expose_catalog_id": False,
+        }],
+    }, f)
+PYEOF
+    fi
+}
+
+# Applies a single model resolution JSON (from `--resolve` or a roster entry) to the
+# supervisor's global launch variables.
+apply_resolved_model_json() {
+    local advisor_output="$1"
+    MLX_MODEL=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['huggingface'])" "$advisor_output")
+    LOCAL_MODEL=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['id'])" "$advisor_output")
+    CONTEXT_WINDOW=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['recommended_context'])" "$advisor_output")
+    KV_BITS=$("$MLX_PYTHON" -c "import json,sys; v=json.loads(sys.argv[1]).get('kv_bits'); print(v if v is not None else '')" "$advisor_output")
+    KV_BITS_APC_CAVEAT=$("$MLX_PYTHON" -c "import json,sys; print('1' if json.loads(sys.argv[1]).get('kv_bits_apc_caveat') else '')" "$advisor_output")
+    CONCURRENCY=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1]).get('concurrency', 1))" "$advisor_output")
+    # Overrides this script's own static PREFILL_STEP_SIZE=2048 default (set near the
+    # top of this file) with model_advisor.py's recommend_prefill_step_size() decision
+    # -- a real per-(chip, model) sweep measurement when one exists on this machine
+    # (see docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md / sweep_model.py), the SAME global
+    # default otherwise. Only the --interactive path goes through model_advisor.py at
+    # all, so the fixed-model form (scripting/restarts) keeps today's static default
+    # unchanged, exactly like KV_BITS above.
+    local prefill_step_size_val
+    prefill_step_size_val=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1]).get('prefill_step_size', 2048))" "$advisor_output" 2>/dev/null) || prefill_step_size_val=""
+    [[ -n "$prefill_step_size_val" ]] && PREFILL_STEP_SIZE="$prefill_step_size_val"
+
+    local apc_num_blocks_val
+    apc_num_blocks_val=$("$MLX_PYTHON" -c "import json,sys; v=json.loads(sys.argv[1]).get('apc_num_blocks'); print(v if v is not None else '')" "$advisor_output" 2>/dev/null) || apc_num_blocks_val=""
+    if [[ -n "$apc_num_blocks_val" ]]; then
+        APC_NUM_BLOCKS="$apc_num_blocks_val"
+    else
+        APC_NUM_BLOCKS=4096
+    fi
+}
+
 # Interactive model selection (Phase 2: no --tool factored in here anymore -- the
 # supervisor is deliberately tool-agnostic now; a tool-aware preload check moves to
 # Phase 3's launch_tool at attach-time instead).
 run_interactive_selection() {
     log_info "Detecting hardware and free memory for model recommendations..."
 
+    rm -f "$MLX_ROSTER_FILE"
     local advisor_output
     if [[ -n "$CONFIG_PREFERRED_MODEL" ]] && advisor_output=$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --resolve "$CONFIG_PREFERRED_MODEL" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} 2>/dev/null); then
         log_success "Using preferred_model from config.json: $CONFIG_PREFERRED_MODEL"
@@ -771,26 +865,8 @@ run_interactive_selection() {
         exit 1
     fi
 
-    MLX_MODEL=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['huggingface'])" "$advisor_output")
-    LOCAL_MODEL=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['id'])" "$advisor_output")
-    CONTEXT_WINDOW=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['recommended_context'])" "$advisor_output")
-    KV_BITS=$("$MLX_PYTHON" -c "import json,sys; v=json.loads(sys.argv[1])['kv_bits']; print(v if v is not None else '')" "$advisor_output")
-    KV_BITS_APC_CAVEAT=$("$MLX_PYTHON" -c "import json,sys; print('1' if json.loads(sys.argv[1])['kv_bits_apc_caveat'] else '')" "$advisor_output")
-    CONCURRENCY=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['concurrency'])" "$advisor_output")
-    # Overrides this script's own static PREFILL_STEP_SIZE=2048 default (set near the
-    # top of this file) with model_advisor.py's recommend_prefill_step_size() decision
-    # -- a real per-(chip, model) sweep measurement when one exists on this machine
-    # (see docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md / sweep_model.py), the SAME global
-    # default otherwise. Only the --interactive path goes through model_advisor.py at
-    # all, so the fixed-model form (scripting/restarts) keeps today's static default
-    # unchanged, exactly like KV_BITS above.
-    local prefill_step_size_val
-    prefill_step_size_val=$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['prefill_step_size'])" "$advisor_output" 2>/dev/null) || prefill_step_size_val=""
-    [[ -n "$prefill_step_size_val" ]] && PREFILL_STEP_SIZE="$prefill_step_size_val"
-
-    local apc_num_blocks_val
-    apc_num_blocks_val=$("$MLX_PYTHON" -c "import json,sys; v=json.loads(sys.argv[1]).get('apc_num_blocks'); print(v if v is not None else '')" "$advisor_output" 2>/dev/null) || apc_num_blocks_val=""
-    [[ -n "$apc_num_blocks_val" ]] && APC_NUM_BLOCKS="$apc_num_blocks_val"
+    apply_resolved_model_json "$advisor_output"
+    [[ -f "$MLX_ROSTER_FILE" ]] || ensure_roster_file_built "$LOCAL_MODEL"
 
     local kv_bits_log="unquantized (full decode speed — recommended context already fits free memory)"
     if [[ -n "$KV_BITS" ]]; then
@@ -815,7 +891,22 @@ run_interactive_selection() {
     fi
     if [[ "$CONCURRENCY" -gt 1 ]]; then
         log_success "Concurrency: $CONCURRENCY slots (free bonus from tier-rounding leftover, or your config.json override)"
-
+    fi
+    if [[ -f "$MLX_ROSTER_FILE" ]]; then
+        local roster_summary
+        roster_summary="$("$MLX_PYTHON" -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        models = json.load(f).get("models", [])
+    if len(models) > 1:
+        print(", ".join(m["id"] for m in models))
+except Exception:
+    pass
+' "$MLX_ROSTER_FILE" 2>/dev/null || true)"
+        if [[ -n "$roster_summary" ]]; then
+            log_success "Hot-swap roster (selectable inside coding tools): $roster_summary"
+        fi
     fi
 }
 
@@ -844,18 +935,18 @@ from huggingface_hub import snapshot_download
 snapshot_download('$repo')
 "; then
         log_error "Download failed for $repo."
-        exit 1
+        return 1
     fi
     log_success "Download complete: $repo"
 }
 
 ensure_model_downloaded() {
-    ensure_repo_downloaded "$MLX_MODEL" "target model"
+    ensure_repo_downloaded "$MLX_MODEL" "target model" || return 1
     # MLX_DRAFTER (mlx_dspark backend) and MLX_DRAFT_MODEL (mlx_vlm backend) are
     # mutually exclusive per resolve_serving_config -- at most one is ever set.
     local drafter_repo="${MLX_DRAFTER:-$MLX_DRAFT_MODEL}"
     if [[ -n "$drafter_repo" ]]; then
-        ensure_repo_downloaded "$drafter_repo" "drafter"
+        ensure_repo_downloaded "$drafter_repo" "drafter" || return 1
     fi
 }
 
@@ -884,15 +975,17 @@ patch_known_chat_template_bugs() {
     "$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --patch-chat-template "$MLX_MODEL"
 }
 
-# Returns 0 only if the process actually LISTENING on $MLX_PORT is our expected
-# server process (mlx_vlm.server, or `mlx-dspark serve` for an mlx_dspark-backed
-# model -- see MLX_PROC_PATTERN in resolve_serving_config). /health alone is not
-# sufficient -- confirmed live, a foreign, unmanaged server (e.g. a stray
+# Returns 0 only if the process actually LISTENING on the backend port ($MLX_BACKEND_PORT,
+# falling back to $MLX_PORT when $MLX_BACKEND_PORT is unset in isolated shell tests) is
+# our expected server process (mlx_vlm.server, or `mlx-dspark serve` for an
+# mlx_dspark-backed model -- see MLX_PROC_PATTERN in resolve_serving_config). /health
+# alone is not sufficient -- confirmed live, a foreign, unmanaged server (e.g. a stray
 # mlx_lm.server) can hold the port while answering /health and hang forever on real
 # inference.
 mlx_port_owner_is_expected() {
+    local check_port="${MLX_BACKEND_PORT:-$MLX_PORT}"
     local pids
-    pids="$(lsof -ti "tcp:$MLX_PORT" 2>/dev/null || true)"
+    pids="$(lsof -ti "tcp:$check_port" 2>/dev/null || true)"
     [[ -z "$pids" ]] && return 1
 
     local pid
@@ -902,6 +995,50 @@ mlx_port_owner_is_expected() {
         fi
     done
     return 1
+}
+
+router_port_owner_is_expected() {
+    local pids
+    pids="$(lsof -ti "tcp:$MLX_PORT" 2>/dev/null || true)"
+    [[ -z "$pids" ]] && return 1
+
+    local pid
+    for pid in $pids; do
+        if ps -p "$pid" -o command= 2>/dev/null | grep -q "$MLX_ROUTER_MODULE"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+ensure_router_running() {
+    if router_port_owner_is_expected; then
+        return 0
+    fi
+    wait_for_port_free "$MLX_PORT" 15
+    PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" "$MLX_PYTHON" -m "$MLX_ROUTER_MODULE" \
+        --host "$MLX_HOST" \
+        --port "$MLX_PORT" \
+        --backend-host "$MLX_HOST" \
+        --backend-port "$MLX_BACKEND_PORT" \
+        --state-dir "$BUSHPILOT_STATE_DIR" >> "$MLX_LOG_FILE" 2>&1 &
+    ROUTER_PID=$!
+    if ! wait_for_url "http://$MLX_HOST:$MLX_PORT/v1/models" 15 "$ROUTER_PID"; then
+        log_error "Bushpilot HTTP router failed to start on $MLX_HOST:$MLX_PORT"
+        return 1
+    fi
+    return 0
+}
+
+stop_router() {
+    wait_for_process_gone "$MLX_ROUTER_MODULE" "Bushpilot router" 10 || true
+}
+
+stop_all_mlx_backends() {
+    local timeout="${1:-30}"
+    wait_for_process_gone "$MLX_SERVER_MODULE" "MLX server" "$timeout" || true
+    wait_for_process_gone "mlx-dspark serve" "mlx-dspark server" "$timeout" || true
+    wait_for_port_free "$MLX_BACKEND_PORT" 15 || true
 }
 
 # Returns 0 only if the server actually completes a real (tiny) inference request.
@@ -972,6 +1109,108 @@ run_startup_smoke_check() {
     log_success "Smoke check passed — native /v1/messages, /metrics, /v1/cache/stats all behave as expected"
 }
 
+launch_backend_engine() {
+    local mode="${1:-startup}"
+    local desired_state="$MLX_MODEL|$CONTEXT_WINDOW|$KV_BITS|${LOCAL_MODEL:-}|${MLX_BACKEND:-mlx_vlm}"
+    local mlx_args=()
+    local -a launch_cmd=()
+
+    if [[ "$MLX_BACKEND" == "mlx_dspark" ]]; then
+        mlx_args=(
+            --model "$MLX_MODEL"
+            --host "$MLX_HOST"
+            --port "$MLX_BACKEND_PORT"
+            --context-window "$CONTEXT_WINDOW"
+            --mode "${MLX_DSPARK_MODE:-dflash}"
+        )
+        [[ -n "$MLX_DRAFTER" ]] && mlx_args+=(--drafter "$MLX_DRAFTER")
+        if [[ -n "$CONFIG_DSPARK_PC_MAX_RAM_MB" && -z "$CONFIG_DSPARK_PC_DIR" ]]; then
+            log_error "config.json: dspark_prefix_cache_max_ram_mb requires dspark_prefix_cache_dir (per mlx-dspark's own --prefix-cache-max-ram-mb contract) — set both or neither."
+            return 1
+        fi
+        [[ -n "$CONFIG_DSPARK_PC_SLOTS" ]] && mlx_args+=(--prefix-cache-slots "$CONFIG_DSPARK_PC_SLOTS")
+        [[ -n "$CONFIG_DSPARK_PC_RUNGS" ]] && mlx_args+=(--prefix-cache-rungs "$CONFIG_DSPARK_PC_RUNGS")
+        [[ -n "$CONFIG_DSPARK_PC_DIR" ]] && mlx_args+=(--prefix-cache-dir "$CONFIG_DSPARK_PC_DIR")
+        [[ -n "$CONFIG_DSPARK_PC_MAX_RAM_MB" ]] && mlx_args+=(--prefix-cache-max-ram-mb "$CONFIG_DSPARK_PC_MAX_RAM_MB")
+        if [[ -n "$KV_BITS" ]]; then
+            mlx_args+=(--kv-bits "$KV_BITS")
+        else
+            mlx_args+=(--kv-bits 0)
+            [[ "$CONCURRENCY" -gt 1 ]] && mlx_args+=(--max-batch "$CONCURRENCY")
+        fi
+        launch_cmd=("$BUSHPILOT_VENV/bin/mlx-dspark" serve "${mlx_args[@]}")
+    else
+        mlx_args=(
+            --model "$MLX_MODEL"
+            --host "$MLX_HOST"
+            --port "$MLX_BACKEND_PORT"
+            --max-kv-size "$CONTEXT_WINDOW"
+            --prefill-step-size "$PREFILL_STEP_SIZE"
+            --max-num-seqs "$CONCURRENCY"
+        )
+        if [[ -n "$KV_BITS" ]]; then
+            mlx_args+=(
+                --kv-bits "$KV_BITS"
+                --kv-group-size "$KV_GROUP_SIZE"
+                --quantized-kv-start "$QUANTIZED_KV_START"
+                --kv-quant-scheme uniform
+            )
+        fi
+        if [[ -n "$MLX_DRAFT_MODEL" ]]; then
+            mlx_args+=(--draft-model "$MLX_DRAFT_MODEL")
+            [[ -n "$MLX_DRAFT_KIND" ]] && mlx_args+=(--draft-kind "$MLX_DRAFT_KIND")
+            [[ -n "$MLX_DRAFT_BLOCK_SIZE" ]] && mlx_args+=(--draft-block-size "$MLX_DRAFT_BLOCK_SIZE")
+        fi
+
+        mkdir -p "$APC_DISK_PATH"
+        export APC_ENABLED APC_NUM_BLOCKS APC_DISK_PATH APC_DISK_MAX_GB
+
+        launch_cmd=("$MLX_PYTHON" -m "$MLX_SERVER_MODULE" "${mlx_args[@]}")
+    fi
+
+    if [[ "$mode" == "startup" ]]; then
+        start_run_log
+        log_hardware_profile
+        flush_context_warning
+    else
+        local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
+        printf '\n%s - === HOT-SWAP TO %s (%s) ===\n' "$ts" "${LOCAL_MODEL:-?}" "$MLX_MODEL" >> "$MLX_LOG_FILE"
+        log_hardware_profile
+    fi
+    log_launch_config "${launch_cmd[@]}"
+
+    "${launch_cmd[@]}" >> "$MLX_LOG_FILE" 2>&1 &
+    MLX_PID=$!
+    local load_start_ts; load_start_ts=$(date +%s)
+
+    if ! wait_for_url "http://$MLX_HOST:$MLX_BACKEND_PORT/health" 600 "$MLX_PID"; then
+        log_error "MLX backend failed to start on $MLX_HOST:$MLX_BACKEND_PORT. Check $MLX_LOG_FILE"
+        tail -20 "$MLX_LOG_FILE" >&2 || true
+        return 1
+    fi
+    printf '%s\n' "$(( $(date +%s) - load_start_ts ))" > "$MLX_LOAD_TIME_FILE" 2>/dev/null || true
+
+    # Write MLX_STATE_FILE before running the smoke check through the router on $MLX_PORT
+    # so the router sees the newly loaded model as active and forwards /v1/messages
+    # directly rather than treating the smoke check as a new swap request.
+    echo "$desired_state" > "$MLX_STATE_FILE"
+
+    if ! ensure_router_running; then
+        rm -f "$MLX_STATE_FILE"
+        stop_all_mlx_backends 20
+        return 1
+    fi
+
+    if ! run_startup_smoke_check; then
+        log_error "Startup smoke check failed — tearing down. Check $MLX_LOG_FILE"
+        rm -f "$MLX_STATE_FILE"
+        stop_all_mlx_backends 20
+        return 1
+    fi
+
+    return 0
+}
+
 ensure_mlx_running() {
     log_info "Checking MLX server on $MLX_HOST:$MLX_PORT..."
 
@@ -980,7 +1219,7 @@ ensure_mlx_running() {
     local server_up=false
 
     if curl -fsS --max-time 5 "http://$MLX_HOST:$MLX_PORT/health" > /dev/null 2>&1; then
-        if mlx_port_owner_is_expected; then
+        if router_port_owner_is_expected && mlx_port_owner_is_expected; then
             local loaded_state=""
             [[ -f "$MLX_STATE_FILE" ]] && loaded_state="$(cat "$MLX_STATE_FILE" 2>/dev/null)"
             local probe_model="${loaded_state%%|*}"
@@ -989,20 +1228,22 @@ ensure_mlx_running() {
             if mlx_inference_responds "$probe_model"; then
                 server_up=true
             else
-                log_error "MLX server owns port $MLX_PORT and answers /health, but did NOT return a completion within the inference probe timeout:"
+                log_error "MLX server answers /health, but did NOT return a completion within the inference probe timeout:"
                 log_error "  probed model: $probe_model -- the process is hung, not healthy"
                 log_info "Restarting the hung MLX server..."
-                wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 30
+                stop_all_mlx_backends 30
                 rm -f "$MLX_STATE_FILE"
             fi
         else
-            log_error "Port $MLX_PORT is answering /health, but it is NOT this script's managed server process ($MLX_PROC_PATTERN):"
+            log_error "Port $MLX_PORT is answering /health, but it is NOT this script's managed router/backend ($MLX_PROC_PATTERN):"
             local owner_pids
             owner_pids="$(lsof -ti "tcp:$MLX_PORT" 2>/dev/null || true)"
             if [[ -n "$owner_pids" ]]; then
                 ps -p $owner_pids -o pid=,command= 2>/dev/null | sed 's/^/  /' >&2 || true
             fi
-            log_info "Reclaiming port $MLX_PORT from the foreign process..."
+            log_info "Reclaiming port $MLX_PORT and $MLX_BACKEND_PORT..."
+            stop_router
+            stop_all_mlx_backends 15
             wait_for_port_free "$MLX_PORT" 15
         fi
     fi
@@ -1013,10 +1254,6 @@ ensure_mlx_running() {
 
         if [[ "$loaded_state" == "$desired_state" || "$loaded_state" == "$legacy_desired_state" ]]; then
             log_success "MLX server already healthy with $MLX_MODEL (context: ${CONTEXT_WINDOW} tokens)"
-            # Append-only (do NOT truncate -- the running server's own log must survive,
-            # and its fd keeps writing to this file). Notes the attach plus a fresh
-            # hardware snapshot, since free memory at attach time is what any FUTURE
-            # advisor consult in this terminal would see.
             local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
             printf '%s - ATTACHED to already-running server (state=%s)\n' "$ts" "$loaded_state" >> "$MLX_LOG_FILE"
             log_hardware_profile
@@ -1037,7 +1274,7 @@ ensure_mlx_running() {
             printf "Stop the running one and start %s instead? [y/N]: " "$MLX_MODEL" >&2
             read -r reply
             if [[ "$reply" =~ ^[Yy]$ ]]; then
-                wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 30
+                stop_all_mlx_backends 30
                 rm -f "$MLX_STATE_FILE"
             else
                 log_error "Not stopping the running model. Stop it manually first (Ctrl-C / q in its dashboard)."
@@ -1051,126 +1288,125 @@ ensure_mlx_running() {
 
     if [[ "$server_up" != "true" ]]; then
         log_info "Starting MLX server with model $MLX_MODEL..."
-        wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 30
-        rm -f "$MLX_STATE_FILE"
+        stop_all_mlx_backends 30
+        rm -f "$MLX_STATE_FILE" "$MLX_SWAP_REQUEST_FILE" "$MLX_SWAP_ERROR_FILE"
     fi
 
-    wait_for_port_free "$MLX_PORT" 15
-
-    local mlx_args=()
-    local -a launch_cmd=()
-
-    if [[ "$MLX_BACKEND" == "mlx_dspark" ]]; then
-        # mlx-dspark's own flag set -- deliberately different names/semantics than
-        # mlx_vlm's below (--context-window not --max-kv-size, --kv-bits {0,4,8} not
-        # a separate --kv-group-size/--quantized-kv-start/--kv-quant-scheme trio,
-        # --max-batch not --max-num-seqs). No --prefill-step-size equivalent exists
-        # (mlx-dspark auto-calibrates its own prefill path per machine+model+quant --
-        # that self-tuning is the whole reason this backend is used at all for the
-        # models that have one, see models.json's serving.measured_speedup notes).
-        mlx_args=(
-            --model "$MLX_MODEL"
-            --host "$MLX_HOST"
-            --port "$MLX_PORT"
-            --context-window "$CONTEXT_WINDOW"
-            --mode "${MLX_DSPARK_MODE:-dflash}"
-        )
-        [[ -n "$MLX_DRAFTER" ]] && mlx_args+=(--drafter "$MLX_DRAFTER")
-        # Prefix-cache tuning from config.json (all optional; unset = mlx-dspark's
-        # own defaults, which are fine -- this is a power-user tier, e.g. the L2 SSD
-        # spill via dspark_prefix_cache_dir). Flag names/semantics confirmed against
-        # `mlx-dspark serve --help`, including max-ram-mb's requires-dir rule, which
-        # is enforced here rather than leaving the user to decode mlx-dspark's own
-        # startup-error wording for it.
-        if [[ -n "$CONFIG_DSPARK_PC_MAX_RAM_MB" && -z "$CONFIG_DSPARK_PC_DIR" ]]; then
-            log_error "config.json: dspark_prefix_cache_max_ram_mb requires dspark_prefix_cache_dir (per mlx-dspark's own --prefix-cache-max-ram-mb contract) — set both or neither."
-            exit 1
-        fi
-        [[ -n "$CONFIG_DSPARK_PC_SLOTS" ]] && mlx_args+=(--prefix-cache-slots "$CONFIG_DSPARK_PC_SLOTS")
-        [[ -n "$CONFIG_DSPARK_PC_RUNGS" ]] && mlx_args+=(--prefix-cache-rungs "$CONFIG_DSPARK_PC_RUNGS")
-        [[ -n "$CONFIG_DSPARK_PC_DIR" ]] && mlx_args+=(--prefix-cache-dir "$CONFIG_DSPARK_PC_DIR")
-        [[ -n "$CONFIG_DSPARK_PC_MAX_RAM_MB" ]] && mlx_args+=(--prefix-cache-max-ram-mb "$CONFIG_DSPARK_PC_MAX_RAM_MB")
-        if [[ -n "$KV_BITS" ]]; then
-            # --kv-bits disables --max-batch on mlx-dspark's own side (confirmed in
-            # `mlx-dspark serve --help`) -- omit --max-batch entirely in this branch
-            # rather than passing a combination it would reject.
-            mlx_args+=(--kv-bits "$KV_BITS")
-        else
-            mlx_args+=(--kv-bits 0)
-            [[ "$CONCURRENCY" -gt 1 ]] && mlx_args+=(--max-batch "$CONCURRENCY")
-        fi
-        launch_cmd=("$BUSHPILOT_VENV/bin/mlx-dspark" serve "${mlx_args[@]}")
-    else
-        mlx_args=(
-            --model "$MLX_MODEL"
-            --host "$MLX_HOST"
-            --port "$MLX_PORT"
-            --max-kv-size "$CONTEXT_WINDOW"
-            --prefill-step-size "$PREFILL_STEP_SIZE"
-            # Server's own default is UNBOUNDED concurrent sequences -- since
-            # recommend_max_context already sizes CONTEXT_WINDOW's memory footprint for
-            # exactly $CONCURRENCY slots (see model_advisor.py), leaving this unset would
-            # let an (N+1)th concurrent request allocate a KV cache with zero memory
-            # headroom reserved for it -- the exact crash this project exists to prevent.
-            --max-num-seqs "$CONCURRENCY"
-        )
-        if [[ -n "$KV_BITS" ]]; then
-            mlx_args+=(
-                --kv-bits "$KV_BITS"
-                --kv-group-size "$KV_GROUP_SIZE"
-                --quantized-kv-start "$QUANTIZED_KV_START"
-                --kv-quant-scheme uniform
-            )
-        fi
-        # --draft-model/--draft-kind/--draft-block-size are additive to the same
-        # mlx_vlm.server process -- this is the multimodal-capable "keep vision, some
-        # speedup" tier (see models.json's serving.multimodal_capable), not a
-        # different server or a different admission/health contract.
-        if [[ -n "$MLX_DRAFT_MODEL" ]]; then
-            mlx_args+=(--draft-model "$MLX_DRAFT_MODEL")
-            [[ -n "$MLX_DRAFT_KIND" ]] && mlx_args+=(--draft-kind "$MLX_DRAFT_KIND")
-            [[ -n "$MLX_DRAFT_BLOCK_SIZE" ]] && mlx_args+=(--draft-block-size "$MLX_DRAFT_BLOCK_SIZE")
-        fi
-
-        mkdir -p "$APC_DISK_PATH"
-        export APC_ENABLED APC_NUM_BLOCKS APC_DISK_PATH APC_DISK_MAX_GB
-
-        launch_cmd=("$MLX_PYTHON" -m "$MLX_SERVER_MODULE" "${mlx_args[@]}")
-    fi
-
-    # Fresh launch coming up: reset the log ONCE here (not at script start -- an
-    # attach to an already-healthy server returns above without reaching this, and
-    # truncating then would have destroyed the running server's own log), then
-    # record this run's hardware profile and launch decision before the engine
-    # starts appending, so context/kv-bits/backend/drafter/APC/concurrency are
-    # always reconstructable from the log alone.
-    start_run_log
-    log_hardware_profile
-    flush_context_warning
-    log_launch_config "${launch_cmd[@]}"
-
-    "${launch_cmd[@]}" >> "$MLX_LOG_FILE" 2>&1 &
-    MLX_PID=$!
-    local load_start_ts; load_start_ts=$(date +%s)
-
-    if ! wait_for_url "http://$MLX_HOST:$MLX_PORT/health" 600 "$MLX_PID"; then
-        log_error "MLX server failed to start. Check $MLX_LOG_FILE"
-        tail -20 "$MLX_LOG_FILE" >&2
-        exit 1
-    fi
-    # Best-effort, never blocks the launch -- a stale or missing file just means
-    # sweep_model.py's "load.load_time_s" field reports null, same as if this script
-    # predated the feature entirely.
-    printf '%s\n' "$(( $(date +%s) - load_start_ts ))" > "$MLX_LOAD_TIME_FILE" 2>/dev/null || true
-
-    if ! run_startup_smoke_check; then
-        log_error "Startup smoke check failed — tearing down. Check $MLX_LOG_FILE"
-        wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 30
+    if ! launch_backend_engine "startup"; then
         exit 1
     fi
 
-    echo "$desired_state" > "$MLX_STATE_FILE"
     log_success "MLX server started and healthy"
+}
+
+# Orchestrates a live model swap requested either by the HTTP router
+# ($MLX_SWAP_REQUEST_FILE) or by pressing `m` in the dashboard. Stops the outgoing
+# backend FIRST so its wired GPU memory is completely reclaimed before the incoming
+# model loads. On failure, writes $MLX_SWAP_ERROR_FILE and restores the previous model.
+perform_model_swap() {
+    local target_id="$1"
+    [[ -z "$target_id" ]] && { rm -f "$MLX_SWAP_REQUEST_FILE"; return 1; }
+
+    local prev_local_model="$LOCAL_MODEL"
+    local prev_mlx_model="$MLX_MODEL"
+    local prev_ctx="$CONTEXT_WINDOW"
+    local prev_kv="$KV_BITS"
+    local prev_kv_caveat="${KV_BITS_APC_CAVEAT:-}"
+    local prev_prefill="$PREFILL_STEP_SIZE"
+    local prev_apc="$APC_NUM_BLOCKS"
+    local prev_conc="$CONCURRENCY"
+
+    log_info "Switching model from ${LOCAL_MODEL:-$MLX_MODEL} to $target_id..."
+    save_calibration_snapshot || true
+
+    # Free the outgoing model's wired RAM before resolving or loading the new model.
+    stop_all_mlx_backends 20
+    rm -f "$MLX_STATE_FILE" "$MLX_SWAP_ERROR_FILE"
+
+    local resolved_json=""
+    if [[ -f "$MLX_ROSTER_FILE" ]]; then
+        resolved_json="$("$MLX_PYTHON" - "$MLX_ROSTER_FILE" "$target_id" <<'PYEOF' 2>/dev/null || true
+import json, sys
+roster_path, target = sys.argv[1], sys.argv[2]
+try:
+    with open(roster_path) as f:
+        models = json.load(f).get("models", [])
+    for m in models:
+        if m.get("id") == target or m.get("huggingface") == target:
+            print(json.dumps(m))
+            break
+except Exception:
+    pass
+PYEOF
+)"
+    fi
+
+    if [[ -z "$resolved_json" ]]; then
+        resolved_json="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" --resolve "$target_id" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"} 2>/dev/null || true)"
+    fi
+
+    local swap_ok=false
+    if [[ -n "$resolved_json" ]]; then
+        apply_resolved_model_json "$resolved_json"
+        resolve_serving_config
+        ensure_backend_installed
+        if ensure_model_downloaded; then
+            patch_known_chat_template_bugs
+            if launch_backend_engine "swap"; then
+                swap_ok=true
+            fi
+        fi
+    fi
+
+    if [[ "$swap_ok" == "true" ]]; then
+        # Ensure the newly active model is also present in mlx-roster.json so /v1/models
+        # and newly-launched coding tools see it.
+        if [[ -f "$MLX_ROSTER_FILE" && -n "$resolved_json" ]]; then
+            "$MLX_PYTHON" - "$MLX_ROSTER_FILE" "$resolved_json" <<'PYEOF' 2>/dev/null || true
+import json, sys
+roster_path, raw_entry = sys.argv[1], sys.argv[2]
+try:
+    with open(roster_path) as f:
+        data = json.load(f)
+    entry = json.loads(raw_entry)
+    models = data.get("models", [])
+    if not any(m.get("id") == entry.get("id") for m in models):
+        models.insert(0, entry)
+        data["models"] = models[:5]
+    data["primary_id"] = entry.get("id", data.get("primary_id"))
+    with open(roster_path, "w") as f:
+        json.dump(data, f, indent=2)
+except Exception:
+    pass
+PYEOF
+        fi
+        BACKEND_DOWN_STREAK=0
+        BACKEND_BUSY_STREAK=0
+        MEM_ABORT_STREAK=0
+        MEM_CRITICAL_STREAK=0
+        MEM_WARNING_STATUS=""
+        DASHBOARD_START_TS=$(date +%s)
+        rm -f "$MLX_SWAP_REQUEST_FILE"
+        log_success "Hot-swap complete: now serving $LOCAL_MODEL ($MLX_MODEL) at ${CONTEXT_WINDOW} context"
+        return 0
+    fi
+
+    local err_msg="Failed to hot-swap to '$target_id'; restoring previous model ($prev_local_model)."
+    log_error "$err_msg"
+    printf '%s\n' "$err_msg" > "$MLX_SWAP_ERROR_FILE"
+    rm -f "$MLX_SWAP_REQUEST_FILE"
+
+    LOCAL_MODEL="$prev_local_model"
+    MLX_MODEL="$prev_mlx_model"
+    CONTEXT_WINDOW="$prev_ctx"
+    KV_BITS="$prev_kv"
+    KV_BITS_APC_CAVEAT="$prev_kv_caveat"
+    PREFILL_STEP_SIZE="$prev_prefill"
+    APC_NUM_BLOCKS="$prev_apc"
+    CONCURRENCY="$prev_conc"
+    resolve_serving_config
+    launch_backend_engine "swap" || true
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -1335,7 +1571,8 @@ full_teardown() {
         # wired GPU memory IMMEDIATELY before doing any dashboard render or
         # spawning Python subprocesses for calibration snapshots.
         wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" "${MEM_EMERGENCY_KILL_TIMEOUT:-3}" || true
-        rm -f "$MLX_STATE_FILE"
+        declare -F stop_router > /dev/null 2>&1 && stop_router
+        rm -f "$MLX_STATE_FILE" "${MLX_ROSTER_FILE:-}" "${MLX_SWAP_REQUEST_FILE:-}" "${MLX_SWAP_ERROR_FILE:-}"
         render_dashboard || true
         [[ -t 1 ]] && printf '\033[?25h' 2>/dev/null || true
         stty sane 2>/dev/null || true
@@ -1344,7 +1581,8 @@ full_teardown() {
         [[ -t 1 ]] && printf '\033[?25h' 2>/dev/null || true
         stty sane 2>/dev/null || true
         wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 20 || true
-        rm -f "$MLX_STATE_FILE"
+        declare -F stop_router > /dev/null 2>&1 && stop_router
+        rm -f "$MLX_STATE_FILE" "${MLX_ROSTER_FILE:-}" "${MLX_SWAP_REQUEST_FILE:-}" "${MLX_SWAP_ERROR_FILE:-}"
     fi
     exit 0
 }
@@ -1372,26 +1610,20 @@ get_mlx_rss_gb() {
 # mlx_vlm.server (third-party) doesn't tag requests with any client/tool identity in
 # its /metrics response, so we can't learn this from the API. What we CAN see
 # ourselves: every tool talks to $MLX_PORT over a local TCP socket, so lsof on that
-# port surfaces the PIDs holding a connection to it. Exclude the server's own PID
-# (identified by matching $MLX_PROC_PATTERN in its command line, since $MLX_PID
-# isn't set when we attached to an already-running server) and resolve the rest to
-# process names -- that's "what tool is connected", best-effort, not request-level.
+# port surfaces the PIDs holding a connection to it. Exclude the server's/router's own
+# PIDs and resolve the rest to process names -- that's "what tool is connected",
+# best-effort, not request-level.
 get_connected_clients() {
-    local pids server_pid pid nm names
+    local pids pid nm names cmdline
     pids="$(lsof -ti "tcp:$MLX_PORT" 2>/dev/null || true)"
     [[ -z "$pids" ]] && { echo ""; return; }
 
-    server_pid=""
-    for pid in $pids; do
-        if ps -p "$pid" -o command= 2>/dev/null | grep -q "$MLX_PROC_PATTERN"; then
-            server_pid="$pid"
-            break
-        fi
-    done
-
     names=""
     for pid in $pids; do
-        [[ "$pid" == "$server_pid" ]] && continue
+        cmdline="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+        if grep -q "$MLX_PROC_PATTERN" <<<"$cmdline" || grep -q "$MLX_ROUTER_MODULE" <<<"$cmdline"; then
+            continue
+        fi
         nm="$(ps -p "$pid" -o comm= 2>/dev/null)" || continue
         [[ -z "$nm" ]] && continue
         names+="$(basename "$nm")"$'\n'
@@ -1444,14 +1676,14 @@ render_dashboard() {
         "$CONTEXT_WINDOW" "$elapsed_fmt" "${APC_ENABLED}" "${pct_free:-?}" "$pressure_name" \
         "${mlx_rss:-?}" "$TEARDOWN_REASON" "$SCRIPT_DIR/launch_tool.sh" "${connected_clients:-}" \
         "$MLX_HOST" "$CONCURRENCY" "${MLX_DRAFTER:-}" "${MLX_DSPARK_MODE:-dflash}" \
-        "${MEM_WARNING_STATUS:-}" "$term_cols" <<'PYEOF'
+        "${MEM_WARNING_STATUS:-}" "$term_cols" "${MLX_ROSTER_FILE:-}" "${LOCAL_MODEL:-}" <<'PYEOF'
 import json, os, re, sys
 
 (
     backend, metrics_raw, cache_raw, model, port, context, uptime, apc_on,
     pct_free, pressure, rss, teardown_reason, launch_cmd, connected, host,
-    concurrency, drafter, mode, mem_warning, term_cols_raw
-) = sys.argv[1:21]
+    concurrency, drafter, mode, mem_warning, term_cols_raw, roster_path, active_local_id
+) = sys.argv[1:23]
 
 def safe_json(s):
     try:
@@ -1461,6 +1693,14 @@ def safe_json(s):
 
 metrics = safe_json(metrics_raw)
 cache = safe_json(cache_raw)
+
+roster_models = []
+if roster_path and os.path.isfile(roster_path):
+    try:
+        with open(roster_path) as rf:
+            roster_models = json.load(rf).get("models", [])
+    except Exception:
+        roster_models = []
 
 def num(v, default="—"):
     return f"{v:,}" if isinstance(v, (int, float)) else default
@@ -1587,6 +1827,17 @@ def fmt_mem_status(pct_s, press_s):
 mem_gauge, press_styled = fmt_mem_status(pct_free, pressure)
 conn_styled = f"{GREEN}● {connected}{RESET}" if connected else f"{DIM}no tool connected yet{RESET}"
 
+roster_styled = ""
+if len(roster_models) > 1:
+    parts = []
+    for rm in roster_models:
+        rid = rm.get("id") or rm.get("huggingface") or "?"
+        if rid == active_local_id or rm.get("huggingface") == model:
+            parts.append(f"{GREEN}{BOLD}● {rid}{RESET}")
+        else:
+            parts.append(f"{DIM}○ {rid}{RESET}")
+    roster_styled = "   ".join(parts)
+
 emit(f"{DIM}┌{'─' * (W - 2)}┐{RESET}")
 
 if backend == "mlx_dspark":
@@ -1620,6 +1871,8 @@ if backend == "mlx_dspark":
     line(f"{BOLD}SYSTEM{RESET}          free mem {mem_gauge}   pressure: {press_styled}   MLX RSS {rss} GB   swap {gb(system.get('swap_used_bytes'))} GB")
     rule()
     line(f"{BOLD}CONNECTED{RESET}       {conn_styled}")
+    if roster_styled:
+        line(f"{BOLD}ROSTER{RESET}          {roster_styled}")
     sheds = guard.get("sheds")
     if isinstance(sheds, (int, float)) and sheds > 0:
         rule()
@@ -1665,6 +1918,8 @@ else:
          f"peak {rate(latest.get('peak_memory_gb'))} GB")
     rule()
     line(f"{BOLD}CONNECTED{RESET}       {conn_styled}")
+    if roster_styled:
+        line(f"{BOLD}ROSTER{RESET}          {roster_styled}")
     rule()
     err = summary.get("last_error") or "none"
     if err == "none":
@@ -1681,7 +1936,7 @@ if teardown_reason:
 
 emit(f"{DIM}└{'─' * (W - 2)}┘{RESET}")
 emit(f"  {DIM}To connect a tool: open another terminal and run{RESET} {BOLD}{launch_cmd}{RESET}")
-emit(f"  {DIM}Ctrl-C / q : stop everything{RESET}")
+emit(f"  {DIM}m : switch model · Ctrl-C / q : stop everything{RESET}")
 
 prefix = "\033[H" if is_tty else ""
 suffix = "\033[J\n" if is_tty else "\n"
@@ -1746,8 +2001,9 @@ check_memory_backstop() {
 # connection refused / port loss, using BACKEND_HANG_CONSECUTIVE_POLLS (90s) for the
 # former so legitimate long prefills are never killed after 10 seconds.
 check_backend_alive() {
+    local check_port="${MLX_BACKEND_PORT:-$MLX_PORT}"
     local curl_rc=0
-    curl -fsS --max-time 2 "http://$MLX_HOST:$MLX_PORT/health" > /dev/null 2>&1 || curl_rc=$?
+    curl -fsS --max-time 2 "http://$MLX_HOST:$check_port/health" > /dev/null 2>&1 || curl_rc=$?
 
     if [[ "$curl_rc" -eq 0 ]] && mlx_port_owner_is_expected; then
         BACKEND_DOWN_STREAK=0
@@ -1819,6 +2075,51 @@ flush_context_warning() {
     CONTEXT_WARNING_PENDING=""
 }
 
+switch_model_from_dashboard() {
+    local old_stty="$1"
+    [[ -t 1 ]] && printf '\033[?25h\033[2J\033[H' 2>/dev/null || true
+    if [[ -n "$old_stty" ]]; then
+        stty "$old_stty" 2>/dev/null || stty sane 2>/dev/null || true
+    else
+        stty sane 2>/dev/null || true
+    fi
+
+    local current_rss
+    current_rss="$(get_mlx_rss_gb "${MLX_PID:-}")"
+    export BUSHPILOT_RECLAIMABLE_RSS_GB="${current_rss:-0}"
+
+    local advisor_output=""
+    if is_command_available fzf; then
+        advisor_output="$(run_fzf_model_picker)" || advisor_output=""
+    else
+        advisor_output="$("$MLX_PYTHON" "$SCRIPT_DIR/model_advisor.py" ${ADVISOR_FLAGS[@]+"${ADVISOR_FLAGS[@]}"})" || advisor_output=""
+    fi
+    unset BUSHPILOT_RECLAIMABLE_RSS_GB
+
+    if [[ -n "$advisor_output" ]]; then
+        local new_id
+        new_id="$("$MLX_PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['id'])" "$advisor_output" 2>/dev/null || true)"
+        if [[ -n "$new_id" && "$new_id" != "$LOCAL_MODEL" ]]; then
+            perform_model_swap "$new_id" || true
+        fi
+    fi
+
+    [[ -n "$old_stty" ]] && stty -icanon -echo min 0 time 0 2>/dev/null || true
+    [[ -t 1 ]] && printf '\033[2J\033[H\033[?25l' 2>/dev/null || true
+}
+
+check_pending_swap_request() {
+    [[ -f "$MLX_SWAP_REQUEST_FILE" ]] || return 1
+    local req_model
+    req_model="$(cat "$MLX_SWAP_REQUEST_FILE" 2>/dev/null | tr -d '\r\n' || true)"
+    if [[ -z "$req_model" ]]; then
+        rm -f "$MLX_SWAP_REQUEST_FILE"
+        return 1
+    fi
+    perform_model_swap "$req_model" || true
+    return 0
+}
+
 run_dashboard() {
     trap 'full_teardown "Ctrl-C"' INT
     trap 'full_teardown "terminal closed (SIGHUP)"' HUP
@@ -1832,6 +2133,10 @@ run_dashboard() {
     while true; do
         local loop_start_ts loop_elapsed sleep_rem
         loop_start_ts=$(date +%s)
+
+        if check_pending_swap_request; then
+            [[ -t 1 ]] && printf '\033[2J\033[H\033[?25l' 2>/dev/null || true
+        fi
 
         if ! check_memory_backstop; then
             full_teardown "$TEARDOWN_REASON" "emergency"
@@ -1848,11 +2153,22 @@ run_dashboard() {
         sleep_rem=$(( DASHBOARD_POLL_INTERVAL - loop_elapsed ))
         [[ "$sleep_rem" -lt 1 ]] && sleep_rem=1
 
-        local key=""
-        read -r -t "$sleep_rem" -n 1 key || true
-        if [[ "$key" == "q" || "$key" == "Q" ]]; then
-            full_teardown "stopped by user (q)"
-        fi
+        local tick=0
+        while [[ "$tick" -lt "$sleep_rem" ]]; do
+            if check_pending_swap_request; then
+                [[ -t 1 ]] && printf '\033[2J\033[H\033[?25l' 2>/dev/null || true
+                break
+            fi
+            local key=""
+            read -r -t 1 -n 1 key || true
+            if [[ "$key" == "q" || "$key" == "Q" ]]; then
+                full_teardown "stopped by user (q)"
+            elif [[ "$key" == "m" || "$key" == "M" ]]; then
+                switch_model_from_dashboard "$old_stty"
+                break
+            fi
+            tick=$((tick + 1))
+        done
     done
 }
 
@@ -1872,6 +2188,10 @@ main() {
     # itself needs them regardless of which backend gets selected.
     resolve_serving_config
 
+    if [[ "$INTERACTIVE" != "true" ]]; then
+        ensure_roster_file_built "$LOCAL_MODEL"
+    fi
+
     # Fixed-model CLI form: the 3rd positional arg sets CONTEXT_WINDOW directly and
     # never consults model_advisor.py (see the ARGS[2] default near the top). That's a
     # deliberate escape hatch, but it silently allows a context far above what this
@@ -1890,7 +2210,7 @@ main() {
         log_info "Serving backend: mlx_vlm with $MLX_DRAFT_KIND drafter ($MLX_DRAFT_MODEL) -- multimodal-capable"
     fi
 
-    ensure_model_downloaded
+    ensure_model_downloaded || exit 1
     patch_known_chat_template_bugs
     ensure_mlx_running
 

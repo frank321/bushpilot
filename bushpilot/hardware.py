@@ -1,6 +1,7 @@
 """Hardware detection: chip name/GPU cores, total RAM, and currently-available
 memory (the kernel's own real-time percent-free figure -- see
 get_current_wired_gb's docstring for why)."""
+import os
 import subprocess
 import sys
 
@@ -16,6 +17,19 @@ DEFAULT_METAL_WIRED_LIMIT_FRACTION = 0.78
 
 def log(msg):
     print(msg, file=sys.stderr)
+
+
+def _get_reclaimable_server_rss_gb():
+    """Returns the RSS (in GB) of a currently-running Bushpilot MLX server that will be
+    unloaded before a hot-swap, passed via `BUSHPILOT_RECLAIMABLE_RSS_GB`."""
+    raw = os.environ.get("BUSHPILOT_RECLAIMABLE_RSS_GB", "").strip()
+    if not raw:
+        return 0.0
+    try:
+        val = float(raw)
+        return val if val > 0 else 0.0
+    except ValueError:
+        return 0.0
 
 
 def get_metal_wired_limit_gb(total_ram_gb=None):
@@ -88,11 +102,13 @@ def get_current_wired_gb():
     if total_ram_gb is None:
         raise RuntimeError("Could not determine total RAM via sysctl hw.memsize")
 
+    reclaimable_server_rss = _get_reclaimable_server_rss_gb()
+
     try:
         out = subprocess.check_output(["sysctl", "-n", "kern.memorystatus_level"], text=True)
         pct = int(out.strip())
         if 0 <= pct <= 100:
-            raw_free_gb = total_ram_gb * pct / 100.0
+            raw_free_gb = min(total_ram_gb, (total_ram_gb * pct / 100.0) + reclaimable_server_rss)
             effective_free_gb = _cap_free_by_metal_limit(total_ram_gb, raw_free_gb)
             return max(0.0, total_ram_gb - effective_free_gb)
     except (subprocess.CalledProcessError, ValueError):
@@ -117,7 +133,10 @@ def get_current_wired_gb():
     reclaimable_keys = ("Pages free", "Pages speculative", "Pages purgeable", "Pages inactive")
     if not any(k in pages for k in reclaimable_keys):
         raise RuntimeError("Could not determine free memory from kern.memorystatus_level or vm_stat")
-    reclaimable_gb = sum(pages.get(k, 0) for k in reclaimable_keys) * page_size / 1024**3
+    reclaimable_gb = min(
+        total_ram_gb,
+        (sum(pages.get(k, 0) for k in reclaimable_keys) * page_size / 1024**3) + reclaimable_server_rss,
+    )
     effective_free_gb = _cap_free_by_metal_limit(total_ram_gb, reclaimable_gb)
     return max(0.0, total_ram_gb - effective_free_gb)
 
