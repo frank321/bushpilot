@@ -317,3 +317,258 @@ def test_derive_speed_correction_factor_inverts_bandwidth_formula(dense_model):
     assert sm.derive_speed_correction_factor(sweep_data, dense_model, "Apple Z9000", 20) is None
 
 
+def test_derive_speed_correction_factor_skips_drafter_models(drafter_model, dspark_drafter_model):
+    sweep_data = {
+        "decode_speed_vs_context": [
+            {"context_tokens": 100, "kv_bits": None, "decode_tok_s": 110.0},
+        ],
+    }
+    assert sm.derive_speed_correction_factor(sweep_data, drafter_model, "Apple M5 Pro", 20) is None
+    assert sm.derive_speed_correction_factor(sweep_data, dspark_drafter_model, "Apple M5 Pro", 20) is None
+
+
+# --- SweepServer.build_command_args (#4: draft-model + mlx-dspark support) -------------
+
+def test_sweep_server_build_command_args_standard_mlx_vlm():
+    srv = sm.SweepServer(
+        "mlx-community/test-vlm", "127.0.0.1", 38472, 16384, "/tmp/test.log",
+        prefill_step_size=2048, kv_bits=8, max_num_seqs=2,
+    )
+    cmd = srv.build_command_args()
+    assert cmd[:4] == [sm.MLX_PYTHON, "-m", "mlx_vlm.server", "--model"]
+    assert "--prefill-step-size" in cmd
+    assert cmd[cmd.index("--prefill-step-size") + 1] == "2048"
+    assert "--kv-bits" in cmd
+    assert cmd[cmd.index("--kv-bits") + 1] == "8"
+    assert "--draft-model" not in cmd
+
+
+def test_sweep_server_build_command_args_mlx_vlm_with_draft_model():
+    srv = sm.SweepServer(
+        "mlx-community/test-vlm", "127.0.0.1", 38472, 16384, "/tmp/test.log",
+        prefill_step_size=2048,
+        serving={
+            "backend": "mlx_vlm",
+            "draft_model": "mlx-community/test-dflash-bf16",
+            "draft_kind": "dflash",
+            "draft_block_size": 16,
+        },
+    )
+    cmd = srv.build_command_args()
+    assert cmd[cmd.index("--draft-model") + 1] == "mlx-community/test-dflash-bf16"
+    assert cmd[cmd.index("--draft-kind") + 1] == "dflash"
+    assert cmd[cmd.index("--draft-block-size") + 1] == "16"
+
+
+def test_sweep_server_build_command_args_mlx_dspark():
+    srv = sm.SweepServer(
+        "mlx-community/test-dspark", "127.0.0.1", 38472, 16384, "/tmp/test.log",
+        max_num_seqs=2,
+        serving={
+            "backend": "mlx_dspark",
+            "mode": "dflash",
+            "drafter": "z-lab/test-dflash",
+        },
+    )
+    cmd = srv.build_command_args()
+    assert cmd[:3] == [sm.MLX_DSPARK, "serve", "--model"]
+    assert cmd[cmd.index("--mode") + 1] == "dflash"
+    assert cmd[cmd.index("--drafter") + 1] == "z-lab/test-dflash"
+    assert cmd[cmd.index("--context-window") + 1] == "16384"
+    assert cmd[cmd.index("--kv-bits") + 1] == "0"
+    assert cmd[cmd.index("--max-batch") + 1] == "2"
+
+    # With quantized KV, mlx_dspark passes --kv-bits 8 and suppresses --max-batch
+    srv_q = sm.SweepServer(
+        "mlx-community/test-dspark", "127.0.0.1", 38472, 16384, "/tmp/test.log",
+        kv_bits=8, max_num_seqs=2,
+        serving={"backend": "mlx_dspark", "drafter": "z-lab/test-dflash"},
+    )
+    cmd_q = srv_q.build_command_args()
+    assert cmd_q[cmd_q.index("--kv-bits") + 1] == "8"
+    assert "--max-batch" not in cmd_q
+
+
+# --- normalize_dspark_timings & extract_draft_stats_from_timings -----------------------
+
+def test_normalize_dspark_timings_maps_dspark_fields():
+    x_dspark = {
+        "prompt_tokens": 360,
+        "cached_tokens": 60,
+        "completion_tokens": 90,
+        "ttft_seconds": 0.25,
+        "prefill_tokens_per_sec": 1200.0,
+        "decode_tokens_per_sec": 92.5,
+        "mode": "dflash",
+        "accept_len": 4.1,
+        "target_forwards": 22,
+    }
+    metrics = {
+        "memory": {"peak_bytes": int(8.5e9)},
+        "rounds": {"draft_acceptance": 0.72},
+    }
+    norm = sm.normalize_dspark_timings(x_dspark, metrics=metrics)
+    assert norm["prompt_n"] == 300
+    assert norm["cache_n"] == 60
+    assert norm["predicted_n"] == 90
+    assert norm["prompt_ms"] == 250.0
+    assert norm["prompt_per_second"] == 1200.0
+    assert norm["predicted_per_second"] == 92.5
+    assert norm["peak_memory"] == 8.5
+    assert norm["draft_kind"] == "dflash"
+    assert norm["accept_len"] == 4.1
+    assert norm["target_forwards"] == 22
+    assert norm["draft_acceptance_rate"] == 0.72
+
+
+def test_extract_draft_stats_from_timings_supports_vlm_and_dspark_shapes():
+    # mlx_vlm shape: draft_n_accepted / draft_n, and 1 + draft_n_accepted / draft_rounds
+    vlm_t = {
+        "draft_n": 40,
+        "draft_n_accepted": 30,
+        "draft_rounds": 10,
+    }
+    acc_rate, mean_accept = sm.extract_draft_stats_from_timings(vlm_t)
+    assert acc_rate == 0.75
+    assert mean_accept == 4.0
+
+    # dspark normalized shape
+    dspark_t = {"draft_acceptance_rate": 0.68, "accept_len": 3.4}
+    acc_rate2, mean_accept2 = sm.extract_draft_stats_from_timings(dspark_t)
+    assert acc_rate2 == 0.68
+    assert mean_accept2 == 3.4
+
+
+def test_run_drafter_tier_summarizes_by_context(drafter_model, dense_model):
+    assert sm.run_drafter_tier(dense_model) == {"drafter_attached": False}
+    curve = [
+        {
+            "context_tokens": 100,
+            "kv_bits": None,
+            "decode_tok_s": 95.2,
+            "mean_accept_len": 4.2,
+            "draft_acceptance_rate": 0.74,
+        },
+        {
+            "context_tokens": 16384,
+            "kv_bits": None,
+            "decode_tok_s": 81.0,
+            "mean_accept_len": 3.6,
+            "draft_acceptance_rate": 0.65,
+        },
+        {
+            "context_tokens": 16384,
+            "kv_bits": 8,
+            "decode_tok_s": 78.0,
+            "mean_accept_len": 3.5,
+            "draft_acceptance_rate": 0.63,
+        },
+    ]
+    res = sm.run_drafter_tier(drafter_model, decode_speed_vs_context=curve)
+    assert res["drafter_attached"] is True
+    assert res["tested_this_sweep"] is True
+    assert res["drafter"] == "mlx-community/Test-Drafter-assistant-bf16"
+    assert res["mode"] == "mtp"
+    assert len(res["by_context"]) == 2
+    assert res["by_context"][0]["context_tokens"] == 100
+    assert res["by_context"][0]["mean_accept_len"] == 4.2
+    assert res["by_context"][1]["context_tokens"] == 16384
+    assert res["by_context"][1]["draft_acceptance_rate"] == 0.65
+
+
+def test_derive_lightweight_calibration_fields_fallback_without_prefill_tier():
+    # mlx-dspark sweeps skip prefill_step_size_sweep; calibration still derives
+    # decode_tok_s and decode_tok_s_by_context from decode_speed_vs_context.
+    sweep_data = {
+        "prefill_step_size_sweep": [],
+        "decode_speed_vs_context": [
+            {"context_tokens": 100, "kv_bits": None, "decode_tok_s": 105.4, "peak_memory_gb": 7.1},
+            {"context_tokens": 16384, "kv_bits": None, "decode_tok_s": 88.2, "peak_memory_gb": 8.4},
+            {"context_tokens": 16384, "kv_bits": 8, "decode_tok_s": 85.0, "peak_memory_gb": 7.6},
+        ],
+    }
+    derived = sm.derive_lightweight_calibration_fields(sweep_data)
+    assert derived is not None
+    assert derived["prefill_step_size"] == ma.DEFAULT_PREFILL_STEP_SIZE
+    assert derived["decode_tok_s"] == 88.2
+    assert derived["context_tokens"] == 16384
+    assert derived["peak_memory_gb"] == 8.4
+    assert derived["kv_bits_safe_at_long_context"] is True
+    assert derived["decode_tok_s_by_context"] == {"100": 105.4, "16384": 88.2}
+
+
+# --- Batch cached-model discovery (#3: --all-cached / --untested-cached) ---------------
+
+def _make_fake_hf_cache_snap(hf_home, repo_id, with_config=True):
+    snap = os.path.join(
+        str(hf_home), "hub", "models--" + repo_id.replace("/", "--"), "snapshots", "abc123"
+    )
+    os.makedirs(snap, exist_ok=True)
+    if with_config:
+        with open(os.path.join(snap, "config.json"), "w") as f:
+            f.write("{}")
+    return snap
+
+
+def test_is_repo_cached_and_is_model_cached(tmp_path, dense_model, drafter_model):
+    hf_home = tmp_path / "hf"
+    assert sm.is_repo_cached(dense_model["huggingface"], hf_home=str(hf_home)) is False
+
+    _make_fake_hf_cache_snap(hf_home, dense_model["huggingface"], with_config=False)
+    assert sm.is_repo_cached(dense_model["huggingface"], hf_home=str(hf_home)) is False
+
+    _make_fake_hf_cache_snap(hf_home, dense_model["huggingface"], with_config=True)
+    assert sm.is_repo_cached(dense_model["huggingface"], hf_home=str(hf_home)) is True
+    assert sm.is_model_cached(dense_model, hf_home=str(hf_home)) is True
+
+    # Drafter model requires both target and drafter repos to be cached
+    _make_fake_hf_cache_snap(hf_home, drafter_model["huggingface"], with_config=True)
+    assert sm.is_model_cached(drafter_model, hf_home=str(hf_home)) is False
+    _make_fake_hf_cache_snap(hf_home, drafter_model["serving"]["draft_model"], with_config=True)
+    assert sm.is_model_cached(drafter_model, hf_home=str(hf_home)) is True
+
+
+def test_select_cached_models_filters_by_status_and_existing_sweep(tmp_path, dense_model):
+    hf_home = tmp_path / "hf"
+    sweeps_dir = tmp_path / "sweeps"
+    sweeps_dir.mkdir()
+
+    m_tested = dict(dense_model, id="tested-m", huggingface="org/tested-m", status="tested")
+    m_untested = dict(dense_model, id="untested-m", huggingface="org/untested-m", status="untested")
+    m_uncached = dict(dense_model, id="uncached-m", huggingface="org/uncached-m", status="untested")
+
+    _make_fake_hf_cache_snap(hf_home, "org/tested-m", with_config=True)
+    _make_fake_hf_cache_snap(hf_home, "org/untested-m", with_config=True)
+    models = [m_tested, m_untested, m_uncached]
+
+    # All cached (force=False, no existing sweep files)
+    selected = sm.select_cached_models(
+        models, chip_name="Apple M5 Pro", untested_only=False, force=False,
+        hf_home=str(hf_home), sweeps_dir=str(sweeps_dir),
+    )
+    assert [m["id"] for m in selected] == ["tested-m", "untested-m"]
+
+    # Untested only
+    selected_u = sm.select_cached_models(
+        models, chip_name="Apple M5 Pro", untested_only=True, force=False,
+        hf_home=str(hf_home), sweeps_dir=str(sweeps_dir),
+    )
+    assert [m["id"] for m in selected_u] == ["untested-m"]
+
+    # Existing sweep file skips unless force=True
+    existing_sweep = sweeps_dir / "Apple_M5_Pro__untested-m.sweep.json"
+    existing_sweep.write_text("{}")
+    selected_skip = sm.select_cached_models(
+        models, chip_name="Apple M5 Pro", untested_only=True, force=False,
+        hf_home=str(hf_home), sweeps_dir=str(sweeps_dir),
+    )
+    assert selected_skip == []
+
+    selected_force = sm.select_cached_models(
+        models, chip_name="Apple M5 Pro", untested_only=True, force=True,
+        hf_home=str(hf_home), sweeps_dir=str(sweeps_dir),
+    )
+    assert [m["id"] for m in selected_force] == ["untested-m"]
+
+
+

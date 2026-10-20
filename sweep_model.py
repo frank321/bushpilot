@@ -24,17 +24,23 @@ each candidate value. Every OTHER tier below reuses whichever one of those launc
 still live rather than relaunching again, maximizing what gets measured per model-load
 per docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md's own stated priority.
 
-Scope: mlx_vlm backend only (not mlx-dspark) -- mlx-dspark has no --prefill-step-size
-equivalent at all (it self-calibrates its own prefill path per machine+model+quant,
-confirmed in start_mlx_server.sh's own comments), so the headline deliverable here
-doesn't even apply to it. A model with a `serving.backend == "mlx_dspark"` entry in
-models.json is rejected with a clear error rather than silently mismeasured.
+Scope: covers both the `mlx_vlm` backend (including `--draft-model` speculative decoding)
+and the `mlx_dspark` backend (`mlx-dspark serve --drafter ...`). Because `mlx-dspark`
+self-calibrates its own prefill path and has no `--prefill-step-size` launch flag, the
+`prefill_step_size` tier is automatically skipped when `serving.backend == "mlx_dspark"`
+while all other tiers (`decode_vs_context`, `apc_cache_test`, `tool_calling_reverified`,
+`speculative_decoding`, `concurrency_throughput`, `thermal_check`) run against
+`mlx-dspark serve`.
 
 Usage:
   python3 sweep_model.py --model-id gemma-4-e4b-it-4bit
   python3 sweep_model.py --model-id gemma-4-e4b-it-4bit --step-sizes 2048,4096 \\
       --context-depths 100,4096 --concurrency-levels 1,2 --thermal-requests 8
       # a smaller/faster pass for validating the harness itself
+  python3 sweep_model.py --untested-cached --sync-verified
+      # batch-sweep all locally cached untested models and sync into models.json
+  python3 sweep_model.py --all-cached --force
+      # re-sweep every locally cached catalog model on this chip
 
 Writes:
   ~/.bushpilot/calibration/sweeps/<chip>__<model_id>.sweep.json  (rich diagnostics,
@@ -48,6 +54,7 @@ Writes:
     atomic-write/last-write-wins contract is the only place this logic lives.)
 """
 import argparse
+import glob
 import json
 import os
 import re
@@ -68,6 +75,7 @@ import model_advisor as ma  # noqa: E402  (path insert above must run first)
 BUSHPILOT_HOME = os.path.expanduser("~/.bushpilot")
 BUSHPILOT_VENV = os.path.join(BUSHPILOT_HOME, "venv")
 MLX_PYTHON = os.path.join(BUSHPILOT_VENV, "bin", "python")
+MLX_DSPARK = os.path.join(BUSHPILOT_VENV, "bin", "mlx-dspark")
 HF_HOME = os.path.join(BUSHPILOT_HOME, "models")
 APC_DISK_PATH = os.path.join(BUSHPILOT_HOME, "apc-cache")
 SWEEP_DIR = os.path.join(ma.CALIBRATION_DIR, "sweeps")
@@ -263,8 +271,7 @@ def derive_lightweight_calibration_fields(sweep_data):
     one sweep, the flat top-level `prefill_step_size` / `decode_tok_s` fields are taken
     from the deepest swept depth."""
     step_sweep = sweep_data.get("prefill_step_size_sweep") or []
-    if not step_sweep:
-        return None
+    decode_curve = sweep_data.get("decode_speed_vs_context") or []
 
     by_depth_entries = {}
     for entry in step_sweep:
@@ -288,11 +295,28 @@ def derive_lightweight_calibration_fields(sweep_data):
                 rec["ttft_s"] = winner_d["ttft_s"]
             by_context[str(ctx)] = rec
 
-    primary_pool = by_depth_entries[max(by_depth_entries)] if by_depth_entries else step_sweep
-    best_step_size = pick_best_step_size(primary_pool)
-    winner = next((e for e in primary_pool if e.get("step_size") == best_step_size), None)
+    winner = None
+    best_step_size = ma.DEFAULT_PREFILL_STEP_SIZE
+    if step_sweep:
+        primary_pool = by_depth_entries[max(by_depth_entries)] if by_depth_entries else step_sweep
+        best_step_size = pick_best_step_size(primary_pool)
+        winner = next((e for e in primary_pool if e.get("step_size") == best_step_size), None)
     if winner is None or not isinstance(winner.get("decode_tok_s"), (int, float)):
-        return None
+        # Fallback when prefill_step_size_sweep was skipped (e.g. mlx_dspark backend or
+        # --skip-tiers prefill_step_size): use the deepest unquantized decode_speed_vs_context
+        # point so decode_tok_s / decode_tok_s_by_context / kv_bits_safe_at_long_context still
+        # land in the lightweight calibration file.
+        usable_curve = [
+            d for d in decode_curve
+            if d.get("kv_bits") is None
+            and isinstance(d.get("decode_tok_s"), (int, float))
+            and d["decode_tok_s"] > 0
+            and isinstance(d.get("context_tokens"), (int, float))
+        ]
+        if not usable_curve:
+            return None
+        winner = max(usable_curve, key=lambda d: d["context_tokens"])
+        best_step_size = ma.DEFAULT_PREFILL_STEP_SIZE
 
     deepest = max((d["context_tokens"] for d in sweep_data.get("decode_speed_vs_context", [])
                    if isinstance(d.get("context_tokens"), (int, float))), default=None)
@@ -339,8 +363,14 @@ def derive_speed_correction_factor(sweep_data, model_entry, chip_name, gpu_cores
     shallowest unquantized `decode_speed_vs_context` measurement (falling back to the
     winning step-size run's `decode_tok_s` if `decode_speed_vs_context` is absent):
         speed_correction_factor = round(decode_tok_s * active_gb / bandwidth_gb_s, 3)
+    Returns None for drafter-backed entries (`serving.drafter` / `serving.draft_model`),
+    because `speed_correction_factor` is a base-architecture property whereas speculative
+    decoding speedup is represented via `serving.measured_speedup`.
     Closes docs/HARDWARE_SPEED_ESTIMATION.md §17 item #2 / NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md
     remaining-work item #6."""
+    serving = model_entry.get("serving") or {}
+    if serving.get("drafter") or serving.get("draft_model"):
+        return None
     bw = ma.CHIP_BANDWIDTH_GB_S.get(chip_name)
     if not bw or bw <= 0:
         return None
@@ -398,6 +428,69 @@ TINY_PNG_B64 = (
 
 
 
+def normalize_dspark_timings(x_dspark, metrics=None):
+    """Synthesizes an mlx_vlm-compatible `timings` dict from mlx-dspark's per-response
+    `x_mlx_dspark` block (plus an optional `/metrics` snapshot for `peak_memory` and
+    `draft_acceptance`). Lets every measurement tier below treat `mlx_vlm` and
+    `mlx-dspark` identically."""
+    if not isinstance(x_dspark, dict):
+        return None
+    prompt_tokens = x_dspark.get("prompt_tokens") or 0
+    cached_tokens = x_dspark.get("cached_tokens") or 0
+    prompt_n = max(0, prompt_tokens - cached_tokens)
+    ttft_s = x_dspark.get("ttft_seconds")
+    if ttft_s is None:
+        ttft_s = x_dspark.get("prefill_seconds")
+    prompt_ms = (ttft_s * 1000.0) if isinstance(ttft_s, (int, float)) else None
+    prefill_tok_s = x_dspark.get("prefill_tokens_per_sec")
+    if prefill_tok_s is None:
+        prefill_s = x_dspark.get("prefill_seconds")
+        if isinstance(prefill_s, (int, float)) and prefill_s > 0:
+            prefill_tok_s = prompt_n / prefill_s
+    peak_mem_gb = None
+    draft_acceptance = None
+    if isinstance(metrics, dict):
+        peak_bytes = (metrics.get("memory") or {}).get("peak_bytes")
+        if isinstance(peak_bytes, (int, float)) and peak_bytes > 0:
+            peak_mem_gb = peak_bytes / 1e9
+        acc = (metrics.get("rounds") or {}).get("draft_acceptance")
+        if isinstance(acc, (int, float)):
+            draft_acceptance = acc
+    return {
+        "prompt_n": prompt_n,
+        "cache_n": cached_tokens,
+        "predicted_n": x_dspark.get("completion_tokens"),
+        "prompt_ms": prompt_ms,
+        "prompt_per_second": prefill_tok_s,
+        "predicted_per_second": (
+            x_dspark.get("decode_tokens_per_sec") or x_dspark.get("tokens_per_sec")
+        ),
+        "peak_memory": peak_mem_gb,
+        "draft_kind": x_dspark.get("mode"),
+        "accept_len": x_dspark.get("accept_len"),
+        "target_forwards": x_dspark.get("target_forwards"),
+        "draft_acceptance_rate": draft_acceptance,
+    }
+
+
+def extract_draft_stats_from_timings(t):
+    """Extracts `(draft_acceptance_rate, mean_accept_len)` from either an `mlx_vlm`
+    `GenerationTimings` dict (`draft_n`, `draft_n_accepted`, `draft_rounds`) or a
+    normalized `mlx-dspark` timings dict (`draft_acceptance_rate`, `accept_len`)."""
+    if not isinstance(t, dict):
+        return None, None
+    acc_rate = t.get("draft_acceptance_rate")
+    mean_accept = t.get("accept_len")
+    draft_n = t.get("draft_n")
+    draft_n_accepted = t.get("draft_n_accepted")
+    draft_rounds = t.get("draft_rounds")
+    if acc_rate is None and isinstance(draft_n, int) and draft_n > 0:
+        acc_rate = (draft_n_accepted or 0) / draft_n
+    if mean_accept is None and isinstance(draft_rounds, int) and draft_rounds > 0:
+        mean_accept = 1.0 + (draft_n_accepted or 0) / draft_rounds
+    return acc_rate, mean_accept
+
+
 # --- HTTP helpers --------------------------------------------------------------------
 
 def _http_json(method, url, body=None, timeout=180):
@@ -422,17 +515,20 @@ def _http_json(method, url, body=None, timeout=180):
         return False, None, None, str(e)
 
 
+def get_metrics(host, port, timeout=5):
+    ok, _status, parsed, _err = _http_json("GET", f"http://{host}:{port}/metrics", timeout=timeout)
+    return parsed if ok and isinstance(parsed, dict) else None
+
+
 def chat_completion(host, port, model_hf_id, content, max_tokens=50, temperature=0.0,
                      tools=None, timeout=180):
     """Sends one /v1/chat/completions request and returns a flat result dict:
     ok, http_code, error, text, finish_reason, usage, timings (mlx_vlm's own
     per-request GenerationTimings block -- prompt_n/cache_n/predicted_n/prompt_ms/
     prompt_per_second/predicted_ms/predicted_per_second/peak_memory/draft_* -- see
-    mlx_vlm/server/schemas.py's GenerationTimings; this is the SAME field
-    save_calibration_snapshot's /metrics polling approximates after the fact, read
-    here directly off the response instead so concurrent requests (Tier 4) can never
-    cross-contaminate each other's numbers the way polling a shared /metrics endpoint
-    would)."""
+    mlx_vlm/server/schemas.py's GenerationTimings, or a normalized timings dict
+    synthesized from mlx-dspark's `x_mlx_dspark` block when talking to an
+    `mlx-dspark serve` backend)."""
     body = {
         "model": model_hf_id,
         "messages": [{"role": "user", "content": content}],
@@ -453,6 +549,9 @@ def chat_completion(host, port, model_hf_id, content, max_tokens=50, temperature
             out["text"] = (choices[0].get("message") or {}).get("content")
         out["usage"] = parsed.get("usage")
         out["timings"] = parsed.get("timings")
+        if out["timings"] is None and isinstance(parsed.get("x_mlx_dspark"), dict):
+            metrics = get_metrics(host, port)
+            out["timings"] = normalize_dspark_timings(parsed["x_mlx_dspark"], metrics=metrics)
     return out
 
 
@@ -496,13 +595,13 @@ def wait_for_health(host, port, pid, timeout_s=600):
     return False, time.monotonic() - start
 
 
-# --- Server process management (mlx_vlm backend only) --------------------------------
+# --- Server process management (mlx_vlm and mlx-dspark backends) ---------------------
 
 # Every live SweepServer registers itself here on start() and deregisters on stop() --
 # lets _handle_termination_signal below tear down whatever's currently running
-# instead of leaking an orphaned mlx_vlm.server process. Confirmed as a REAL (not
-# hypothetical) risk this session: an external kill of this script mid-sweep (a shell
-# timeout, in that instance) left the question of whether the in-flight server
+# instead of leaking an orphaned mlx_vlm.server or mlx-dspark process. Confirmed as a
+# REAL (not hypothetical) risk this session: an external kill of this script mid-sweep
+# (a shell timeout, in that instance) left the question of whether the in-flight server
 # subprocess would be reaped genuinely unclear -- Python's subprocess.Popen does NOT
 # kill children automatically when its own parent is killed unless the parent
 # explicitly handles the signal, matching exactly why start_mlx_server.sh's own
@@ -522,17 +621,16 @@ signal.signal(signal.SIGTERM, _handle_termination_signal)
 
 
 class SweepServer:
-    """Launches/tears down one `mlx_vlm.server` subprocess with a specific
-    (prefill_step_size, kv_bits, max_num_seqs) combination -- the same flag shape as
-    start_mlx_server.sh's own non-dspark launch branch (same APC env vars, same
-    --kv-group-size/--quantized-kv-start/--kv-quant-scheme uniform trio when kv_bits is
-    set), deliberately reimplemented here rather than imported/shelled-out-to from that
-    script, since this needs direct control over relaunching with different flags
-    repeatedly in a tight loop that script was never designed for."""
+    """Launches/tears down one `mlx_vlm.server` (with optional `--draft-model` /
+    `--draft-kind` / `--draft-block-size`) or `mlx-dspark serve` subprocess with a
+    specific `(prefill_step_size, kv_bits, max_num_seqs)` combination -- the exact same
+    flag shape as `start_mlx_server.sh`'s launch branches, deliberately reimplemented
+    here rather than imported/shelled-out-to from that script, since this needs direct
+    control over relaunching with different flags repeatedly in a tight loop."""
 
     def __init__(self, mlx_model_hf, host, port, context_window, log_path,
                  prefill_step_size=ma.DEFAULT_PREFILL_STEP_SIZE, kv_bits=None, max_num_seqs=4,
-                 apc_num_blocks=ma.MLX_VLM_APC_NUM_BLOCKS):
+                 apc_num_blocks=ma.MLX_VLM_APC_NUM_BLOCKS, serving=None):
         self.mlx_model_hf = mlx_model_hf
         self.host = host
         self.port = port
@@ -542,10 +640,33 @@ class SweepServer:
         self.kv_bits = kv_bits
         self.max_num_seqs = max_num_seqs
         self.apc_num_blocks = apc_num_blocks if apc_num_blocks is not None else ma.MLX_VLM_APC_NUM_BLOCKS
+        self.serving = dict(serving) if isinstance(serving, dict) else {}
         self.proc = None
         self.load_time_s = None
 
-    def start(self, timeout_s=600):
+    def build_command_args(self):
+        backend = self.serving.get("backend")
+        if backend == "mlx_dspark":
+            mode = self.serving.get("mode") or "dflash"
+            args = [
+                MLX_DSPARK, "serve",
+                "--model", self.mlx_model_hf,
+                "--host", self.host,
+                "--port", str(self.port),
+                "--context-window", str(self.context_window),
+                "--mode", str(mode),
+            ]
+            drafter = self.serving.get("drafter")
+            if drafter:
+                args += ["--drafter", str(drafter)]
+            if self.kv_bits:
+                args += ["--kv-bits", str(self.kv_bits)]
+            else:
+                args += ["--kv-bits", "0"]
+                if self.max_num_seqs and self.max_num_seqs > 1:
+                    args += ["--max-batch", str(self.max_num_seqs)]
+            return args
+
         args = [
             MLX_PYTHON, "-m", "mlx_vlm.server",
             "--model", self.mlx_model_hf,
@@ -562,6 +683,19 @@ class SweepServer:
                 "--quantized-kv-start", "0",
                 "--kv-quant-scheme", "uniform",
             ]
+        draft_model = self.serving.get("draft_model")
+        if draft_model:
+            args += ["--draft-model", str(draft_model)]
+            draft_kind = self.serving.get("draft_kind")
+            if draft_kind:
+                args += ["--draft-kind", str(draft_kind)]
+            draft_block_size = self.serving.get("draft_block_size")
+            if draft_block_size is not None and draft_block_size != "":
+                args += ["--draft-block-size", str(draft_block_size)]
+        return args
+
+    def start(self, timeout_s=600):
+        args = self.build_command_args()
         os.makedirs(APC_DISK_PATH, exist_ok=True)
         env = dict(os.environ)
         env["HF_HOME"] = HF_HOME
@@ -721,14 +855,20 @@ def run_measured_requests(host, port, model_hf_id, prompt_fn, context_tokens, ma
             log(f"{tag}: run {i} failed/no timings (http={result['http_code']} err={result['error']})")
             continue
         t = result["timings"]
-        runs.append({
+        acc_rate, mean_accept = extract_draft_stats_from_timings(t)
+        run_rec = {
             "ttft_s": (t.get("prompt_ms") or 0) / 1000.0,
             "prompt_tok_s": t.get("prompt_per_second"),
             "decode_tok_s": t.get("predicted_per_second"),
             "peak_memory_gb": t.get("peak_memory"),
             "prompt_n": t.get("prompt_n"),
             "cache_n": t.get("cache_n"),
-        })
+        }
+        if isinstance(acc_rate, (int, float)):
+            run_rec["draft_acceptance_rate"] = acc_rate
+        if isinstance(mean_accept, (int, float)):
+            run_rec["mean_accept_len"] = mean_accept
+        runs.append(run_rec)
     if not runs:
         return None, runs
     avg = {
@@ -739,6 +879,12 @@ def run_measured_requests(host, port, model_hf_id, prompt_fn, context_tokens, ma
         "peak_memory_gb": average_runs(runs, "peak_memory_gb"),
         "kv_bits": kv_bits,
     }
+    avg_acc = average_runs(runs, "draft_acceptance_rate")
+    if avg_acc is not None:
+        avg["draft_acceptance_rate"] = round(avg_acc, 4)
+    avg_accept_len = average_runs(runs, "mean_accept_len")
+    if avg_accept_len is not None:
+        avg["mean_accept_len"] = round(avg_accept_len, 3)
     return avg, runs
 
 
@@ -763,6 +909,7 @@ def run_prefill_step_size_tier(model_entry, host, port, step_sizes, sweep_contex
             log_path=os.path.join(log_dir, f"step{step_size}.log"),
             prefill_step_size=step_size, kv_bits=ma.MEMORY_CONSTRAINED_KV_BITS,
             max_num_seqs=max_num_seqs, apc_num_blocks=apc_num_blocks,
+            serving=model_entry.get("serving"),
         )
         if not server.start():
             for d in depths:
@@ -832,7 +979,7 @@ def run_decode_vs_context_and_kv_bits_tier(model_entry, host, port, context_dept
             model_entry["huggingface"], host, port, context_window=deepest + 4096,
             log_path=os.path.join(log_dir, f"depth_{label}.log"),
             prefill_step_size=best_step_size, kv_bits=kv_bits, max_num_seqs=max_num_seqs,
-            apc_num_blocks=apc_num_blocks,
+            apc_num_blocks=apc_num_blocks, serving=model_entry.get("serving"),
         )
         if not server.start():
             for depth in context_depths:
@@ -848,7 +995,6 @@ def run_decode_vs_context_and_kv_bits_tier(model_entry, host, port, context_dept
             if kv_bits is None:
                 results["tool_calling_reverified"] = run_tool_calling_tier(model_entry, host, port)
                 results["multimodal_speed"] = run_multimodal_tier(model_entry, host, port)
-                results["speculative_decoding"] = run_drafter_tier(model_entry)
 
             shallowest = min(context_depths)
             for depth in context_depths:
@@ -872,6 +1018,9 @@ def run_decode_vs_context_and_kv_bits_tier(model_entry, host, port, context_dept
                         {"context_tokens": depth, "kv_bits": kv_bits, "error": "no_successful_measured_runs"})
 
             if kv_bits is None:
+                results["speculative_decoding"] = run_drafter_tier(
+                    model_entry, results["decode_speed_vs_context"],
+                )
                 results["apc_cache_test"] = run_apc_tier(
                     model_entry, host, port, prefix_tokens=DEFAULT_APC_PREFIX_TOKENS,
                     kv_bits_quantized=False,
@@ -995,23 +1144,42 @@ def run_multimodal_tier(model_entry, host, port):
     }
 
 
-def run_drafter_tier(model_entry):
-    """Tier 3: acceptance-rate-across-context-depths would require relaunching with
-    --draft-model attached (another server-launch-time axis, same category as
-    prefill-step-size) -- out of scope for this pass given the launch-count budget
-    already spent on the step-size/kv-bits axes above. Records whether a drafter is
-    even configured for this entry so the sweep file is honest about what it did and
-    didn't measure, rather than silently omitting the field."""
+def run_drafter_tier(model_entry, decode_speed_vs_context=None):
+    """Tier 3: records speculative-decoding metrics across context depths when a drafter
+    (`serving.draft_model` on `mlx_vlm` or `serving.drafter` on `mlx_dspark`) is
+    attached to `model_entry`. Summarizes the unquantized (`kv_bits is None`)
+    `decode_speed_vs_context` runs (`decode_tok_s`, `mean_accept_len`,
+    `draft_acceptance_rate`) by context depth."""
     serving = model_entry.get("serving") or {}
     draft_model = serving.get("draft_model") or serving.get("drafter")
     if not draft_model:
         return {"drafter_attached": False}
+    by_context = []
+    for d in (decode_speed_vs_context or []):
+        if d.get("kv_bits") is not None or not isinstance(d.get("decode_tok_s"), (int, float)):
+            continue
+        point = {
+            "context_tokens": d.get("context_tokens"),
+            "decode_tok_s": d.get("decode_tok_s"),
+        }
+        if isinstance(d.get("mean_accept_len"), (int, float)):
+            point["mean_accept_len"] = d["mean_accept_len"]
+        if isinstance(d.get("draft_acceptance_rate"), (int, float)):
+            point["draft_acceptance_rate"] = d["draft_acceptance_rate"]
+        by_context.append(point)
+    if by_context:
+        return {
+            "drafter_attached": True,
+            "drafter": draft_model,
+            "backend": serving.get("backend") or "mlx_vlm",
+            "mode": serving.get("mode") or serving.get("draft_kind") or "default",
+            "tested_this_sweep": True,
+            "by_context": by_context,
+        }
     return {
         "drafter_attached": True, "drafter": draft_model,
         "tested_this_sweep": False,
-        "reason": "acceptance-rate-vs-context-depth needs a separate --draft-model "
-                  "relaunch -- not yet wired into this pass, see models.json's own "
-                  "serving.measured_speedup for the existing single-point number",
+        "reason": "no usable unquantized decode_speed_vs_context runs recorded in this sweep",
     }
 
 
@@ -1108,13 +1276,84 @@ def run_thermal_tier(model_entry, host, port, num_requests):
     }
 
 
-# --- Orchestration --------------------------------------------------------------------
+# --- Orchestration & Batch discovery -------------------------------------------------
+
+def load_catalog_models(models_path=None):
+    with open(models_path or ma.MODELS_JSON) as f:
+        catalog = json.load(f)
+    return catalog.get("models") or []
+
 
 def load_model_entry(model_id):
-    with open(ma.MODELS_JSON) as f:
-        catalog = json.load(f)
-    entry = next((m for m in catalog["models"] if m["id"] == model_id), None)
-    return entry
+    models = load_catalog_models()
+    return next((m for m in models if m["id"] == model_id), None)
+
+
+def is_repo_cached(repo_id, hf_home=None):
+    """Returns True when `repo_id` has a downloaded snapshot with `config.json`
+    under `<hf_home>/hub/models--<org>--<name>/snapshots/*/config.json` (same
+    local-cache check as `start_mlx_server.sh`)."""
+    if not repo_id or not isinstance(repo_id, str):
+        return False
+    base = hf_home or HF_HOME
+    repo_dir = f"models--{repo_id.replace('/', '--')}"
+    pattern = os.path.join(base, "hub", repo_dir, "snapshots", "*", "config.json")
+    return bool(glob.glob(pattern))
+
+
+def is_model_cached(model_entry, hf_home=None):
+    """Returns True when the model's primary HuggingFace repo (and its drafter repo,
+    if configured in `serving.drafter` or `serving.draft_model`) is cached locally."""
+    if not isinstance(model_entry, dict):
+        return False
+    hf_id = model_entry.get("huggingface")
+    if not is_repo_cached(hf_id, hf_home=hf_home):
+        return False
+    serving = model_entry.get("serving") or {}
+    drafter = serving.get("drafter") or serving.get("draft_model")
+    if drafter and not is_repo_cached(drafter, hf_home=hf_home):
+        return False
+    return True
+
+
+def select_cached_models(catalog_models, chip_name, hf_home=None,
+                         untested_only=False, force=False, sweeps_dir=None):
+    """Filters `catalog_models` to locally cached entries for batch sweeping.
+    - When `untested_only=True`, only includes models with `status != "tested"`.
+    - When `force=False`, skips models that already have a `.sweep.json` file for
+      `chip_name` in `sweeps_dir` (defaults to `SWEEP_DIR`)."""
+    selected = []
+    target_sweeps_dir = sweeps_dir or SWEEP_DIR
+    safe_chip = re.sub(r"[^A-Za-z0-9._-]+", "_", chip_name)
+    for m in catalog_models or []:
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        if untested_only and m.get("status") == "tested":
+            continue
+        if not is_model_cached(m, hf_home=hf_home):
+            continue
+        if not force:
+            safe_model = re.sub(r"[^A-Za-z0-9._-]+", "_", m["id"])
+            existing = os.path.join(target_sweeps_dir, f"{safe_chip}__{safe_model}.sweep.json")
+            if os.path.isfile(existing):
+                continue
+        selected.append(m)
+    return selected
+
+
+def maybe_sync_verified():
+    """Calls `add_model.sync_verified_results(write=True)` to ingest newly produced
+    sweep and verification artifacts into `models.json`."""
+    import add_model
+    updated = add_model.sync_verified_results(write=True)
+    if updated:
+        log(f"--sync-verified updated {len(updated)} catalog entry/entries in {ma.MODELS_JSON}:")
+        for mid, fields, promoted in updated:
+            status_tag = " [PROMOTED -> tested]" if promoted else ""
+            log(f"  - {mid}: {', '.join(fields)}{status_tag}")
+    else:
+        log(f"--sync-verified: {ma.MODELS_JSON} is already up to date with local verification/sweep files.")
+    return updated
 
 
 def read_load_time_hint():
@@ -1145,12 +1384,12 @@ def run_sweep(model_id, host=DEFAULT_HOST, port=DEFAULT_PORT,
     if model_entry is None:
         log(f"ERROR: unknown model id '{model_id}' in {ma.MODELS_JSON}")
         return 2
-    backend = (model_entry.get("serving") or {}).get("backend")
-    if backend == "mlx_dspark":
-        log(f"ERROR: '{model_id}' is served via mlx-dspark, which has no "
-            "--prefill-step-size equivalent to sweep (see this script's module "
-            "docstring) — this harness only covers the mlx_vlm backend.")
-        return 2
+    serving = model_entry.get("serving") or {}
+    backend = serving.get("backend")
+    if backend == "mlx_dspark" and "prefill_step_size" not in skip_tiers:
+        log(f"Note: '{model_id}' uses backend=mlx_dspark (no --prefill-step-size flag) — "
+            "automatically skipping prefill_step_size tier.")
+        skip_tiers.add("prefill_step_size")
 
     chip_name, gpu_cores, total_ram_gb = ma.get_chip_info()
     if chip_name is None or total_ram_gb is None:
@@ -1177,6 +1416,11 @@ def run_sweep(model_id, host=DEFAULT_HOST, port=DEFAULT_PORT,
                             re.sub(r"[^A-Za-z0-9._-]+", "_", model_id))
     os.makedirs(log_dir, exist_ok=True)
 
+    catalog_health = {"hf_repo_resolves": check_hf_repo_resolves(model_entry["huggingface"])}
+    drafter_repo = serving.get("drafter") or serving.get("draft_model")
+    if drafter_repo:
+        catalog_health["drafter_repo_resolves"] = check_hf_repo_resolves(drafter_repo)
+
     data = {
         "schema_version": 1,
         "model_id": model_id,
@@ -1184,7 +1428,7 @@ def run_sweep(model_id, host=DEFAULT_HOST, port=DEFAULT_PORT,
         "total_ram_gb": total_ram_gb,
         "swept_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "load": {"load_time_s": read_load_time_hint()},
-        "catalog_health": {"hf_repo_resolves": check_hf_repo_resolves(model_entry["huggingface"])},
+        "catalog_health": catalog_health,
     }
     write_sweep_json(out_path, data)
     log(f"Sweep file: {out_path}")
@@ -1240,7 +1484,7 @@ def run_sweep(model_id, host=DEFAULT_HOST, port=DEFAULT_PORT,
             model_entry["huggingface"], host, port, context_window=concurrency_context + 2048,
             log_path=os.path.join(log_dir, "tier4.log"),
             prefill_step_size=best_step_size, kv_bits=None, max_num_seqs=max(concurrency_levels),
-            apc_num_blocks=apc_num_blocks,
+            apc_num_blocks=apc_num_blocks, serving=serving,
         )
         if server.start():
             try:
@@ -1276,16 +1520,57 @@ def run_sweep(model_id, host=DEFAULT_HOST, port=DEFAULT_PORT,
             f"prefill_step_size_by_context={derived.get('prefill_step_size_by_context')} "
             f"kv_bits_safe_at_long_context={derived['kv_bits_safe_at_long_context']}")
     else:
-        log("Could not derive lightweight calibration fields — step-size tier "
-            "produced no usable measurement (every launch failed?).")
+        log("Could not derive lightweight calibration fields — neither step-size tier "
+            "nor decode_speed_vs_context produced a usable measurement.")
 
     log(f"Done. Full results: {out_path}")
     return 0
 
 
+def run_batch_sweep(untested_only=False, force=False, sync_verified=False, **sweep_kwargs):
+    chip_name, _gpu_cores, total_ram_gb = ma.get_chip_info()
+    if chip_name is None or total_ram_gb is None:
+        log("ERROR: could not detect chip/RAM via system_profiler.")
+        return 2
+    catalog_models = load_catalog_models()
+    candidates = select_cached_models(
+        catalog_models, chip_name, hf_home=HF_HOME,
+        untested_only=untested_only, force=force, sweeps_dir=SWEEP_DIR,
+    )
+    mode_label = "untested cached" if untested_only else "all cached"
+    if not candidates:
+        log(f"No {mode_label} models to sweep on '{chip_name}' "
+            f"(use --force to re-sweep models that already have a .sweep.json).")
+        if sync_verified:
+            maybe_sync_verified()
+        return 0
+    log(f"Batch sweep ({mode_label}): {len(candidates)} model(s) queued on '{chip_name}': "
+        f"{', '.join(m['id'] for m in candidates)}")
+    failures = 0
+    for idx, m in enumerate(candidates, 1):
+        mid = m["id"]
+        log(f"=== [{idx}/{len(candidates)}] Sweeping '{mid}' ===")
+        rc = run_sweep(mid, **sweep_kwargs)
+        if rc != 0:
+            log(f"WARNING: sweep for '{mid}' exited with status {rc}; continuing batch.")
+            failures += 1
+    if sync_verified:
+        maybe_sync_verified()
+    return 1 if failures else 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--model-id", required=True, help="models.json catalog id, not the HF repo")
+    parser.add_argument("--model-id", default=None, help="models.json catalog id, not the HF repo")
+    parser.add_argument("--all-cached", action="store_true",
+                        help="sweep all locally cached catalog models not yet swept on this chip")
+    parser.add_argument("--untested-cached", action="store_true",
+                        help="sweep locally cached catalog models with status != 'tested' "
+                             "not yet swept on this chip")
+    parser.add_argument("--force", action="store_true",
+                        help="in batch mode, re-sweep models even if a .sweep.json already exists")
+    parser.add_argument("--sync-verified", action="store_true",
+                        help="run add_model.py --sync-verified after sweeping to update models.json")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--step-sizes", default=",".join(map(str, DEFAULT_STEP_SIZES)))
@@ -1302,18 +1587,35 @@ def main():
     parser.add_argument("--output", default=None, help="override the sweep JSON output path")
     args = parser.parse_args()
 
-    return run_sweep(
-        args.model_id, host=args.host, port=args.port,
-        step_sizes=[int(x) for x in args.step_sizes.split(",") if x],
-        context_depths=[int(x) for x in args.context_depths.split(",") if x],
-        concurrency_levels=[int(x) for x in args.concurrency_levels.split(",") if x],
-        thermal_requests=args.thermal_requests,
-        apc_prefix_tokens=args.apc_prefix_tokens,
-        max_num_seqs=args.max_num_seqs,
-        skip_tiers=[t for t in args.skip_tiers.split(",") if t],
-        output_path=args.output,
-        step_size_depths=[int(x) for x in args.step_size_depths.split(",") if x] or None,
-    )
+    if not args.model_id and not args.all_cached and not args.untested_cached:
+        parser.error("one of --model-id, --all-cached, or --untested-cached is required")
+
+    sweep_kwargs = {
+        "host": args.host,
+        "port": args.port,
+        "step_sizes": [int(x) for x in args.step_sizes.split(",") if x],
+        "context_depths": [int(x) for x in args.context_depths.split(",") if x],
+        "concurrency_levels": [int(x) for x in args.concurrency_levels.split(",") if x],
+        "thermal_requests": args.thermal_requests,
+        "apc_prefix_tokens": args.apc_prefix_tokens,
+        "max_num_seqs": args.max_num_seqs,
+        "skip_tiers": [t for t in args.skip_tiers.split(",") if t],
+        "output_path": args.output,
+        "step_size_depths": [int(x) for x in args.step_size_depths.split(",") if x] or None,
+    }
+
+    if args.all_cached or args.untested_cached:
+        return run_batch_sweep(
+            untested_only=bool(args.untested_cached and not args.all_cached),
+            force=args.force,
+            sync_verified=args.sync_verified,
+            **sweep_kwargs,
+        )
+
+    rc = run_sweep(args.model_id, **sweep_kwargs)
+    if rc == 0 and args.sync_verified:
+        maybe_sync_verified()
+    return rc
 
 
 if __name__ == "__main__":

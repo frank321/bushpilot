@@ -1629,6 +1629,21 @@ against the real catalog to confirm the new flag reaches the final recommendatio
 
 - **`add_model.py`:** Added `sync_verified_results()` and CLI flags `--sync-verified`, `--verification-file`, and `--sweeps-dir` (`--write` to update `models.json` in place, dry-run JSON summary by default). Ingests live admission-gate verdicts from `docs/mlx_verification_results.json` (`verify_max_kv_size.sh`) and sweep measurements from `~/.bushpilot/calibration/sweeps/*.sweep.json` (`derived_speed_correction_factor`, `tool_calling_reverified`), and promotes `"status": "untested"` to `"tested"` (stripping the ` — untested` tagline suffix) only when both `verification.verdict == "SAFE"` and `tool_calling.verdict` is in `("SUPPORTED", "NOT_SUPPORTED")`.
 
+## Draft-model / `mlx-dspark` sweep support & batch cached-model mode in `sweep_model.py` (2026-10-20)
+
+### 1. Draft-model (`mlx_vlm --draft-model`) and `mlx-dspark serve` support in `sweep_model.py`
+
+- **`SweepServer.build_command_args()`:** Added full launch support for both `mlx_vlm.server` drafter entries (`--draft-model`, `--draft-kind`, `--draft-block-size`) and `mlx-dspark serve` entries (`--mode`, `--drafter`, `--context-window`, `--kv-bits 0` + `--max-batch` when unquantized vs. `--kv-bits 8` when quantized).
+- **Timings & draft-acceptance normalization:** Added `normalize_dspark_timings(x_dspark, metrics=None)`, `extract_draft_stats_from_timings(t)`, and `get_metrics(host, port)` so `chat_completion()` normalizes `x_mlx_dspark` responses into `mlx_vlm`-compatible `timings` dicts and `run_measured_requests()` averages `draft_acceptance_rate` and `mean_accept_len`.
+- **`run_drafter_tier(model_entry, decode_speed_vs_context=None)`:** Summarizes `decode_tok_s`, `mean_accept_len`, and `draft_acceptance_rate` across unquantized context depths (`tested_this_sweep: True`, `by_context: [...]`) instead of returning a static stub.
+- **Calibration & `speed_correction_factor` guards:** `run_sweep()` automatically skips `prefill_step_size` when `serving.backend == "mlx_dspark"` (which has no `--prefill-step-size` launch flag), `derive_lightweight_calibration_fields()` falls back to the deepest unquantized `decode_speed_vs_context` point when `prefill_step_size_sweep` is skipped/empty, and `derive_speed_correction_factor()` returns `None` when a drafter (`serving.drafter` or `serving.draft_model`) is attached so speculative decoding speedup isn't conflated with the base architecture's bandwidth efficiency.
+
+### 2. Batch / cached-model mode in `sweep_model.py` (`--all-cached`, `--untested-cached`, `--force`, `--sync-verified`)
+
+- **Cache & sweep discovery:** Added `is_repo_cached`, `is_model_cached` (checking both the primary HF repo and any configured drafter repo under `$HF_HOME/hub`), `select_cached_models`, `maybe_sync_verified`, and `run_batch_sweep`.
+- **CLI flags:** Added `--all-cached`, `--untested-cached`, `--force` (re-sweep even when `<chip>__<model_id>.sweep.json` already exists), and `--sync-verified` (automatically invokes `add_model.sync_verified_results(write=True)` after sweeping to update `models.json`).
+
+
 
 
 
