@@ -598,20 +598,18 @@
       <li><strong>Requests:</strong> completed/failed/in-flight counts, lifetime token totals, decode speed (models using speculative decoding show a different stats section — see Feature 7 below)</li>
       <li><strong>System:</strong> free memory %, memory-pressure level, and the server process's own RSS</li>
       <li><strong>Connected tools:</strong> which client processes currently hold a connection to the server</li>
-      <li><strong>Controls:</strong> quit with <code class="inline">q</code> or <code class="inline">Ctrl-C</code></li>
+      <li><strong>Controls:</strong> press <code class="inline">m</code> to hot-swap the active model live without disconnecting tools, or quit with <code class="inline">q</code> / <code class="inline">Ctrl-C</code></li>
     </ul>
 
-    <h3>6. Multi-Tool Attachment</h3>
+    <h3>6. Multi-Tool Attachment &amp; Live Model Hot-Swap</h3>
     <p>
-      Start the MLX server once in Terminal 1, then attach multiple coding tools to the same running model:
+      Start the MLX server once in Terminal 1 (or just run <code class="inline">./launch_tool.sh</code> on its own to auto-split a terminal pane in iTerm2, <code class="inline">tmux</code>, or Terminal.app), then attach multiple coding tools to the same running model:
     </p>
     <pre>Terminal 1: ./start_mlx_server.sh
-Terminal 2: ./launch_tool.sh  # Claude Code
-Terminal 3: ./launch_tool.sh  # OpenCode
-Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
+Terminal 2: ./launch_tool.sh  # Claude Code / OpenCode / Aider / Cline / Pi
+Terminal 3: ./launch_tool.sh  # Another tool or session</pre>
     <p>
-      All tools hit the same local model over the same local port. The dashboard's "Connected" line lists every
-      tool process currently attached, so you can see at a glance who's using the server.
+      All tools hit the same local router proxy over the same local port. Press <code class="inline">m</code> on the dashboard (or <code class="inline">Tab</code>-select multiple models in the picker and switch <code class="inline">[BushPilot]</code> models directly inside your coding tool) to hot-swap the underlying MLX model in place without restarting any attached tool.
     </p>
 
     <h3>7. Speculative Decoding — Real Measured Speedups, Where Available</h3>
@@ -695,8 +693,8 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
         <p>For dependency management. Install at <a href="https://brew.sh">brew.sh</a></p>
       </div>
       <div class="feature-card">
-        <h4>🛠️ Claude Code or OpenCode</h4>
-        <p>At least one installed and configured. Both can attach to the same local model.</p>
+        <h4>🛠️ Coding Tool</h4>
+        <p>Claude Code, OpenCode, Aider, Cline, or Pi installed. Any combination can attach to the same local model.</p>
       </div>
       <div class="feature-card">
         <h4>📡 Internet (first run only)</h4>
@@ -719,6 +717,9 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
     <ul>
       <li><strong>Claude Code</strong></li>
       <li><strong>OpenCode</strong></li>
+      <li><strong>Aider</strong></li>
+      <li><strong>Cline</strong></li>
+      <li><strong>Pi</strong></li>
     </ul>
 
     <h3>Any other tool</h3>
@@ -754,8 +755,13 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
         <p>Get <code class="inline">bushpilot.zip</code> from above and unzip it. Open a terminal in the resulting folder.</p>
       </li>
       <li>
-        <strong>Terminal 1 — Start the server</strong>
-        <div class="terminal-label">Terminal 1</div>
+        <strong>Start &amp; attach (single terminal or two terminals)</strong>
+        <div class="terminal-label">Single terminal (auto-splits iTerm2, tmux, or Terminal.app)</div>
+        <pre>./launch_tool.sh</pre>
+        <p>
+          If the server isn't running yet, <code class="inline">launch_tool.sh</code> offers to split a terminal pane/window to run <code class="inline">./start_mlx_server.sh</code>, waits for your chosen model to become healthy, and then launches your coding tool in the original terminal. Or run them in two terminals manually:
+        </p>
+        <div class="terminal-label">Terminal 1 — Start the server</div>
         <pre>./start_mlx_server.sh</pre>
         <p>
           This script:
@@ -763,22 +769,22 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
         <ul style="font-size: 14px;">
           <li>Detects your Mac's chip and currently-free memory</li>
           <li>Shows models that fit safely in your available memory, with speed estimates</li>
-          <li>You pick one from the interactive menu</li>
+          <li>You pick one (or <code class="inline">Tab</code>-select multiple models in <code class="inline">fzf</code> for in-tool model switching)</li>
           <li>Downloads the model if needed (~2–50 min depending on size and connection)</li>
-          <li>Starts the MLX server and displays a live dashboard</li>
+          <li>Starts the MLX server + hot-swap router and displays a live dashboard (press <code class="inline">m</code> anytime to switch models)</li>
         </ul>
       </li>
       <li>
-        <strong>Terminal 2+ — Attach Claude Code or OpenCode</strong>
+        <strong>Terminal 2+ — Attach Claude Code, OpenCode, Aider, Cline, or Pi</strong>
         <div class="terminal-label">Terminal 2</div>
         <pre>./launch_tool.sh</pre>
         <p>
-          Pick Claude Code or OpenCode from the menu. The launcher:
+          Pick your coding tool from the menu. The launcher:
         </p>
         <ul style="font-size: 14px;">
           <li>Verifies the MLX server from Terminal 1 is healthy and reachable</li>
           <li>Launches your chosen tool, configured to use the local model</li>
-          <li>Open more terminals and run <code class="inline">./launch_tool.sh</code> again to attach another instance of the same tool</li>
+          <li>Open more terminals and run <code class="inline">./launch_tool.sh</code> again to attach another instance of the same or a different tool</li>
         </ul>
       </li>
       <li>
@@ -845,7 +851,11 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
         </tr>
         <tr>
           <td><code class="inline">launch_tool.sh</code></td>
-          <td>Launches Claude Code or OpenCode configured to use the local model</td>
+          <td>Launches Claude Code, OpenCode, Aider, Cline, or Pi configured to use the local model (and auto-splits a terminal pane to start the server if needed)</td>
+        </tr>
+        <tr>
+          <td><code class="inline">bushpilot/router.py</code></td>
+          <td>Lightweight HTTP router proxy on port 38472 that holds client connections open while hot-swapping the internal MLX backend (port 38473) on <code class="inline">m</code> or in-tool <code class="inline">[BushPilot]</code> model selection</td>
         </tr>
         <tr>
           <td><code class="inline">MLX server</code> (Python)</td>
@@ -1113,7 +1123,7 @@ Terminal 4: ./launch_tool.sh  # Another Claude Code session</pre>
   <footer>
     <p><strong>Bushpilot</strong> — Run Claude Code & OpenCode on your Mac</p>
     <p><a href="https://github.com/frank321/bushpilot">View on GitHub</a> • Built for on-device AI coding</p>
-    <p style="margin-top: 16px; opacity: 0.7;">Last updated: 2026-09-29</p>
+    <p style="margin-top: 16px; opacity: 0.7;">Last updated: 2026-10-19</p>
   </footer>
 
 </div>

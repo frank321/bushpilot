@@ -10,6 +10,16 @@ anymore — see `MLX_SERVER_USAGE.md` for the full guide. This doc is the fast p
 
 ## First Time Setup
 
+**Fastest way (single terminal):**
+
+```bash
+./launch_tool.sh
+```
+
+If no server is running yet, `launch_tool.sh` offers to start one for you — automatically splitting a side pane/tab in **iTerm2**, **`tmux`**, or **macOS Terminal.app** to run `start_mlx_server.sh`, waiting until the model you pick is healthy, and then launching your chosen coding tool right in your original terminal.
+
+**Or in two terminals manually:**
+
 **Terminal 1** — start the model server and leave it running:
 
 ```bash
@@ -17,8 +27,10 @@ anymore — see `MLX_SERVER_USAGE.md` for the full guide. This doc is the fast p
 ```
 
 This detects your free memory, shows a picker of models that actually fit (with a
-computed context size and estimated tok/s for each), downloads the model if needed,
-starts `mlx_vlm.server`, and takes over the terminal with a live dashboard.
+computed context size and estimated tok/s for each — use **`Tab`** in `fzf` to select
+multiple models if you want to switch between them from inside your coding tool),
+downloads the model if needed, starts the MLX backend + hot-swap router proxy, and
+takes over the terminal with a live dashboard.
 
 **Terminal 2** — attach a coding tool:
 
@@ -31,6 +43,16 @@ healthy and has room for that tool's context preload, then launches straight int
 
 Open a **third** terminal and run `./launch_tool.sh` again with another tool to
 have multiple attached to the same running model at once.
+
+## Switching Models Live (No Tool Restart)
+
+- **From the server dashboard:** press **`m`** to open the model picker and hot-swap
+  the backend model in place while keeping your coding tool session connected.
+- **From inside your coding tool:** `Tab`-select multiple models when starting
+  `start_mlx_server.sh` (or set `"expose_all_fitting_models": true` in
+  `~/.bushpilot/config.json`) — every selected model is registered with a
+  `[BushPilot]` label in OpenCode / Pi / Claude Code so selecting another model in-tool
+  triggers an automatic background hot-swap on the next request.
 
 ## Common Scenarios
 
@@ -72,7 +94,7 @@ memory gets dangerously low.
 ├───────────────────────────────────────────────────────────────────────────────┤
 │ last error: none                                                                │
 └───────────────────────────────────────────────────────────────────────────────┘
-  Ctrl-C / q : stop everything
+  Ctrl-C / q : stop everything   m : switch model
 ```
 
 All numbers come free from `mlx_vlm.server`'s own `/metrics` and `/v1/cache/stats`

@@ -47,7 +47,9 @@ def load_calibration(chip_name, model_id):
 
 def save_calibration(chip_name, model_id, decode_tok_s, context_tokens=None,
                       ttft_s=None, peak_memory_gb=None, prefill_step_size=None,
-                      kv_bits_safe_at_long_context=None, drafter=None):
+                      kv_bits_safe_at_long_context=None, drafter=None,
+                      prefill_step_size_by_context=None,
+                      decode_tok_s_by_context=None):
     """Persists one real observation of this model actually decoding on this chip, so
     a FUTURE launch of the identical (chip, model) pair can report a measured tok/s
     instead of SPEED_CORRECTION_FACTOR's physics estimate -- whose own documented
@@ -55,8 +57,9 @@ def save_calibration(chip_name, model_id, decode_tok_s, context_tokens=None,
     docs/HARDWARE_SPEED_ESTIMATION.md §17 item #2). Called by start_mlx_server.sh at
     teardown with whatever that session's own /metrics last reported.
 
-    prefill_step_size/kv_bits_safe_at_long_context (both optional, added for the
-    per-(chip, model) sweep harness -- see docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md):
+    prefill_step_size/kv_bits_safe_at_long_context/prefill_step_size_by_context/
+    decode_tok_s_by_context (optional, added for the per-(chip, model) sweep harness --
+    see docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md):
     a condensed summary of the richer `~/.bushpilot/calibration/sweeps/*.sweep.json`
     file a full sweep run produces, written here so recommend_prefill_step_size below
     (and any future reader) never has to parse that separate, larger file just to get
@@ -65,6 +68,20 @@ def save_calibration(chip_name, model_id, decode_tok_s, context_tokens=None,
     this keeps a plain teardown-time save_calibration_snapshot() call (which never has
     sweep data) byte-identical to before this was added, and keeps load_calibration's
     existing "ignore unknown keys" contract the only thing a reader needs to rely on.
+
+    prefill_step_size_by_context: optional dict mapping context depth (int or numeric
+    string, e.g. "7200" or "16384") to either a dict {"step_size": int,
+    "peak_memory_gb": float, ...} or a plain int step_size. When provided, merges with
+    any prior prefill_step_size_by_context already stored for this (chip, model) pair
+    so sweeps run at different context depths accumulate rather than clobbering earlier
+    depths (see docs/HARDWARE_SPEED_ESTIMATION.md §20, where gemma-4-12b-it-4bit won
+    with 2048 at ~7,200 tokens and 512 at 16,384 tokens).
+
+    decode_tok_s_by_context: optional dict mapping context depth (int or numeric string,
+    e.g. "100", "4096", "16384") to a positive float decode_tok_s. When provided, merges
+    with any prior decode_tok_s_by_context already stored for this (chip, model) pair so
+    context-depth decode curves persist across sweeps (see docs/HARDWARE_SPEED_ESTIMATION.md
+    §17 item #7 / §20).
 
     drafter (optional): when provided (e.g. from start_mlx_server.sh's
     save_calibration_snapshot), records the active speculative-decoding drafter id so
@@ -83,6 +100,7 @@ def save_calibration(chip_name, model_id, decode_tok_s, context_tokens=None,
     over."""
     os.makedirs(CALIBRATION_DIR, exist_ok=True)
     path = _calibration_path(chip_name, model_id)
+    prior = load_calibration(chip_name, model_id)
     payload = {
         "decode_tok_s": decode_tok_s,
         "context_tokens": context_tokens,
@@ -96,6 +114,40 @@ def save_calibration(chip_name, model_id, decode_tok_s, context_tokens=None,
         payload["kv_bits_safe_at_long_context"] = kv_bits_safe_at_long_context
     if drafter is not None:
         payload["drafter"] = drafter
+    if isinstance(prefill_step_size_by_context, dict) and prefill_step_size_by_context:
+        merged_by_ctx = {}
+        if isinstance(prior, dict) and isinstance(prior.get("prefill_step_size_by_context"), dict):
+            for k, v in prior["prefill_step_size_by_context"].items():
+                try:
+                    if int(k) > 0:
+                        merged_by_ctx[str(int(k))] = v
+                except (TypeError, ValueError):
+                    continue
+        for k, v in prefill_step_size_by_context.items():
+            try:
+                if int(k) > 0:
+                    merged_by_ctx[str(int(k))] = v
+            except (TypeError, ValueError):
+                continue
+        if merged_by_ctx:
+            payload["prefill_step_size_by_context"] = merged_by_ctx
+    if isinstance(decode_tok_s_by_context, dict) and decode_tok_s_by_context:
+        merged_decode_by_ctx = {}
+        if isinstance(prior, dict) and isinstance(prior.get("decode_tok_s_by_context"), dict):
+            for k, v in prior["decode_tok_s_by_context"].items():
+                try:
+                    if int(k) > 0 and isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                        merged_decode_by_ctx[str(int(k))] = round(float(v), 2)
+                except (TypeError, ValueError):
+                    continue
+        for k, v in decode_tok_s_by_context.items():
+            try:
+                if int(k) > 0 and isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                    merged_decode_by_ctx[str(int(k))] = round(float(v), 2)
+            except (TypeError, ValueError):
+                continue
+        if merged_decode_by_ctx:
+            payload["decode_tok_s_by_context"] = merged_decode_by_ctx
     tmp_path = f"{path}.tmp"
     with open(tmp_path, "w") as f:
         json.dump(payload, f)

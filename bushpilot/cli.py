@@ -239,12 +239,21 @@ def main():
         # the sweep harness (sweep_model.py), never by the plain teardown-time
         # save_calibration_snapshot() path, which has no sweep data to offer.
         prefill_step_size_flag = _flag_value(argv, "--prefill-step-size")
+        prefill_by_ctx_flag = _flag_value(argv, "--prefill-step-size-by-context")
         kv_bits_safe_flag = _flag_value(argv, "--kv-bits-safe-at-long-context")
         drafter_flag = _flag_value(argv, "--drafter")
         try:
             prefill_step_size = int(prefill_step_size_flag) if prefill_step_size_flag else None
         except ValueError:
             prefill_step_size = None
+        prefill_step_size_by_context = None
+        if prefill_by_ctx_flag:
+            try:
+                parsed_by_ctx = json.loads(prefill_by_ctx_flag)
+                if isinstance(parsed_by_ctx, dict):
+                    prefill_step_size_by_context = parsed_by_ctx
+            except ValueError:
+                prefill_step_size_by_context = None
         kv_bits_safe_at_long_context = None
         if kv_bits_safe_flag is not None:
             kv_bits_safe_at_long_context = kv_bits_safe_flag.strip().lower() in ("1", "true", "yes")
@@ -253,6 +262,7 @@ def main():
                          context_tokens=context_tokens, ttft_s=ttft_s,
                          peak_memory_gb=peak_memory_gb,
                          prefill_step_size=prefill_step_size,
+                         prefill_step_size_by_context=prefill_step_size_by_context,
                          kv_bits_safe_at_long_context=kv_bits_safe_at_long_context,
                          drafter=drafter_flag)
         log(f"Saved calibration for '{save_calibration_id}' on '{chip_name}': {decode_tok_s} tok/s")

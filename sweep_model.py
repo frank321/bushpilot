@@ -248,17 +248,49 @@ def kv_bits_safe_at_long_context(decode_speed_vs_context, deepest_depth):
 def derive_lightweight_calibration_fields(sweep_data):
     """Condenses the rich sweep JSON into exactly the fields save_calibration() needs
     for the lightweight file (decode_tok_s/context_tokens/ttft_s/peak_memory_gb from
-    the WINNING step size's own measured run, plus the 2 new optional keys) -- see
+    the WINNING step size's own measured run, plus the optional sweep keys) -- see
     docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md's storage-design section for why these two
     files are kept deliberately separate. Returns a plain kwargs dict ready to
     **-expand into model_advisor.save_calibration(), or None if the sweep didn't even
     get far enough to produce a usable step-size measurement (e.g. every launch in
-    this sweep failed)."""
+    this sweep failed).
+
+    When `prefill_step_size_sweep` contains measurements at one or more `context_tokens`
+    depths, also populates `prefill_step_size_by_context` (mapping `str(depth)` ->
+    `{"step_size": ..., "peak_memory_gb": ..., "ttft_s": ...}`) so
+    `recommend_prefill_step_size(..., context_tokens=...)` can select the optimum for the
+    recommended context depth (closing §17 item #8). When multiple depths are present in
+    one sweep, the flat top-level `prefill_step_size` / `decode_tok_s` fields are taken
+    from the deepest swept depth."""
     step_sweep = sweep_data.get("prefill_step_size_sweep") or []
     if not step_sweep:
         return None
-    best_step_size = pick_best_step_size(step_sweep)
-    winner = next((e for e in step_sweep if e["step_size"] == best_step_size), None)
+
+    by_depth_entries = {}
+    for entry in step_sweep:
+        ctx = entry.get("context_tokens")
+        if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0:
+            by_depth_entries.setdefault(ctx, []).append(entry)
+
+    by_context = {}
+    for ctx in sorted(by_depth_entries):
+        d_entries = by_depth_entries[ctx]
+        usable_d = [e for e in d_entries if isinstance(e.get("ttft_s"), (int, float))]
+        if not usable_d:
+            continue
+        best_d = pick_best_step_size(usable_d)
+        winner_d = next((e for e in usable_d if e.get("step_size") == best_d), None)
+        if winner_d is not None:
+            rec = {"step_size": best_d}
+            if isinstance(winner_d.get("peak_memory_gb"), (int, float)):
+                rec["peak_memory_gb"] = winner_d["peak_memory_gb"]
+            if isinstance(winner_d.get("ttft_s"), (int, float)):
+                rec["ttft_s"] = winner_d["ttft_s"]
+            by_context[str(ctx)] = rec
+
+    primary_pool = by_depth_entries[max(by_depth_entries)] if by_depth_entries else step_sweep
+    best_step_size = pick_best_step_size(primary_pool)
+    winner = next((e for e in primary_pool if e.get("step_size") == best_step_size), None)
     if winner is None or not isinstance(winner.get("decode_tok_s"), (int, float)):
         return None
 
@@ -268,7 +300,25 @@ def derive_lightweight_calibration_fields(sweep_data):
     if deepest is not None:
         kv_safe = kv_bits_safe_at_long_context(sweep_data.get("decode_speed_vs_context", []), deepest)
 
-    return {
+    decode_by_context = {}
+    for entry in sweep_data.get("decode_speed_vs_context") or []:
+        ctx = entry.get("context_tokens")
+        tok_s = entry.get("decode_tok_s")
+        if (
+            isinstance(ctx, (int, float))
+            and not isinstance(ctx, bool)
+            and int(ctx) > 0
+            and isinstance(tok_s, (int, float))
+            and not isinstance(tok_s, bool)
+            and tok_s > 0
+        ):
+            depth_key = str(int(ctx))
+            # Prefer the unquantized (kv_bits is None) baseline at each depth when both
+            # unquantized and quantized runs exist in decode_speed_vs_context.
+            if entry.get("kv_bits") is None or depth_key not in decode_by_context:
+                decode_by_context[depth_key] = round(float(tok_s), 2)
+
+    out = {
         "decode_tok_s": winner["decode_tok_s"],
         "context_tokens": winner.get("context_tokens"),
         "ttft_s": winner.get("ttft_s"),
@@ -276,6 +326,48 @@ def derive_lightweight_calibration_fields(sweep_data):
         "prefill_step_size": best_step_size,
         "kv_bits_safe_at_long_context": kv_safe,
     }
+    if by_context:
+        out["prefill_step_size_by_context"] = by_context
+    if decode_by_context:
+        out["decode_tok_s_by_context"] = decode_by_context
+    return out
+
+
+def derive_speed_correction_factor(sweep_data, model_entry, chip_name, gpu_cores=None):
+    """Derives the empirical `speed_correction_factor` for `model_entry` on `chip_name`
+    by inverting `estimate_speed_tok_s`'s bandwidth formula against the sweep's
+    shallowest unquantized `decode_speed_vs_context` measurement (falling back to the
+    winning step-size run's `decode_tok_s` if `decode_speed_vs_context` is absent):
+        speed_correction_factor = round(decode_tok_s * active_gb / bandwidth_gb_s, 3)
+    Closes docs/HARDWARE_SPEED_ESTIMATION.md §17 item #2 / NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md
+    remaining-work item #6."""
+    bw = ma.CHIP_BANDWIDTH_GB_S.get(chip_name)
+    if not bw or bw <= 0:
+        return None
+    active_gb = model_entry.get("active_weight_gb")
+    if active_gb is None:
+        if model_entry.get("type") == "moe":
+            return None
+        active_gb = model_entry.get("size_gb")
+    if not isinstance(active_gb, (int, float)) or active_gb <= 0:
+        return None
+
+    curve = [
+        d for d in (sweep_data.get("decode_speed_vs_context") or [])
+        if d.get("kv_bits") is None and isinstance(d.get("decode_tok_s"), (int, float))
+        and d["decode_tok_s"] > 0 and isinstance(d.get("context_tokens"), (int, float))
+    ]
+    measured_tok_s = None
+    if curve:
+        shallowest_entry = min(curve, key=lambda d: d["context_tokens"])
+        measured_tok_s = shallowest_entry["decode_tok_s"]
+    else:
+        derived = derive_lightweight_calibration_fields(sweep_data)
+        if derived and isinstance(derived.get("decode_tok_s"), (int, float)) and derived["decode_tok_s"] > 0:
+            measured_tok_s = derived["decode_tok_s"]
+    if measured_tok_s is None:
+        return None
+    return round(measured_tok_s * active_gb / bw, 3)
 
 
 def is_multimodal_entry(model_entry):
@@ -654,35 +746,48 @@ def run_prefill_step_size_tier(model_entry, host, port, step_sizes, sweep_contex
                                 max_num_seqs, log_dir, apc_num_blocks=ma.MLX_VLM_APC_NUM_BLOCKS):
     """Tier 1 headline metric: launches the server once per candidate step size (with
     --kv-bits 8 held constant, matching §12's exact methodology so step size is the
-    only variable), sends the warmup+measured discipline at a fixed deep-ish context,
-    and records TTFT/prompt tok/s/decode tok/s/peak memory for each. Returns
-    (list_of_entries, winning_step_size)."""
+    only variable), sends the warmup+measured discipline at one or more context depths
+    (`sweep_context_tokens` may be a single int or an iterable of ints, tested in
+    ascending order within the same server launch so multi-depth calibration requires
+    zero extra model loads), and records TTFT/prompt tok/s/decode tok/s/peak memory for
+    each. Returns (list_of_entries, winning_step_size_at_deepest_depth)."""
+    if isinstance(sweep_context_tokens, (list, tuple)):
+        depths = sorted(int(d) for d in sweep_context_tokens if int(d) > 0)
+    else:
+        depths = [int(sweep_context_tokens)]
+    max_depth = max(depths)
     entries = []
     for step_size in step_sizes:
         server = SweepServer(
-            model_entry["huggingface"], host, port, context_window=sweep_context_tokens + 4096,
+            model_entry["huggingface"], host, port, context_window=max_depth + 4096,
             log_path=os.path.join(log_dir, f"step{step_size}.log"),
             prefill_step_size=step_size, kv_bits=ma.MEMORY_CONSTRAINED_KV_BITS,
             max_num_seqs=max_num_seqs, apc_num_blocks=apc_num_blocks,
         )
         if not server.start():
-            entries.append({"step_size": step_size, "ttft_s": None, "error": "launch_failed"})
+            for d in depths:
+                entries.append({
+                    "step_size": step_size, "context_tokens": d,
+                    "ttft_s": None, "error": "launch_failed",
+                })
             continue
         try:
-            avg, _runs = run_measured_requests(
-                host, port, model_entry["huggingface"], build_code_prompt,
-                sweep_context_tokens, max_tokens=50, kv_bits=ma.MEMORY_CONSTRAINED_KV_BITS,
-                tag=f"step_size={step_size}",
-            )
-            entry = {"step_size": step_size, "context_tokens": sweep_context_tokens}
-            if avg:
-                entry.update({k: avg[k] for k in ("ttft_s", "prompt_tok_s", "decode_tok_s", "peak_memory_gb")})
-            else:
-                entry["error"] = "no_successful_measured_runs"
-            entries.append(entry)
+            for d in depths:
+                avg, _runs = run_measured_requests(
+                    host, port, model_entry["huggingface"], build_code_prompt,
+                    d, max_tokens=50, kv_bits=ma.MEMORY_CONSTRAINED_KV_BITS,
+                    tag=f"step_size={step_size} depth={d}",
+                )
+                entry = {"step_size": step_size, "context_tokens": d}
+                if avg:
+                    entry.update({k: avg[k] for k in ("ttft_s", "prompt_tok_s", "decode_tok_s", "peak_memory_gb")})
+                else:
+                    entry["error"] = "no_successful_measured_runs"
+                entries.append(entry)
         finally:
             server.stop()
-    return entries, pick_best_step_size(entries)
+    deepest_entries = [e for e in entries if e.get("context_tokens") == max_depth] or entries
+    return entries, pick_best_step_size(deepest_entries)
 
 
 def run_decode_vs_context_and_kv_bits_tier(model_entry, host, port, context_depths,
@@ -1030,7 +1135,7 @@ def run_sweep(model_id, host=DEFAULT_HOST, port=DEFAULT_PORT,
               step_sizes=None, context_depths=None, concurrency_levels=None,
               thermal_requests=DEFAULT_THERMAL_REQUESTS,
               apc_prefix_tokens=DEFAULT_APC_PREFIX_TOKENS, max_num_seqs=4,
-              skip_tiers=None, output_path=None):
+              skip_tiers=None, output_path=None, step_size_depths=None):
     step_sizes = step_sizes or DEFAULT_STEP_SIZES
     context_depths = context_depths or DEFAULT_CONTEXT_DEPTHS
     concurrency_levels = concurrency_levels or DEFAULT_CONCURRENCY_LEVELS
@@ -1102,7 +1207,12 @@ def run_sweep(model_id, host=DEFAULT_HOST, port=DEFAULT_PORT,
         # 4x the largest step size being tested, not just max(context_depths) alone,
         # so a user-supplied --context-depths that's all shallow still gets a
         # meaningful multi-chunk test rather than silently repeating that bug.
-        sweep_context_tokens = max(max(context_depths), max(step_sizes) * 4)
+        if step_size_depths:
+            sweep_context_tokens = sorted(
+                max(int(d), min(step_sizes) * 2) for d in step_size_depths if int(d) > 0
+            )
+        else:
+            sweep_context_tokens = max(max(context_depths), max(step_sizes) * 4)
         log(f"=== Tier 1a: prefill-step-size sweep {step_sizes} @ {sweep_context_tokens} tokens ===")
         entries, best_step_size = run_prefill_step_size_tier(
             model_entry, host, port, step_sizes, sweep_context_tokens=sweep_context_tokens,
@@ -1153,10 +1263,17 @@ def run_sweep(model_id, host=DEFAULT_HOST, port=DEFAULT_PORT,
             data["thermal_check"] = {"error": "launch_failed"}
             write_sweep_json(out_path, data)
 
+    derived_scf = derive_speed_correction_factor(data, model_entry, chip_name, gpu_cores)
+    if derived_scf is not None:
+        data["derived_speed_correction_factor"] = derived_scf
+        write_sweep_json(out_path, data)
+        log(f"Derived speed_correction_factor for '{model_id}' on '{chip_name}': {derived_scf}")
+
     derived = derive_lightweight_calibration_fields(data)
     if derived:
         ma.save_calibration(chip_name, model_id, **derived)
         log(f"Derived lightweight calibration: prefill_step_size={derived['prefill_step_size']} "
+            f"prefill_step_size_by_context={derived.get('prefill_step_size_by_context')} "
             f"kv_bits_safe_at_long_context={derived['kv_bits_safe_at_long_context']}")
     else:
         log("Could not derive lightweight calibration fields — step-size tier "
@@ -1172,6 +1289,9 @@ def main():
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--step-sizes", default=",".join(map(str, DEFAULT_STEP_SIZES)))
+    parser.add_argument("--step-size-depths", default="",
+                        help="optional comma list of context depths to sweep in Tier 1a "
+                             "(within one server launch per step size)")
     parser.add_argument("--context-depths", default=",".join(map(str, DEFAULT_CONTEXT_DEPTHS)))
     parser.add_argument("--concurrency-levels", default=",".join(map(str, DEFAULT_CONCURRENCY_LEVELS)))
     parser.add_argument("--thermal-requests", type=int, default=DEFAULT_THERMAL_REQUESTS)
@@ -1192,6 +1312,7 @@ def main():
         max_num_seqs=args.max_num_seqs,
         skip_tiers=[t for t in args.skip_tiers.split(",") if t],
         output_path=args.output,
+        step_size_depths=[int(x) for x in args.step_size_depths.split(",") if x] or None,
     )
 
 

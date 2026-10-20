@@ -28,8 +28,45 @@ DEFAULT_PREFILL_STEP_SIZE = 2048
 PREFILL_STEP_SIZE_MEMORY_MARGIN = 1.15
 
 
+def _select_depth_calibrated_step_size(calibrated, context_tokens):
+    """If calibrated contains a valid prefill_step_size_by_context dict and
+    context_tokens is a positive number, returns (step_size, peak_mem, matched_depth)
+    for the swept context depth closest to context_tokens (ties broken toward the
+    deeper depth so long-context memory/TTFT behavior is preferred at the midpoint).
+    Returns None if no depth-keyed entry is usable."""
+    if not isinstance(context_tokens, (int, float)) or context_tokens <= 0:
+        return None
+    by_ctx = calibrated.get("prefill_step_size_by_context")
+    if not isinstance(by_ctx, dict) or not by_ctx:
+        return None
+    candidates = {}
+    for raw_depth, entry in by_ctx.items():
+        try:
+            depth = int(raw_depth)
+        except (TypeError, ValueError):
+            continue
+        if depth <= 0:
+            continue
+        if isinstance(entry, dict):
+            step = entry.get("step_size")
+            peak = entry.get("peak_memory_gb", calibrated.get("peak_memory_gb"))
+        elif isinstance(entry, int) and not isinstance(entry, bool):
+            step = entry
+            peak = calibrated.get("peak_memory_gb")
+        else:
+            continue
+        if isinstance(step, int) and not isinstance(step, bool) and step > 0:
+            candidates[depth] = (step, peak)
+    if not candidates:
+        return None
+    matched_depth = min(candidates.keys(), key=lambda d: (abs(d - context_tokens), -d))
+    step_size, peak_mem = candidates[matched_depth]
+    return step_size, peak_mem, matched_depth
+
+
 def recommend_prefill_step_size(model_entry, chip_name, free_wired_gb,
-                                 safety_buffer_gb=SAFETY_BUFFER_GB):
+                                 safety_buffer_gb=SAFETY_BUFFER_GB,
+                                 context_tokens=None):
     """Returns (step_size, reason_string) -- mirrors recommend_kv_bits_and_context's
     try-the-better-option-then-fall-back-to-the-proven-safe-default structure, but for
     --prefill-step-size instead of --kv-bits.
@@ -37,17 +74,12 @@ def recommend_prefill_step_size(model_entry, chip_name, free_wired_gb,
     §12's own finding (docs/HARDWARE_SPEED_ESTIMATION.md) is that `--prefill-step-size`
     affects ONLY time-to-first-token, never decode speed, and that the currently
     hardcoded global default (DEFAULT_PREFILL_STEP_SIZE, 2048) already beat both 512
-    and 4096 on both models tested -- but that was 2 Gemma-4 models on 1 machine (this
-    one, Apple M5 Pro). A chip with different GPU core count / architecture has no
-    reason to share that same optimum (§17 item #8) -- this function is what lets a
-    real per-(chip, model) sweep override the global default once one exists, without
-    ever hardcoding a second global constant that's just as narrow as the first.
-
-    load_calibration's existing "unknown keys are ignored" contract means this reads
-    the SAME lightweight calibration file recommend overridden by load_calibration/
-    estimate_speed_tok_s already use -- no new file, no new load path. A calibration
-    written before this field existed (no "prefill_step_size" key at all) is treated
-    identically to "nothing calibrated yet", not an error.
+    and 4096 on both models tested at ~7,200 tokens -- while §20 showed that on
+    gemma-4-12b-it-4bit at 16,384 tokens, 512 beat 2048 by ~16% (20.13s vs 23.97s).
+    When `context_tokens` (e.g. recommended_context) is provided and the calibration
+    file carries `prefill_step_size_by_context`, this selects the calibrated step size
+    for the closest swept context depth, falling back to the flat `prefill_step_size`
+    field when no depth map is present.
 
     Memory safety: a non-default calibrated step size is only ever recommended when
     free_wired_gb comfortably covers the calibration's own observed peak_memory_gb
@@ -57,24 +89,37 @@ def recommend_prefill_step_size(model_entry, chip_name, free_wired_gb,
     save_calibration that predates that field) can't be safety-checked at all, so it
     falls back to the default rather than risk using an unverified value blindly."""
     calibrated = load_calibration(chip_name, model_entry.get("id", ""))
-    if calibrated is None or not isinstance(calibrated.get("prefill_step_size"), int):
+    if calibrated is None:
         return DEFAULT_PREFILL_STEP_SIZE, (
             "default (no calibrated prefill_step_size for this chip+model yet — "
             "see docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md to run the sweep)"
         )
 
-    step_size = calibrated["prefill_step_size"]
+    depth_match = _select_depth_calibrated_step_size(calibrated, context_tokens)
+    if depth_match is not None:
+        step_size, peak_mem, matched_depth = depth_match
+        depth_note = f" at {matched_depth:,} tokens"
+    else:
+        raw_step = calibrated.get("prefill_step_size")
+        if not isinstance(raw_step, int) or isinstance(raw_step, bool) or raw_step <= 0:
+            return DEFAULT_PREFILL_STEP_SIZE, (
+                "default (no calibrated prefill_step_size for this chip+model yet — "
+                "see docs/NEXT_SESSION_HANDOFF_PREFILL_SWEEP.md to run the sweep)"
+            )
+        step_size = raw_step
+        peak_mem = calibrated.get("peak_memory_gb")
+        depth_note = ""
+
     saved_at = calibrated.get("saved_at", "previously")
     if step_size == DEFAULT_PREFILL_STEP_SIZE:
         return step_size, (
             f"calibrated — matches the global default, measured on this machine "
-            f"({chip_name}), saved {saved_at}"
+            f"({chip_name}){depth_note}, saved {saved_at}"
         )
 
-    peak_mem = calibrated.get("peak_memory_gb")
-    if not isinstance(peak_mem, (int, float)):
+    if not isinstance(peak_mem, (int, float)) or peak_mem <= 0:
         return DEFAULT_PREFILL_STEP_SIZE, (
-            f"default (calibrated step size {step_size} has no recorded peak_memory_gb "
+            f"default (calibrated step size {step_size}{depth_note} has no recorded peak_memory_gb "
             "to safety-check against — falling back rather than risk an unverified value)"
         )
 
@@ -82,12 +127,12 @@ def recommend_prefill_step_size(model_entry, chip_name, free_wired_gb,
     required_gb = peak_mem * margin + safety_buffer_gb
     if free_wired_gb < required_gb:
         return DEFAULT_PREFILL_STEP_SIZE, (
-            f"default (calibrated step size {step_size} needs ~{required_gb:.1f}GB free "
+            f"default (calibrated step size {step_size}{depth_note} needs ~{required_gb:.1f}GB free "
             f"with margin; only {free_wired_gb:.1f}GB currently available)"
         )
 
     return step_size, (
-        f"measured on this machine ({chip_name}), saved {saved_at} — overrides the "
+        f"measured on this machine ({chip_name}){depth_note}, saved {saved_at} — overrides the "
         f"global default ({DEFAULT_PREFILL_STEP_SIZE}) until this model or chip changes "
         "(re-run the sweep to refresh)"
     )

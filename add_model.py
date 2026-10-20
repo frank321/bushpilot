@@ -31,6 +31,10 @@ import urllib.request
 
 HF = "https://huggingface.co"
 MODELS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models.json")
+VERIFICATION_RESULTS_JSON = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "docs", "mlx_verification_results.json"
+)
+SWEEPS_DIR = os.path.expanduser("~/.bushpilot/calibration/sweeps")
 REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
 EXPERT_RE = re.compile(r"\.(experts|switch_mlp|switch_glu)\.")
 NON_TEXT_PREFIXES = ("vision", "audio", "visual", "multi_modal_projector", "embed_vision", "embed_audio")
@@ -268,14 +272,165 @@ def write_entry(entry, path):
         f.write(json.dumps(catalog, indent=4, ensure_ascii=False) + "\n")
 
 
+def sync_verified_results(
+    models_path=MODELS_JSON,
+    verification_results_path=VERIFICATION_RESULTS_JSON,
+    sweeps_dir=SWEEPS_DIR,
+    write=False,
+):
+    """Ingests verification verdicts from `verification_results_path`
+    (docs/mlx_verification_results.json) and empirical sweep results from `sweeps_dir`
+    (~/.bushpilot/calibration/sweeps/*.sweep.json) into `models_path` (models.json).
+
+    - Populates `verification` on any catalog entry whose HuggingFace repo id has
+      `verdict == "SAFE"` in `mlx_verification_results.json` (when not already SAFE).
+    - Populates `speed_correction_factor` from `derived_speed_correction_factor` in
+      the newest matching `*.sweep.json`.
+    - Populates `tool_calling` from `tool_calling_reverified` in the newest matching
+      `*.sweep.json` when the catalog entry's `tool_calling.verdict` is unset or
+      `"UNTESTED"`.
+    - Promotes `status` from `"untested"` to `"tested"` ONLY when BOTH
+      `verification.verdict == "SAFE"` AND `tool_calling.verdict` is in
+      `("SUPPORTED", "NOT_SUPPORTED")`, preserving AGENTS.md Invariant #2."""
+    with open(models_path) as f:
+        catalog = json.load(f)
+
+    ver_models = {}
+    if verification_results_path and os.path.isfile(verification_results_path):
+        try:
+            with open(verification_results_path) as f:
+                ver_data = json.load(f)
+            if isinstance(ver_data, dict) and isinstance(ver_data.get("models"), dict):
+                ver_models = ver_data["models"]
+        except (OSError, ValueError):
+            ver_models = {}
+
+    sweeps_by_model = {}
+    if sweeps_dir and os.path.isdir(sweeps_dir):
+        for fname in sorted(os.listdir(sweeps_dir)):
+            if not fname.endswith(".sweep.json"):
+                continue
+            fpath = os.path.join(sweeps_dir, fname)
+            try:
+                with open(fpath) as f:
+                    sdata = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(sdata, dict):
+                continue
+            mid = sdata.get("model_id")
+            if not isinstance(mid, str) or not mid:
+                continue
+            prev = sweeps_by_model.get(mid)
+            if prev is None or str(sdata.get("swept_at", "")) >= str(prev.get("swept_at", "")):
+                sweeps_by_model[mid] = sdata
+
+    updated_models = []
+    promoted_to_tested = []
+
+    for m in catalog.get("models", []):
+        mid = m.get("id", "")
+        hf_repo = m.get("huggingface", "")
+        changed = False
+
+        ver_rec = ver_models.get(hf_repo) or ver_models.get(mid)
+        if isinstance(ver_rec, dict) and ver_rec.get("verdict") == "SAFE":
+            cur_ver = m.get("verification")
+            if not isinstance(cur_ver, dict) or cur_ver.get("verdict") != "SAFE":
+                m["verification"] = {
+                    "verdict": "SAFE",
+                    "verified_at": ver_rec.get("verified_at", ""),
+                    "mlx_vlm_version": ver_rec.get("mlx_vlm_version", ""),
+                    "notes": ver_rec.get(
+                        "reason", "Admission gate verified via verify_max_kv_size.sh."
+                    ),
+                }
+                changed = True
+
+        sweep = sweeps_by_model.get(mid)
+        if isinstance(sweep, dict):
+            scf = sweep.get("derived_speed_correction_factor")
+            if isinstance(scf, (int, float)) and not isinstance(scf, bool) and scf > 0:
+                rounded_scf = round(float(scf), 3)
+                if m.get("speed_correction_factor") != rounded_scf:
+                    m["speed_correction_factor"] = rounded_scf
+                    changed = True
+
+            tc_rev = sweep.get("tool_calling_reverified")
+            if isinstance(tc_rev, dict) and tc_rev.get("verdict") in ("SUPPORTED", "NOT_SUPPORTED"):
+                cur_tc = (m.get("tool_calling") or {}).get("verdict")
+                if cur_tc in (None, "UNTESTED"):
+                    m["tool_calling"] = {
+                        "verdict": tc_rev["verdict"],
+                        "verified_at": sweep.get("swept_at", ""),
+                        "method": (
+                            "Live /v1/chat/completions tool-call tier via sweep_model.py "
+                            "(temperature=0, web_search tool schema)."
+                        ),
+                    }
+                    changed = True
+
+        ver_safe = (m.get("verification") or {}).get("verdict") == "SAFE"
+        tc_done = (m.get("tool_calling") or {}).get("verdict") in ("SUPPORTED", "NOT_SUPPORTED")
+        if m.get("status") == "untested" and ver_safe and tc_done:
+            m["status"] = "tested"
+            disp = m.get("display")
+            if isinstance(disp, dict):
+                tagline = disp.get("tagline", "")
+                if isinstance(tagline, str) and tagline.endswith(" — untested"):
+                    disp["tagline"] = tagline[: -len(" — untested")]
+            promoted_to_tested.append(mid)
+            changed = True
+
+        if changed:
+            updated_models.append(mid)
+
+    if write and updated_models:
+        tmp_path = f"{models_path}.tmp"
+        with open(tmp_path, "w") as f:
+            f.write(json.dumps(catalog, indent=4, ensure_ascii=False) + "\n")
+        os.replace(tmp_path, models_path)
+
+    return {
+        "updated_models": updated_models,
+        "promoted_to_tested": promoted_to_tested,
+        "catalog": catalog,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("query", help="repo id, Hugging Face URL, or model name to search for")
-    ap.add_argument("--write", action="store_true", help="append the entry to models.json instead of printing it")
+    ap.add_argument("query", nargs="?", help="repo id, Hugging Face URL, or model name to search for")
+    ap.add_argument("--write", action="store_true", help="write changes to models.json instead of printing")
     ap.add_argument("--pick", type=int, help="for name searches: take the Nth result without asking")
     ap.add_argument("--id", help="override the generated id")
     ap.add_argument("--models-file", default=MODELS_JSON)
+    ap.add_argument(
+        "--sync-verified",
+        action="store_true",
+        help="sync docs/mlx_verification_results.json and ~/.bushpilot/calibration/sweeps/*.sweep.json into models.json",
+    )
+    ap.add_argument("--verification-file", default=VERIFICATION_RESULTS_JSON)
+    ap.add_argument("--sweeps-dir", default=SWEEPS_DIR)
     args = ap.parse_args()
+
+    if args.sync_verified:
+        res = sync_verified_results(
+            models_path=args.models_file,
+            verification_results_path=args.verification_file,
+            sweeps_dir=args.sweeps_dir,
+            write=args.write,
+        )
+        summary = {
+            "updated_models": res["updated_models"],
+            "promoted_to_tested": res["promoted_to_tested"],
+            "written": bool(args.write and res["updated_models"]),
+        }
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        return
+
+    if not args.query:
+        ap.error("the following arguments are required: query (or pass --sync-verified)")
 
     repo = resolve_repo(args.query, args.pick)
     log(f"Reading {repo} ...")

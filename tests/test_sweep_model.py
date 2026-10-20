@@ -151,6 +151,7 @@ def test_derive_lightweight_calibration_fields_happy_path():
     assert derived["context_tokens"] == 7200
     assert derived["peak_memory_gb"] == 6.49
     assert derived["kv_bits_safe_at_long_context"] is True
+    assert derived["decode_tok_s_by_context"] == {"16384": 68.0}
 
 
 def test_derive_lightweight_calibration_fields_none_when_step_size_tier_empty():
@@ -277,4 +278,42 @@ def test_sweep_server_stores_custom_apc_num_blocks():
         prefill_step_size=2048, kv_bits=8, max_num_seqs=1, apc_num_blocks=1024,
     )
     assert srv.apc_num_blocks == 1024
+
+
+def test_derive_lightweight_calibration_fields_multi_depth_populates_by_context():
+    sweep_data = {
+        "prefill_step_size_sweep": [
+            {"step_size": 512, "ttft_s": 0.95, "decode_tok_s": 70.0, "context_tokens": 4096, "peak_memory_gb": 6.8},
+            {"step_size": 2048, "ttft_s": 0.80, "decode_tok_s": 71.0, "context_tokens": 4096, "peak_memory_gb": 7.0},
+            {"step_size": 512, "ttft_s": 3.55, "decode_tok_s": 69.2, "context_tokens": 16384, "peak_memory_gb": 7.84},
+            {"step_size": 2048, "ttft_s": 3.85, "decode_tok_s": 68.5, "context_tokens": 16384, "peak_memory_gb": 8.43},
+        ],
+    }
+    derived = sm.derive_lightweight_calibration_fields(sweep_data)
+    # Deepest depth (16384) wins for the flat top-level prefill_step_size
+    assert derived["prefill_step_size"] == 512
+    assert derived["context_tokens"] == 16384
+    assert derived["decode_tok_s"] == 69.2
+    # Both depths are recorded in prefill_step_size_by_context with their respective winners
+    by_ctx = derived["prefill_step_size_by_context"]
+    assert by_ctx["4096"]["step_size"] == 2048
+    assert by_ctx["4096"]["peak_memory_gb"] == 7.0
+    assert by_ctx["16384"]["step_size"] == 512
+    assert by_ctx["16384"]["peak_memory_gb"] == 7.84
+
+
+def test_derive_speed_correction_factor_inverts_bandwidth_formula(dense_model):
+    # Apple M5 Pro bandwidth = 307 GB/s; dense_model active_weight_gb = 6.3 GB.
+    # At 62.42 tok/s: round(62.42 * 6.3 / 307, 3) = 1.281
+    sweep_data = {
+        "decode_speed_vs_context": [
+            {"context_tokens": 100, "kv_bits": None, "decode_tok_s": 62.42},
+            {"context_tokens": 16384, "kv_bits": None, "decode_tok_s": 58.10},
+        ],
+    }
+    scf = sm.derive_speed_correction_factor(sweep_data, dense_model, "Apple M5 Pro", 20)
+    assert scf == 1.281
+    # Unknown chip returns None cleanly
+    assert sm.derive_speed_correction_factor(sweep_data, dense_model, "Apple Z9000", 20) is None
+
 

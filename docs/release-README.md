@@ -29,6 +29,14 @@ than crashing your machine or silently truncating context.
 
 ## Running it
 
+**Single-terminal launch** (auto-splits iTerm2, `tmux`, or Terminal.app if the server isn't running yet):
+
+```bash
+./launch_tool.sh
+```
+
+Or in **two separate terminals**:
+
 **Terminal 1** — start the model server and leave it running:
 
 ```bash
@@ -36,8 +44,10 @@ than crashing your machine or silently truncating context.
 ```
 
 This detects your free memory, shows you a picker of models that actually fit
-(with a computed context size and estimated tok/s for each), downloads the model
-if needed, and starts serving it with a live status dashboard.
+(with a computed context size and estimated tok/s for each — use **`Tab`** in
+`fzf` to select multiple models if you want to switch between them from inside
+your coding tool), downloads the model if needed, and starts serving it with a
+live status dashboard.
 
 **Terminal 2** — attach a coding tool:
 
@@ -49,8 +59,10 @@ This shows a picker (Claude Code / OpenCode / Aider / Cline / Pi), checks the se
 healthy, and launches straight into it. You can open additional terminals and run
 `./launch_tool.sh` again to attach another tool to the same running model.
 
-To stop everything, go back to the Terminal 1 window and press **Ctrl-C** or
-**`q`**.
+To switch models live without restarting your tool, press **`m`** on the
+Terminal 1 dashboard (or switch `[BushPilot]` models directly inside your coding
+tool). To stop everything, go back to the Terminal 1 window and press
+**Ctrl-C** or **`q`**.
 
 Everything this project manages (downloaded model weights, its Python
 environment, logs, and state) lives under `~/.bushpilot/` — remove that

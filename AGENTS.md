@@ -22,12 +22,12 @@ in CI or on any non-Mac machine.
 
 | Path | Purpose |
 |---|---|
-| `start_mlx_server.sh` | Server lifecycle: env, venv, download, MLX launch, dashboard loop, memory + backend-liveness backstops, teardown calibration |
-| `launch_tool.sh` | Attaches a coding tool to the running server (reads `~/.bushpilot/config.json`) |
+| `start_mlx_server.sh` | Server lifecycle: env, venv, download, MLX launch, hot-swap router proxy (`router.py`), dashboard loop (`m` to swap models), memory + backend-liveness backstops, teardown calibration |
+| `launch_tool.sh` | Attaches a coding tool to the running server (or auto-splits a terminal pane to launch `start_mlx_server.sh` first; reads `~/.bushpilot/config.json`) |
 | `model_advisor.py` | Thin shim over the `bushpilot/` package (kept at root so all bash call sites and the release bundle stay unchanged) |
-| `bushpilot/` | The advisor logic, by concern: `hardware.py` (chip/memory), `kv.py` (context/KV math), `speed.py` (tok/s estimate), `prefill.py` (prefill step size), `calibration.py` (per-(chip,model) measurements), `preload.py` (tool context overhead), `recommend.py` (row builder), `picker/` (`cells.py` row model, `sort.py`, `display.py`), `cli.py` (`main`) |
-| `sweep_model.py` | Per-(chip, model) prefill-step-size sweep harness |
-| `add_model.py` | Generates a catalog entry from a HF repo id (never marks it tested) |
+| `bushpilot/` | The advisor + runtime package, by concern: `hardware.py` (chip/memory + Metal wired limit), `kv.py` (context/KV math + dynamic APC blocks), `speed.py` (tok/s estimate + architecture-family correction factors + context-depth decode speed), `prefill.py` (context-depth-aware prefill step size), `calibration.py` (per-(chip,model) measurements), `preload.py` (tool context overhead), `recommend.py` (row builder + `mlx-vlm#1559` auto-concurrency guard), `router.py` (live model hot-swap HTTP proxy), `template_patches.py` (chat-template APC prompt patching), `picker/` (`cells.py` row model, `sort.py`, `display.py`), `cli.py` (`main`) |
+| `sweep_model.py` | Per-(chip, model) prefill-step-size & context-depth decode-speed sweep harness |
+| `add_model.py` | Generates a catalog entry from a HF repo id (never marks it tested on add; `--sync-verified` ingests `verify_max_kv_size.sh` and `sweep_model.py` results) |
 | `uninstall.sh` | Full removal: server, `~/.bushpilot`, provider registration, PATH symlinks, project folder |
 | `models.json` | The curated catalog — source of truth for what the advisor computes |
 | `verify_max_kv_size.sh`, `verify_long_context_memory.sh` | Live-hardware verification behind the catalog's tested data |
@@ -53,14 +53,15 @@ in CI or on any non-Mac machine.
    only becomes `tested` after `verify_*.sh` passes.
 3. **Deliberate duplicated constants.** `DEFAULT_PREFILL_STEP_SIZE` in
    `bushpilot/prefill.py` and `PREFILL_STEP_SIZE` in `start_mlx_server.sh` are
-   the same number on purpose (bash owns the launch flag; they are NOT shared
-   across the bash/python boundary). Same for the memory "free" semantics:
+   the same number on purpose (bash owns the launch flag fallback; they are NOT
+   shared across the bash/python boundary). Same for the memory "free" semantics:
    both sides read `kern.memorystatus_level` so the fit check and the backstop
    can never disagree. Same again for `MLX_VLM_APC_NUM_BLOCKS` in
-   `bushpilot/kv.py` and `APC_NUM_BLOCKS` in `start_mlx_server.sh` (mlx_vlm's
-   always-on APC pool-size ceiling, priced into `recommend_max_context` as a
-   fixed memory cost). If you change one, change the other and the comment
-   that documents the pairing.
+   `bushpilot/kv.py` and `APC_NUM_BLOCKS` fallback in `start_mlx_server.sh`
+   (mlx_vlm's always-on APC pool-size ceiling — dynamically scaled down to
+   `MLX_VLM_APC_CONSTRAINED_NUM_BLOCKS = 1024` via `compute_apc_num_blocks` and
+   emitted as `apc_num_blocks` in the advisor JSON). If you change one, change
+   the other and the comment that documents the pairing.
 4. **Calibration files are a cache, never a requirement.** Missing or corrupt
    `~/.bushpilot/calibration/*.json` must degrade to the formula/default path,
    never error. `save_calibration` writes atomically (tmp + `os.replace`).

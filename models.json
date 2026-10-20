@@ -191,6 +191,7 @@
             ],
             "released": "2026-03",
             "max_context_architectural": 131072,
+            "speed_correction_factor": 1.281,
             "serving": {
                 "backend": "mlx_vlm",
                 "draft_model": "mlx-community/gemma-4-E4B-it-assistant-bf16",
@@ -405,6 +406,7 @@
             ],
             "released": "2026-06",
             "max_context_architectural": 262144,
+            "speed_correction_factor": 0.756,
             "serving": {
                 "backend": "mlx_dspark",
                 "mode": "dflash",
@@ -525,6 +527,7 @@
             ],
             "released": "2026-06",
             "max_context_architectural": 262144,
+            "speed_correction_factor": 0.756,
             "serving": {
                 "backend": "mlx_vlm",
                 "draft_model": "z-lab/gemma4-12B-it-DFlash",

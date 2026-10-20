@@ -129,11 +129,19 @@ from .recommend import (
     build_recommendations,
     compute_bonus_concurrency,
 )
-from .speed import CHIP_BANDWIDTH_GB_S, SPEED_CORRECTION_FACTOR, estimate_speed_tok_s
+from .speed import (
+    ARCHITECTURE_SPEED_CORRECTION_FACTORS,
+    CHIP_BANDWIDTH_GB_S,
+    SPEED_CORRECTION_FACTOR,
+    estimate_speed_tok_s,
+    resolve_calibrated_decode_speed,
+    resolve_speed_correction_factor,
+)
 from .template_patches import check_and_patch_chat_template, find_chat_template_path
 
 __all__ = [
-    "AUTO_MAX_CONCURRENCY", "BOLD", "CALIBRATION_DIR", "CHIP_BANDWIDTH_GB_S",
+    "ARCHITECTURE_SPEED_CORRECTION_FACTORS", "AUTO_MAX_CONCURRENCY", "BOLD",
+    "CALIBRATION_DIR", "CHIP_BANDWIDTH_GB_S",
     "COL_CTX", "COL_DRAFTER", "COL_ENGINE", "COL_INPUT", "COL_KV", "COL_LAST",
     "COL_NAME", "COL_RELEASED", "COL_SIZE", "COL_SPEED", "COL_TOOLS", "COL_TYPE",
     "COLUMN_SORT_KEYS", "COMFORTABLE_UNQUANTIZED_CONTEXT", "COMPACT_HEADERS",
@@ -160,7 +168,8 @@ __all__ = [
     "model_drafter_label", "model_engine", "model_input_label", "model_tools_label",
     "next_sort", "prefix_cache_cost_multiplier", "print_list_compact", "print_menu",
     "print_preload_banner", "build_recommendations", "recommend_kv_bits_and_context",
-    "recommend_max_context", "recommend_prefill_step_size", "save_calibration",
-    "short_unavailable_reason", "sort_key_for_click", "sort_rows", "use_color",
-    "visible_columns",
+    "recommend_max_context", "recommend_prefill_step_size",
+    "resolve_calibrated_decode_speed", "resolve_speed_correction_factor",
+    "save_calibration", "short_unavailable_reason", "sort_key_for_click",
+    "sort_rows", "use_color", "visible_columns",
 ]

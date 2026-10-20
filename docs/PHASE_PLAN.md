@@ -1590,4 +1590,45 @@ against the full real `models.json` at several free-memory levels with no
 exceptions, and `python3 model_advisor.py --resolve <id> --prefix-cache-slots N`
 against the real catalog to confirm the new flag reaches the final recommendation.
 
+## Context-depth-aware `prefill_step_size`, architecture-family `speed_correction_factor`, reasoning-model `verify_max_kv_size.sh`, and docs/release refresh (2026-10-19)
+
+### 1. Context-depth-aware `recommend_prefill_step_size` (`prefill_step_size_by_context`)
+
+- **`bushpilot/calibration.py` + `bushpilot/prefill.py`:** `load_calibration` and `save_calibration` now read and persist an optional `prefill_step_size_by_context` tier map (`{"4096": 2048, "16384": 2048, "32768": 1024}`) alongside the flat `prefill_step_size` integer for full backward compatibility. `recommend_prefill_step_size(free_wired_gb, model_size_gb, calibration=None, context_tokens=None)` resolves the highest measured prompt tier `<= context_tokens` (or nearest tier for smaller contexts) when `prefill_step_size_by_context` is present, falling back to the flat calibrated value and then the formula.
+- **`bushpilot/recommend.py` + `bushpilot/cli.py`:** `build_recommendations` passes `context_tokens=rec_ctx` when computing each row's `prefill_step_size`, and `cli.py` re-evaluates `recommend_prefill_step_size` whenever `--max-context-tokens` clamps a model's recommended context window.
+- **`sweep_model.py`:** `pick_best_step_size_by_context` records the per-prompt-length winners into `prefill_step_size_by_context` when `--write-calibration` is passed.
+
+### 2. Architecture-family `speed_correction_factor` + drafter variant propagation
+
+- **`bushpilot/speed.py` + `models.json`:** Added `ARCHITECTURE_SPEED_CORRECTION_FACTORS` (`gemma4 (elastic/MatFormer "E4B" variant)`: `1.281`, `gemma4_unified`: `0.756`, `qwen3_5`: `0.87`) and `resolve_speed_correction_factor(model_entry)`, which resolves an explicit per-model `speed_correction_factor` first, then an architecture-family factor from `model_entry["architecture"]`, and finally `SPEED_CORRECTION_FACTOR` (`0.87`). Populated explicit `speed_correction_factor` on `gemma-4-e4b-it-4bit-mtp` (`1.281`), `gemma-4-12b-it-4bit-dflash` (`0.756`), and `gemma-4-12b-it-4bit-dflash-vlm` (`0.756`).
+- **`sweep_model.py`:** Added `derive_speed_correction_factor(decode_tps, chip_bw_gbs, active_weight_gb)` so live sweep measurements can compute the exact `models.json` factor directly.
+
+### 3. `verify_max_kv_size.sh` Phase 2b reasoning-model recall fallback
+
+- Reasoning models (`deepseek-r1-distill-qwen-*`) emit `<think>...</think>` chains that exhaust `max_tokens=60` inside `HIGH_KV_SIZE=1024` (`finish_reason: length`) before emitting the secret code. `send_recall_probe` now captures `finish_reason` and `reasoning_content`, and when Phase 2 returns HTTP 200 without the secret because generation hit `finish_reason == "length"` (or `<think>` / `reasoning_content` is present), `verify_max_kv_size.sh` automatically runs **Phase 2b** at `REASONING_HIGH_KV_SIZE=4096` with `REASONING_HIGH_MAX_TOKENS=1500` while keeping Phase 1 (`LOW_KV_SIZE=256`) and Phase 3 (`EXTREME_LOW_KV_SIZE=32`) unchanged.
+
+### 4. Documentation & release bundle (`docs/bushpilot.zip`)
+
+- Updated `AGENTS.md`, `README.md`, `QUICK_START.md`, `MLX_SERVER_USAGE.md`, `docs/release-README.md`, and `docs/index.html` to cover single-terminal auto-split launch (`launch_tool.sh` auto-splitting iTerm2/`tmux`/Terminal.app), live model hot-swap (`m` key on dashboard, `Tab` multi-select in picker, in-tool `[BushPilot]` model switching via `bushpilot/router.py`), and all 5 supported coding tools (Claude Code, OpenCode, Aider, Cline, Pi).
+- Rebuilt `docs/bushpilot.zip` via `./docs/build_release.sh` and verified `./ci.sh` (215 pytest tests, ruff, shellcheck, and 19 bats tests).
+
+## Context-depth decode-speed curve, `mlx-vlm#1559` concurrent-APC auto-guard, and `add_model.py --sync-verified` (2026-10-19)
+
+### 1. Context-depth decode-speed curve (`decode_tok_s_by_context`)
+
+- **`bushpilot/calibration.py` + `bushpilot/speed.py`:** `save_calibration` now accepts an optional `decode_tok_s_by_context` dict (e.g. `{"100": 82.2, "4096": 74.1, "16384": 68.5}`) and merges new context-depth points into existing calibration records alongside `prefill_step_size_by_context`. `resolve_calibrated_decode_speed(calibrated, context_tokens=None)` and `estimate_speed_tok_s(..., context_tokens=None)` resolve the nearest measured context depth when `context_tokens` is provided, falling back to the scalar `decode_tok_s` when no curve is present.
+- **`bushpilot/recommend.py` + `bushpilot/picker/display.py`:** `build_recommendations` passes `context_tokens=kv_result["recommended_context"]` to `estimate_speed_tok_s`, attaches `decode_tok_s_by_context` to each recommendation row, and `format_model_body_lines` renders `[Measured decode speed by context depth: 82.2 tok/s @ 100 tok → 74.1 tok/s @ 4,096 tok → 68.5 tok/s @ 16,384 tok]` in the detail pane when two or more context depths have been measured.
+- **`sweep_model.py`:** `derive_lightweight_calibration_fields` populates `decode_tok_s_by_context` from the `decode_speed_vs_context` sweep tier and writes it via `save_calibration`.
+
+### 2. Auto-guard concurrent batched APC + `--kv-bits 8` on sliding-window models (`mlx-vlm#1559`)
+
+- **`bushpilot/recommend.py`:** When `kv_result["kv_bits_apc_caveat"]` is `True` (8-bit KV fallback on an `mlx_vlm` model with sliding-window attention layers) and the user has not explicitly forced `requested_concurrency`, `build_recommendations` automatically caps `concurrency = 1` (`concurrency_capped_for_apc_caveat = True`) instead of adding bonus concurrency slots via `compute_bonus_concurrency`. Single-request sequential APC (`concurrency = 1`) is live-verified safe (`docs/HARDWARE_SPEED_ESTIMATION.md` §20), whereas concurrent batched APC extraction (`BatchKVCache.extract`) is the upstream `mlx-vlm#1559` crash path.
+- **`bushpilot/picker/display.py`:** Updated the `kv_bits_apc_caveat` note in the detail pane to explain that auto-concurrency is capped at 1 (`--max-num-seqs 1`) to avoid the batched APC + SWA + `--kv-bits` path.
+
+### 3. Automated catalog verification & calibration ingestion (`add_model.py --sync-verified`)
+
+- **`add_model.py`:** Added `sync_verified_results()` and CLI flags `--sync-verified`, `--verification-file`, and `--sweeps-dir` (`--write` to update `models.json` in place, dry-run JSON summary by default). Ingests live admission-gate verdicts from `docs/mlx_verification_results.json` (`verify_max_kv_size.sh`) and sweep measurements from `~/.bushpilot/calibration/sweeps/*.sweep.json` (`derived_speed_correction_factor`, `tool_calling_reverified`), and promotes `"status": "untested"` to `"tested"` (stripping the ` — untested` tagline suffix) only when both `verification.verdict == "SAFE"` and `tool_calling.verdict` is in `("SUPPORTED", "NOT_SUPPORTED")`.
+
+
+
 

@@ -136,13 +136,27 @@ def format_model_body_lines(m, r=None):
             if r.get("kv_bits_apc_caveat"):
                 lines.append(
                     "[⚠ this model's sliding-window layers + quantized KV cache + prefix caching is a "
-                    "known upstream gap (mlx-vlm #1559) — prefix reuse still works, but sliding layers "
-                    "likely won't cache on concurrent requests until it's fixed]"
+                    "known upstream gap (mlx-vlm #1559) — auto-concurrency is capped at 1 to keep "
+                    "prefix reuse on the verified single-request path]"
                 )
         else:
             lines.append("[KV cache unquantized — full decode speed, plenty of free memory for this context]")
         if r.get("concurrency", 1) > 1:
             lines.append(f"[{r['concurrency']} concurrent requests supported at this context size, without exceeding safe memory]")
+        curve = r.get("decode_tok_s_by_context")
+        if isinstance(curve, dict) and len(curve) >= 2:
+            pts = []
+            for k, v in curve.items():
+                try:
+                    d = int(k)
+                    if d > 0 and isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                        pts.append((d, float(v)))
+                except (TypeError, ValueError):
+                    continue
+            if len(pts) >= 2:
+                pts.sort(key=lambda item: item[0])
+                curve_str = " → ".join(f"{rate:.1f} tok/s @ {depth:,} tok" for depth, rate in pts)
+                lines.append(f"[Measured decode speed by context depth: {curve_str}]")
     return lines
 
 

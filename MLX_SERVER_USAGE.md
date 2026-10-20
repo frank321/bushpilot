@@ -16,9 +16,10 @@ There are two scripts, each with one job:
    foreground, and tears everything down on Ctrl-C / `q` / a closed terminal / a
    memory emergency. Run it in its own terminal and leave it running — it's the
    thing keeping the model server alive for every tool/terminal attached to it.
-2. **`launch_tool.sh`** — the launcher. Attaches Claude Code or OpenCode to whatever
-   `start_mlx_server.sh` already has running. Run it (in a *different* terminal) each
-   time you want to open a coding session.
+2. **`launch_tool.sh`** — the launcher. Attaches Claude Code, OpenCode, Aider, Cline, or
+   Pi to whatever `start_mlx_server.sh` already has running (or automatically splits a
+   pane/tab in iTerm2, `tmux`, or Terminal.app to start `start_mlx_server.sh` first if
+   no server is running yet). Run it each time you want to open a coding session.
 
 This split means multiple terminals/tools can share one running model — you start the
 server once, then run `launch_tool.sh claude` in one terminal and
@@ -35,7 +36,7 @@ process, no matter which wire format each client speaks.
   `python3.X` and builds its own venv with it — your system `python3` doesn't need to
   meet this bar itself)
 - **curl**
-- Claude Code and/or OpenCode installed, for whichever tool(s) you plan to use
+- Claude Code, OpenCode, Aider, Cline, and/or Pi installed, for whichever tool(s) you plan to use
 - **`fzf`** (optional) — both scripts' interactive pickers use it if present, and fall
   back to a plain numbered menu if it's missing
 
@@ -89,16 +90,28 @@ you chose, and then `exec`s straight into `claude`, `opencode`, `aider`, `cline`
 
 ---
 
-## Stopping the server
+## Stopping the server & hot-swapping models
 
-There's no separate stop script anymore. In the `start_mlx_server.sh` terminal, press
-**Ctrl-C** or **`q`** — both do a full teardown (kills `mlx_vlm.server`, cleans up the
-state file). A closed terminal or dead SSH session (SIGHUP) and a plain SIGTERM both
-trigger the same teardown path. There's no "detach without stopping" mode: the
-dashboard process *is* what's keeping the server up, so closing it always stops
-everything, for every tool/terminal attached to it. (An automatic memory-pressure
-backstop also triggers the same teardown if free memory gets dangerously low while
-you're not looking — see `docs/MONITORING_ARCHITECTURE.md`.)
+There's no separate stop script anymore. In the `start_mlx_server.sh` terminal:
+
+- **Ctrl-C** or **`q`** — does a full teardown (kills the MLX backend and router proxy,
+  cleans up the state file, and saves live decode/prefill/RSS calibration to
+  `~/.bushpilot/calibration/`). A closed terminal or dead SSH session (SIGHUP) and a
+  plain SIGTERM both trigger the same teardown path.
+- **`m`** — opens the interactive model picker and **hot-swaps** the active backend
+  model in place (`bushpilot/router.py` holds the external port 38472 open while the
+  internal backend restarts on port 38473, so attached coding tools stay connected).
+- **In-tool model switching:** in the initial `start_mlx_server.sh` picker, use **`Tab`**
+  (in `fzf`) to select multiple models (or set `"expose_all_fitting_models": true` in
+  `~/.bushpilot/config.json`). Every selected model is registered under a `[BushPilot]`
+  label in OpenCode / Pi / Claude Code (`~/.bushpilot/state/mlx-models.json`), and
+  picking a different `[BushPilot]` model inside your coding tool automatically triggers
+  a live background swap on the next request.
+
+There's no "detach without stopping" mode: the dashboard process *is* what's keeping the
+server up, so closing it always stops everything, for every tool/terminal attached to
+it. (An automatic memory-pressure backstop also triggers the same teardown if free
+memory gets dangerously low while you're not looking — see `docs/MONITORING_ARCHITECTURE.md`.)
 
 ---
 
@@ -106,12 +119,13 @@ you're not looking — see `docs/MONITORING_ARCHITECTURE.md`.)
 
 ### `start_mlx_server.sh`
 
-- **MLX server** (port 38472, `127.0.0.1` only) — the only background process this
-  project runs. No PostgreSQL, no LiteLLM.
-- **Single home**: `~/.bushpilot/{venv,models,state,logs,apc-cache}/`
-- **State file**: `~/.bushpilot/state/mlx-loaded.txt` —
-  `<huggingface_id>|<context_window>|<kv_bits>`, read by `launch_tool.sh` to know
-  what's actually running.
+- **Hot-swap router + MLX backend** (router on port 38472, backend on port 38473,
+  `127.0.0.1` only). No PostgreSQL, no LiteLLM.
+- **Single home**: `~/.bushpilot/{venv,models,state,logs,apc-cache,calibration}/`
+- **State files**: `~/.bushpilot/state/mlx-loaded.txt`
+  (`<huggingface_id>|<context_window>|<kv_bits>`) and
+  `~/.bushpilot/state/mlx-models.json` (the full set of exposed models and their
+  resolved launch specs for live hot-swap), read by `launch_tool.sh` and `router.py`.
 - **Reliability checks carried over from the old script**: a real (not just `/health`)
   one-token inference probe before declaring the server ready, detection of a foreign
   process squatting on port 38472, and the "different model already running, replace
@@ -119,7 +133,8 @@ you're not looking — see `docs/MONITORING_ARCHITECTURE.md`.)
 
 ### `launch_tool.sh`
 
-- Checks the server is up (offers to `exec` `start_mlx_server.sh` if not — see below)
+- Checks the server is up (offers to start `start_mlx_server.sh` in a split terminal
+  pane/window if not — see below)
 - Checks the picked tool's estimated context preload still leaves a usable amount of
   the server's loaded context (errors out with a clear message instead of letting you
   hit a `PromptTooLongError` mid-session)
@@ -149,9 +164,11 @@ you're not looking — see `docs/MONITORING_ARCHITECTURE.md`.)
   `--model mlx-direct/<model>`
 
 If the server isn't running when `launch_tool.sh` starts, it asks to confirm, then
-`exec`s `start_mlx_server.sh` directly in that same terminal (replacing itself, not
-backgrounding) — because the supervisor's own dashboard is what keeps the server
-alive. Once it's up, run `launch_tool.sh` again in a **different** terminal.
+automatically opens a split pane/tab or window (supporting **iTerm2**, **`tmux`**, and
+**macOS Terminal.app**) to run `start_mlx_server.sh`, polls until the server passes its
+startup health check, and then continues launching your chosen coding tool in your
+original terminal. (If none of those terminal multiplexers/apps are available, it falls
+back to `exec`ing `start_mlx_server.sh` directly in the current terminal.)
 
 ---
 

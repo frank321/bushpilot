@@ -956,3 +956,239 @@ def test_models_json_catalog_integrity():
         assert bpt > 0, f"Zero bytes_per_token for {mid}"
         assert fixed >= 0
 
+
+def test_resolve_speed_correction_factor_hierarchy(dense_model):
+    # 1. Explicit per-model override wins over architecture-family default and global default
+    m_explicit = {**dense_model, "architecture": "gemma4_unified", "speed_correction_factor": 1.15}
+    assert ma.resolve_speed_correction_factor(m_explicit) == 1.15
+
+    # 2. Architecture-family lookup applies when per-model speed_correction_factor is unset
+    m_gemma_unified = {**dense_model, "architecture": "gemma4_unified"}
+    assert ma.resolve_speed_correction_factor(m_gemma_unified) == 0.756
+    speed_unified, reason_unified = ma.estimate_speed_tok_s(m_gemma_unified, "Apple M3 Max", 40)
+    # round(0.756 * 350 / 6.3, 1) = 42.0
+    assert speed_unified == 42.0
+    assert reason_unified == "estimated"
+
+    m_gemma_e4b = {**dense_model, "architecture": 'gemma4 (elastic/MatFormer "E4B" variant)'}
+    assert ma.resolve_speed_correction_factor(m_gemma_e4b) == 1.281
+
+    # 3. Unknown or omitted architecture falls back to global SPEED_CORRECTION_FACTOR (0.87)
+    m_unknown_arch = {**dense_model, "architecture": "some_future_arch"}
+    assert ma.resolve_speed_correction_factor(m_unknown_arch) == ma.SPEED_CORRECTION_FACTOR == 0.87
+
+
+def test_recommend_prefill_step_size_context_depth_aware(dense_model, tmp_path, monkeypatch):
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
+    # First sweep at 7,200 tokens finds 2048 optimal; second sweep at 16,384 tokens finds 512 optimal.
+    ma.save_calibration(
+        "Apple M5 Pro", dense_model["id"], 71.6,
+        context_tokens=7200, peak_memory_gb=7.5, prefill_step_size=2048,
+        prefill_step_size_by_context={"7200": {"step_size": 2048, "peak_memory_gb": 7.5}},
+    )
+    ma.save_calibration(
+        "Apple M5 Pro", dense_model["id"], 69.2,
+        context_tokens=16384, peak_memory_gb=7.84, prefill_step_size=512,
+        prefill_step_size_by_context={"16384": {"step_size": 512, "peak_memory_gb": 7.84}},
+    )
+    loaded = ma.load_calibration("Apple M5 Pro", dense_model["id"])
+    # Both depths are preserved and merged across the two saves
+    assert set(loaded["prefill_step_size_by_context"].keys()) == {"7200", "16384"}
+
+    # Shallow recommended context (8,192) is closer to 7,200 -> picks 2048
+    step_shallow, reason_shallow = ma.recommend_prefill_step_size(
+        dense_model, "Apple M5 Pro", 24, context_tokens=8192
+    )
+    assert step_shallow == 2048
+    assert "7,200" in reason_shallow
+
+    # Deep recommended context (65,536) is closer to 16,384 -> picks 512
+    step_deep, reason_deep = ma.recommend_prefill_step_size(
+        dense_model, "Apple M5 Pro", 24, context_tokens=65536
+    )
+    assert step_deep == 512
+    assert "16,384" in reason_deep
+
+    # Exact midpoint between 7200 and 16384 is 11792 -> tie breaks toward deeper depth (16384 -> 512)
+    step_tie, _ = ma.recommend_prefill_step_size(
+        dense_model, "Apple M5 Pro", 24, context_tokens=11792
+    )
+    assert step_tie == 512
+
+    # End-to-end via build_recommendations passes recommended_context (262,144 at 24GB free)
+    rows = ma.build_recommendations([dense_model], free_wired_gb=24, chip_name="Apple M5 Pro", gpu_cores=20)
+    assert rows[0]["recommended_context"] == 262144
+    assert rows[0]["prefill_step_size"] == 512
+    assert "16,384" in rows[0]["prefill_step_size_reason"]
+
+
+def test_decode_tok_s_by_context_merges_and_resolves_by_depth(dense_model, tmp_path, monkeypatch):
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
+    ma.save_calibration(
+        "Apple M5 Pro", dense_model["id"], 71.6,
+        context_tokens=7200,
+        decode_tok_s_by_context={"100": 82.22, "4096": 74.14},
+    )
+    ma.save_calibration(
+        "Apple M5 Pro", dense_model["id"], 68.5,
+        context_tokens=16384,
+        decode_tok_s_by_context={"16384": 68.54},
+    )
+    loaded = ma.load_calibration("Apple M5 Pro", dense_model["id"])
+    assert loaded["decode_tok_s_by_context"] == {"100": 82.22, "4096": 74.14, "16384": 68.54}
+
+    # Without context_tokens -> returns top-level decode_tok_s (68.5)
+    speed_default, reason_default = ma.estimate_speed_tok_s(dense_model, "Apple M5 Pro", 20)
+    assert speed_default == 68.5
+    assert "16,384" in reason_default
+
+    # Shallow context (512) -> nearest depth is 100 (82.2 tok/s)
+    speed_shallow, reason_shallow = ma.estimate_speed_tok_s(
+        dense_model, "Apple M5 Pro", 20, context_tokens=512
+    )
+    assert speed_shallow == 82.2
+    assert "100 tokens of context" in reason_shallow
+
+    # Mid context (4096) -> nearest depth is 4096 (74.1 tok/s)
+    speed_mid, reason_mid = ma.estimate_speed_tok_s(
+        dense_model, "Apple M5 Pro", 20, context_tokens=4096
+    )
+    assert speed_mid == 74.1
+    assert "4,096 tokens of context" in reason_mid
+
+    # Deep context via build_recommendations (262,144) -> nearest depth is 16384 (68.5 tok/s)
+    rows = ma.build_recommendations([dense_model], free_wired_gb=24, chip_name="Apple M5 Pro", gpu_cores=20)
+    assert rows[0]["estimated_tok_s"] == 68.5
+    assert rows[0]["decode_tok_s_by_context"] == {"100": 82.22, "4096": 74.14, "16384": 68.54}
+
+
+def test_build_recommendations_auto_guards_concurrency_when_kv_bits_apc_caveat(sliding_window_model):
+    # At 7.75 GB free:
+    # - Unquantized 16-bit fails to reach MIN_USABLE_CONTEXT (16,384), so it falls back to
+    #   8-bit KV (kv_bits=8, kv_bits_apc_caveat=True).
+    # - With max_context_tokens=16384, there is enough leftover memory for bonus slots if
+    #   unguarded, so auto mode must actively cap concurrency at 1.
+    res_auto = ma.build_recommendations(
+        [sliding_window_model], free_wired_gb=7.75, chip_name="Apple M3 Max", gpu_cores=40,
+        max_context_tokens=16384,
+    )
+    assert res_auto[0]["fits"] is True
+    assert res_auto[0]["kv_bits"] == 8
+    assert res_auto[0]["kv_bits_apc_caveat"] is True
+    # Even though compute_bonus_concurrency would allow >1 slot at 16,384 cap, auto mode
+    # caps concurrency at 1 to avoid mlx-vlm#1559's BatchKVCache.extract crash.
+    raw_bonus = ma.compute_bonus_concurrency(
+        sliding_window_model, 7.75, 8, res_auto[0]["recommended_context"],
+        apc_num_blocks=res_auto[0]["apc_num_blocks"],
+    )
+    assert raw_bonus >= 2
+    assert res_auto[0]["concurrency"] == 1
+    assert res_auto[0]["concurrency_capped_for_apc_caveat"] is True
+
+    # Explicit requested_concurrency is still honored when the user forces it
+    res_forced = ma.build_recommendations(
+        [sliding_window_model], free_wired_gb=7.75, chip_name="Apple M3 Max", gpu_cores=40,
+        requested_concurrency=2, max_context_tokens=16384,
+    )
+    assert res_forced[0]["fits"] is True
+    assert res_forced[0]["concurrency"] == 2
+    assert res_forced[0]["concurrency_capped_for_apc_caveat"] is False
+
+
+def test_add_model_sync_verified_results_promotes_and_updates_catalog(tmp_path):
+    import json
+
+    import add_model as am
+
+    models_path = tmp_path / "models.json"
+    ver_path = tmp_path / "mlx_verification_results.json"
+    sweeps_dir = tmp_path / "sweeps"
+    sweeps_dir.mkdir()
+
+    catalog = {
+        "models": [
+            {
+                "id": "test-untested-model",
+                "huggingface": "mlx-community/Test-Untested-Model",
+                "size_gb": 5.0,
+                "architecture": "qwen3_5",
+                "type": "dense",
+                "status": "untested",
+                "modalities": ["text"],
+                "released": "2026-08",
+                "max_context_architectural": 131072,
+                "display": {"tagline": "Dense model, 5 GB — untested"},
+                "tool_calling": {"verdict": "UNTESTED"},
+                "kv_config": {"num_key_value_heads": 2, "head_dim": 128, "num_hidden_layers": 4},
+            },
+            {
+                "id": "test-partial-model",
+                "huggingface": "mlx-community/Test-Partial-Model",
+                "size_gb": 4.0,
+                "architecture": "qwen3_5",
+                "type": "dense",
+                "status": "untested",
+                "modalities": ["text"],
+                "released": "2026-08",
+                "max_context_architectural": 131072,
+                "display": {"tagline": "Dense model, 4 GB — untested"},
+                "tool_calling": {"verdict": "UNTESTED"},
+                "kv_config": {"num_key_value_heads": 2, "head_dim": 128, "num_hidden_layers": 4},
+            },
+        ]
+    }
+    models_path.write_text(json.dumps(catalog))
+
+    ver_data = {
+        "models": {
+            "mlx-community/Test-Untested-Model": {
+                "model_id": "mlx-community/Test-Untested-Model",
+                "verdict": "SAFE",
+                "reason": "Admission gate verified at 32/256/1024-token bounds.",
+                "verified_at": "2026-10-19T12:00:00Z",
+                "mlx_vlm_version": "0.7.0",
+            },
+            "mlx-community/Test-Partial-Model": {
+                "model_id": "mlx-community/Test-Partial-Model",
+                "verdict": "SAFE",
+                "reason": "Admission gate verified.",
+                "verified_at": "2026-10-19T12:00:00Z",
+                "mlx_vlm_version": "0.7.0",
+            },
+        }
+    }
+    ver_path.write_text(json.dumps(ver_data))
+
+    sweep_data = {
+        "model_id": "test-untested-model",
+        "swept_at": "2026-10-19T13:00:00Z",
+        "derived_speed_correction_factor": 0.912,
+        "tool_calling_reverified": {"verdict": "SUPPORTED", "matches_catalog": False},
+    }
+    (sweeps_dir / "Apple_M5_Pro__test-untested-model.sweep.json").write_text(json.dumps(sweep_data))
+
+    res = am.sync_verified_results(
+        models_path=str(models_path),
+        verification_results_path=str(ver_path),
+        sweeps_dir=str(sweeps_dir),
+        write=True,
+    )
+    assert set(res["updated_models"]) == {"test-untested-model", "test-partial-model"}
+    # Only test-untested-model has BOTH verification=SAFE and tool_calling in (SUPPORTED, NOT_SUPPORTED)
+    assert res["promoted_to_tested"] == ["test-untested-model"]
+
+    saved = json.loads(models_path.read_text())
+    m_full = next(m for m in saved["models"] if m["id"] == "test-untested-model")
+    assert m_full["status"] == "tested"
+    assert m_full["verification"]["verdict"] == "SAFE"
+    assert m_full["tool_calling"]["verdict"] == "SUPPORTED"
+    assert m_full["speed_correction_factor"] == 0.912
+    assert m_full["display"]["tagline"] == "Dense model, 5 GB"
+
+    m_part = next(m for m in saved["models"] if m["id"] == "test-partial-model")
+    assert m_part["verification"]["verdict"] == "SAFE"
+    assert m_part["tool_calling"]["verdict"] == "UNTESTED"
+    assert m_part["status"] == "untested"
+
+
+

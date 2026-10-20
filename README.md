@@ -15,9 +15,10 @@ Bushpilot skips that. It ships a curated catalog of models that have been tested
 - **Curated, tested models:** pick from a catalog where each entry has verified memory and long-context behavior, instead of researching models yourself.
 - **Hardware-aware picker:** detects your chip and free memory, greys out models that won't fit, and computes a safe context size and estimated tok/s for each.
 - **Memory backstop:** a live dashboard watches memory, and the server is torn down automatically if free memory drops below 10% or pressure hits CRITICAL.
-- **One shared server:** attach Claude Code, OpenCode, Aider, Cline, and/or Pi (from as many terminals as you like) to the same running model.
+- **One shared server + live model hot-swap:** attach Claude Code, OpenCode, Aider, Cline, and/or Pi (from as many terminals as you like) to the same running server, and swap models live without restarting your coding tool (`m` on the dashboard, or `Tab`-select multiple models in the picker and switch `[BushPilot]` models directly inside your tool).
+- **Single-terminal or two-terminal launch:** run `./launch_tool.sh` on its own and it will automatically split a pane/window (iTerm2, `tmux`, or macOS Terminal.app) for the server dashboard, wait for it to come up, and attach your coding tool in the original pane.
 - **Speculative decoding:** optional speedup variants for supported models.
-- **Self-contained:** everything (venv, weights, logs, state) lives under `~/.bushpilot/`. Delete that directory for a full reset, or run `./uninstall.sh` to remove it along with the OpenCode provider registration, PATH symlinks, and this project folder.
+- **Self-contained:** everything (venv, weights, logs, state) lives under `~/.bushpilot/`. Delete that directory for a full reset, or run `./uninstall.sh` to remove it along with the OpenCode/Pi provider registrations, PATH symlinks, and this project folder.
 
 ## Requirements
 
@@ -28,7 +29,15 @@ Bushpilot skips that. It ships a curated catalog of models that have been tested
 
 ## Quick start
 
-**Terminal 1:** start the model server and leave it running.
+**Single-terminal launch** (auto-splits iTerm2, `tmux`, or Terminal.app if the server isn't running yet):
+
+```bash
+./launch_tool.sh
+```
+
+Or run the server and tool in **two separate terminals**:
+
+**Terminal 1:** start the model server and leave it running (`Tab` in the picker to pre-register multiple models; press `m` on the dashboard anytime to hot-swap models).
 
 ```bash
 ./start_mlx_server.sh
@@ -40,7 +49,7 @@ Bushpilot skips that. It ships a curated catalog of models that have been tested
 ./launch_tool.sh
 ```
 
-Press **Ctrl-C** or **`q`** in Terminal 1 to stop everything.
+Press **Ctrl-C** or **`q`** in the server terminal to stop everything, or **`m`** to swap the active model live.
 
 Skip the pickers for scripting:
 
@@ -59,7 +68,7 @@ Skip the pickers for scripting:
 | `bushpilot/` | The advisor's logic, one concern per module -- see `AGENTS.md` for the breakdown |
 | `models.json` | The curated model catalog |
 | `uninstall.sh` | Removes the running server, `~/.bushpilot`, the OpenCode provider registration, PATH symlinks, and this project folder |
-| `add_model.py` | Generates an untested `models.json` entry from a Hugging Face repo id, URL, or model name (`--write` to append) |
+| `add_model.py` | Generates an untested `models.json` entry from a Hugging Face repo id, URL, or model name (`--write` to append; `--sync-verified` to ingest `verify_max_kv_size.sh` and `sweep_model.py` results) |
 | `verify_max_kv_size.sh`, `verify_long_context_memory.sh` | Verification tools behind the catalog's tested data |
 | `docs/` | GitHub/GitLab Pages site, release bundle build, and this project's research/history docs |
 | `tests/` | `pytest` suite (`bushpilot`'s recommendation math and picker layout) + `tests/shell/` bats suite (shell backstops) -- see Tests below |

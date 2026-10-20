@@ -382,3 +382,22 @@ def test_format_model_detail_lines_renders_header_and_fit_summary(dense_model, m
     assert "Type: Dense" in joined
     assert "Fits this Mac: 262,144 tok context (16-bit KV)" in joined
 
+
+def test_format_model_body_lines_renders_decode_speed_curve_and_apc_caveat(dense_model, sliding_window_model):
+    rows = ma.build_recommendations([dense_model], free_wired_gb=24, chip_name="Apple M3 Max", gpu_cores=40)
+    rows[0]["decode_tok_s_by_context"] = {"100": 82.2, "4096": 74.1, "16384": 68.5}
+    body = ma.format_model_body_lines(dense_model, rows[0])
+    assert any(
+        "Measured decode speed by context depth: 82.2 tok/s @ 100 tok → 74.1 tok/s @ 4,096 tok → 68.5 tok/s @ 16,384 tok"
+        in line
+        for line in body
+    )
+
+    sw_rows = ma.build_recommendations(
+        [sliding_window_model], free_wired_gb=7.75, chip_name="Apple M3 Max", gpu_cores=40,
+        max_context_tokens=16384,
+    )
+    sw_body = ma.format_model_body_lines(sliding_window_model, sw_rows[0])
+    assert any("auto-concurrency is capped at 1" in line for line in sw_body)
+
+

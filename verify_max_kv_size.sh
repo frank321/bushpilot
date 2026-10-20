@@ -55,6 +55,14 @@ LOG_FILE="/tmp/verify_max_kv_size_$$.log"
 LOW_KV_SIZE=256
 HIGH_KV_SIZE=1024
 
+# Reasoning models (e.g. DeepSeek-R1-Distill-Qwen-*) emit an explicit <think>...</think>
+# block before answering and exhaust max_tokens=60 inside HIGH_KV_SIZE=1024 (finish_reason:
+# length). When Phase 2 returns HTTP 200 without recalling the secret due to token-budget
+# exhaustion inside reasoning, Phase 2b retries recall at REASONING_HIGH_KV_SIZE with
+# REASONING_HIGH_MAX_TOKENS while keeping Phase 1 (256) and Phase 3 (32) untouched.
+REASONING_HIGH_KV_SIZE=4096
+REASONING_HIGH_MAX_TOKENS=1500
+
 # Phase 3 mirrors mlx-vlm PR #1995's own reproduction shape as closely as possible
 # (a 32-token bound against a ~200-token prompt, i.e. the bound is smaller than the
 # PROMPT ALONE, not just smaller than prompt+max_tokens). That PR reported models that
@@ -218,7 +226,7 @@ stop_server() {
 
 # Sends a secret value early in a padded prompt, then asks for recall.
 # Args: <filler_repeat> <max_tokens>
-# Prints one line of JSON: {http_code, prompt_tokens, completion_tokens, content, error}
+# Prints one line of JSON: {http_code, prompt_tokens, completion_tokens, finish_reason, content, reasoning_content, error}
 send_recall_probe() {
     local filler_repeat="$1" max_tokens="$2"
     "$MLX_PYTHON" - "$PORT" "$MODEL_ID" "$filler_repeat" "$max_tokens" << 'PYEOF'
@@ -245,7 +253,7 @@ req = urllib.request.Request(
     headers={"Content-Type": "application/json"},
 )
 out = {"http_code": None, "prompt_tokens": None, "completion_tokens": None,
-       "content": None, "error": None}
+       "finish_reason": None, "content": None, "reasoning_content": None, "error": None}
 try:
     with urllib.request.urlopen(req, timeout=180) as resp:
         result = json.loads(resp.read())
@@ -253,7 +261,11 @@ try:
     usage = result.get("usage", {})
     out["prompt_tokens"] = usage.get("prompt_tokens")
     out["completion_tokens"] = usage.get("completion_tokens")
-    out["content"] = result["choices"][0]["message"]["content"]
+    choice = result["choices"][0]
+    msg = choice.get("message", {})
+    out["finish_reason"] = choice.get("finish_reason")
+    out["content"] = msg.get("content")
+    out["reasoning_content"] = msg.get("reasoning_content")
 except urllib.error.HTTPError as e:
     out["http_code"] = e.code
     out["error"] = e.read().decode()
@@ -361,6 +373,33 @@ main() {
 
     high_http=$(field "$high_result" http_code)
     high_content=$(field "$high_result" content)
+    high_finish_reason=$(field "$high_result" finish_reason)
+    high_reasoning=$(field "$high_result" reasoning_content)
+    effective_high_kv_size="$HIGH_KV_SIZE"
+
+    # Phase 2b (reasoning-model fallback): if Phase 2 returned HTTP 200 without recalling
+    # the secret because the 60-token budget was exhausted mid-reasoning (finish_reason=length
+    # or <think> / reasoning_content present), retry at REASONING_HIGH_KV_SIZE (4096) with
+    # REASONING_HIGH_MAX_TOKENS (1500) so the model can finish its <think> block and emit the
+    # answer. Phase 1 (LOW_KV_SIZE=256) and Phase 3 (EXTREME_LOW_KV_SIZE=32) remain unchanged.
+    if [[ "$high_http" == "200" ]] && ! echo "$high_content $high_reasoning" | grep -qi "ZEBRA-9471-QUARTZ"; then
+        if [[ "$high_finish_reason" == "length" ]] || echo "$high_content" | grep -qi "<think>" || [[ -n "$high_reasoning" ]]; then
+            log "Phase 2 exhausted max_tokens=60 before emitting the final answer (finish_reason=$high_finish_reason) — running Phase 2b reasoning recall fallback at max-kv-size $REASONING_HIGH_KV_SIZE (max_tokens=$REASONING_HIGH_MAX_TOKENS)..."
+            if ! start_server "$REASONING_HIGH_KV_SIZE"; then
+                record_result "INCONCLUSIVE" "Server failed to start at reasoning high max-kv-size ($REASONING_HIGH_KV_SIZE)" "$low_result" "$high_result" ""
+                exit 2
+            fi
+            high_result=$(send_recall_probe 60 "$REASONING_HIGH_MAX_TOKENS")
+            log "Reasoning High-KV result: $high_result"
+            stop_server
+
+            high_http=$(field "$high_result" http_code)
+            high_content=$(field "$high_result" content)
+            high_finish_reason=$(field "$high_result" finish_reason)
+            high_reasoning=$(field "$high_result" reasoning_content)
+            effective_high_kv_size="$REASONING_HIGH_KV_SIZE"
+        fi
+    fi
 
     # Phase 3: extreme-low max-kv-size, mirroring upstream PR #1995's own reproduction
     # scale (bound << prompt, generation-token contribution minimized). This is the
@@ -388,14 +427,14 @@ main() {
     elif [[ "$low_http" == "200" ]]; then
         verdict="UNSAFE"
         reason="--max-kv-size was not enforced as a rejection at the moderate scale (bound=$LOW_KV_SIZE): request returned HTTP 200 instead of an error (recall did not match, so this may be truncation/corruption rather than a clean silent-ignore — needs manual follow-up)."
-    elif [[ "$low_http" != "400" ]] || [[ "$high_http" != "200" ]] || ! echo "$high_content" | grep -qi "ZEBRA-9471-QUARTZ"; then
+    elif [[ "$low_http" != "400" ]] || [[ "$high_http" != "200" ]] || ! echo "$high_content $high_reasoning" | grep -qi "ZEBRA-9471-QUARTZ"; then
         reason="Unexpected combination at moderate scale (low_http=$low_http high_http=$high_http) — needs manual review. low=$low_result high=$high_result"
     elif [[ "$extreme_http" == "200" ]] && echo "$extreme_content" | grep -qi "ZEBRA-9471-QUARTZ"; then
         verdict="UNSAFE_AT_EXTREME_BOUNDS"
         reason="max-kv-size is enforced at moderate scale (bound=$LOW_KV_SIZE vs ~771-token prompt: correctly rejected) but SILENTLY IGNORED at the extreme scale matching upstream PR #1995's own reproduction (bound=$EXTREME_LOW_KV_SIZE, prompt~150 tokens, max_tokens=$EXTREME_LOW_MAX_TOKENS): request succeeded (HTTP 200) with correct recall despite the bound being far smaller than the prompt. This model likely builds its own KV cache and bypasses the admission gate's enforcement at small scale, matching the upstream bug report — treat as UNSAFE for low-context-budget use cases even though moderate-scale requests are protected."
     elif [[ "$extreme_http" == "400" ]]; then
         verdict="SAFE"
-        reason="max-kv-size correctly rejected oversized requests at both moderate scale (bound=$LOW_KV_SIZE vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=$EXTREME_LOW_KV_SIZE vs ~150-token prompt). High max-kv-size ($HIGH_KV_SIZE) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested."
+        reason="max-kv-size correctly rejected oversized requests at both moderate scale (bound=$LOW_KV_SIZE vs ~771-token prompt) and extreme scale matching upstream PR #1995's own reproduction (bound=$EXTREME_LOW_KV_SIZE vs ~150-token prompt). High max-kv-size ($effective_high_kv_size) correctly recalled the planted secret. --max-kv-size is enforced for this model at every scale tested."
     else
         reason="Extreme-low-bound phase produced an unexpected result (extreme_http=$extreme_http, not 200 with correct recall or a clean 400) — needs manual review. extreme=$extreme_result"
     fi

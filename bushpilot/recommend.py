@@ -1,5 +1,6 @@
 """Combines kv/speed/prefill into one row per model -- build_recommendations() is
 the advisor's main entry point, called once per launch with the full catalog."""
+from .calibration import load_calibration
 from .kv import (
     DEFAULT_KV_GROUP_SIZE,
     SAFETY_BUFFER_GB,
@@ -110,7 +111,20 @@ def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_o
                                                     concurrency=sizing_concurrency,
                                                     max_context_tokens=max_context_tokens,
                                                     prefix_cache_slots=dspark_prefix_cache_slots)
-        speed, speed_reason = estimate_speed_tok_s(m, chip_name, gpu_cores)
+        speed, speed_reason = estimate_speed_tok_s(
+            m, chip_name, gpu_cores, context_tokens=kv_result["recommended_context"]
+        )
+
+        serving = m.get("serving") or {}
+        expected_drafter = serving.get("drafter") or serving.get("draft_model") or ""
+        calibrated = load_calibration(chip_name, m.get("id", ""))
+        decode_tok_s_by_context = None
+        if calibrated is not None:
+            recorded_drafter = calibrated.get("drafter")
+            if recorded_drafter is None or recorded_drafter == expected_drafter:
+                raw_curve = calibrated.get("decode_tok_s_by_context")
+                if isinstance(raw_curve, dict) and raw_curve:
+                    decode_tok_s_by_context = dict(raw_curve)
 
         fits = kv_result["fits"]
         context_reason = kv_result["context_reason"]
@@ -125,15 +139,25 @@ def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_o
             context_reason = "estimated_speed_too_slow"
 
         concurrency = sizing_concurrency
+        concurrency_capped_for_apc_caveat = False
         if fits and not requested_concurrency:
-            concurrency = compute_bonus_concurrency(
-                m, free_wired_gb, kv_result["kv_bits"], kv_result["recommended_context"],
-                prefix_cache_slots=dspark_prefix_cache_slots,
-                apc_num_blocks=kv_result.get("apc_num_blocks"),
-            )
+            if kv_result.get("kv_bits_apc_caveat"):
+                # Auto-guard against mlx-vlm#1559: concurrent batched APC extraction
+                # (BatchKVCache.extract) on sliding-window + --kv-bits 8 models is the
+                # upstream crash path, whereas single-request sequential APC
+                # (concurrency=1) is live-verified safe (docs/HARDWARE_SPEED_ESTIMATION.md §20).
+                concurrency = 1
+                concurrency_capped_for_apc_caveat = True
+            else:
+                concurrency = compute_bonus_concurrency(
+                    m, free_wired_gb, kv_result["kv_bits"], kv_result["recommended_context"],
+                    prefix_cache_slots=dspark_prefix_cache_slots,
+                    apc_num_blocks=kv_result.get("apc_num_blocks"),
+                )
 
         prefill_step_size, prefill_step_size_reason = recommend_prefill_step_size(
             m, chip_name, free_wired_gb,
+            context_tokens=kv_result["recommended_context"],
         )
 
         rows.append({
@@ -143,9 +167,11 @@ def build_recommendations(models, free_wired_gb, chip_name, gpu_cores, preload_o
             "kv_formula_detail": kv_result["kv_formula_detail"],
             "kv_bits": kv_result["kv_bits"],
             "kv_bits_apc_caveat": kv_result["kv_bits_apc_caveat"],
+            "concurrency_capped_for_apc_caveat": concurrency_capped_for_apc_caveat,
             "apc_num_blocks": kv_result.get("apc_num_blocks"),
             "estimated_tok_s": speed,
             "speed_reason": speed_reason,
+            "decode_tok_s_by_context": decode_tok_s_by_context,
             "context_after_preload": kv_result["context_after_preload"],
             "fits": fits,
             "concurrency": concurrency,
