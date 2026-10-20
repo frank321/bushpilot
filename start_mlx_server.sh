@@ -36,12 +36,25 @@ SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SO
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 
 INTERACTIVE=false
+SELECT_ONLY=false
+FROM_ROSTER=false
+TOOL_FOR_ADVISOR=""
 ARGS=()
-for arg in "$@"; do
-    case "$arg" in
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --interactive) INTERACTIVE=true ;;
-        *) ARGS+=("$arg") ;;
+        --select-only) SELECT_ONLY=true; INTERACTIVE=true ;;
+        --from-roster) FROM_ROSTER=true ;;
+        --tool)
+            shift
+            TOOL_FOR_ADVISOR="${1:-}"
+            ;;
+        --tool=*)
+            TOOL_FOR_ADVISOR="${1#--tool=}"
+            ;;
+        *) ARGS+=("$1") ;;
     esac
+    shift
 done
 
 LOCAL_MODEL="${ARGS[0]:-}"
@@ -53,7 +66,9 @@ CONTEXT_WINDOW="${ARGS[2]:-131072}"
 # the recommended context already fits free memory unquantized.
 KV_BITS=""
 
-if [[ "$INTERACTIVE" == "false" && -z "$LOCAL_MODEL" ]]; then
+if [[ "$FROM_ROSTER" == "true" ]]; then
+    INTERACTIVE=false
+elif [[ "$INTERACTIVE" == "false" && -z "$LOCAL_MODEL" ]]; then
     INTERACTIVE=true
 fi
 
@@ -76,6 +91,7 @@ mkdir -p "$BUSHPILOT_VENV" "$BUSHPILOT_STATE_DIR" "$BUSHPILOT_LOG_DIR" "$BUSHPIL
 
 MLX_STATE_FILE="$BUSHPILOT_STATE_DIR/mlx-loaded.txt"
 MLX_ROSTER_FILE="$BUSHPILOT_STATE_DIR/mlx-roster.json"
+MLX_STARTING_PID_FILE="$BUSHPILOT_STATE_DIR/mlx-starting.pid"
 MLX_SWAP_REQUEST_FILE="$BUSHPILOT_STATE_DIR/mlx-swap-request.txt"
 MLX_SWAP_ERROR_FILE="$BUSHPILOT_STATE_DIR/mlx-swap-error.txt"
 # Written best-effort after every FRESH launch (never on an attach-to-already-healthy
@@ -184,6 +200,7 @@ fi
 # here means "let the advisor assume mlx-dspark's own default," matching what actually
 # gets launched below when CONFIG_DSPARK_PC_SLOTS is also unset.
 [[ -n "$CONFIG_DSPARK_PC_SLOTS" ]] && ADVISOR_FLAGS+=(--prefix-cache-slots "$CONFIG_DSPARK_PC_SLOTS")
+[[ -n "$TOOL_FOR_ADVISOR" ]] && ADVISOR_FLAGS+=(--tool "$TOOL_FOR_ADVISOR")
 
 # Panel finding (GLM, high): the LiteLLM-removal decision rests on this specific
 # installed mlx-vlm version's behavior (native /v1/messages routes, /metrics's
@@ -718,7 +735,22 @@ run_fzf_model_picker() {
     # fzf exists (and gets immediately superseded by the `start` reload anyway).
     list_cmd+="--term-width \"\${FZF_COLUMNS:-$term_width}\""
 
-    local header_text=$'Models fit, context size and speed are calculated live for your hardware (chip + free memory).\n↑↓ move · type to filter · Tab mark roster (up to 5) · Enter select · Esc cancel\nSort: click a column header (again to reverse), or ^R newest · ^S fastest · ^T largest · ^O name\ngreen = fits as-is · yellow = KV-quantized · dim = does not fit · 71 tok/s = measured · ~71 tok/s = est · ✓ tested · ○ untested'
+    local b="" d="" g="" y="" c="" m="" r=""
+    if [[ -z "${NO_COLOR:-}" ]]; then
+        b=$'\033[1m'
+        d=$'\033[2m'
+        g=$'\033[32m'
+        y=$'\033[33m'
+        c=$'\033[36m'
+        m=$'\033[35m'
+        r=$'\033[0m'
+    fi
+    local header_text
+    header_text="${d}Context size & speed are calculated live for your chip and current free memory.${r}"$'\n'
+    header_text+="${b}${c}Keys:${r}   ${b}↑↓${r} move · ${b}type${r} filter · ${b}${g}Enter${r} launch · ${b}${m}Tab${r} mark ${m}●${r} (up to 5) · ${b}Esc${r} cancel"$'\n'
+    header_text+="${b}${m}Roster:${r} ${b}${g}Enter${r} alone = picked model + up to 4 cached models in tool · ${b}${m}Tab${r} 2–5 = only marked models (1st loads now)"$'\n'
+    header_text+="${b}${y}Sort:${r}   click column header (again to reverse) · ${b}^R${r} newest · ${b}^S${r} fastest · ${b}^T${r} largest · ${b}^O${r} name"$'\n'
+    header_text+="${b}Legend:${r} ${g}■ fits as-is${r} · ${y}■ KV-quantized${r} · ${d}■ won't fit${r} · ${b}71 tok/s${r} measured · ${d}~71 tok/s est${r} · ${g}✓ tested${r} · ${d}○ untested${r}"
     # The column-header row sits right below fzf's --header lines; a click-header event
     # reports which line was clicked, and only that row should trigger a re-sort.
     local header_row=$(( $(printf '%s\n' "$header_text" | wc -l) + 1 ))
@@ -846,6 +878,39 @@ apply_resolved_model_json() {
     else
         APC_NUM_BLOCKS=4096
     fi
+}
+
+# Loads the primary model entry from ~/.bushpilot/state/mlx-roster.json (populated by a
+# prior `--select-only` run in launch_tool.sh's auto-split flow) and applies its
+# resolved parameters without re-prompting.
+load_primary_from_roster_file() {
+    if [[ ! -f "$MLX_ROSTER_FILE" ]]; then
+        log_error "No model roster found at $MLX_ROSTER_FILE for --from-roster launch."
+        return 1
+    fi
+    local entry_json
+    entry_json="$("$MLX_PYTHON" -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    models = data.get("models") or []
+    primary_id = data.get("primary_id")
+    chosen = next((m for m in models if m.get("id") == primary_id), None)
+    if chosen is None and models:
+        chosen = models[0]
+    if chosen:
+        print(json.dumps(chosen))
+except Exception:
+    pass
+' "$MLX_ROSTER_FILE" 2>/dev/null || true)"
+    if [[ -z "$entry_json" ]]; then
+        log_error "Could not read primary model from $MLX_ROSTER_FILE."
+        return 1
+    fi
+    apply_resolved_model_json "$entry_json"
+    log_success "Loaded selected model from roster: $LOCAL_MODEL ($MLX_MODEL) — context ${CONTEXT_WINDOW} tokens"
+    return 0
 }
 
 # Interactive model selection (Phase 2: no --tool factored in here anymore -- the
@@ -1572,7 +1637,7 @@ full_teardown() {
         # spawning Python subprocesses for calibration snapshots.
         wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" "${MEM_EMERGENCY_KILL_TIMEOUT:-3}" || true
         declare -F stop_router > /dev/null 2>&1 && stop_router
-        rm -f "$MLX_STATE_FILE" "${MLX_ROSTER_FILE:-}" "${MLX_SWAP_REQUEST_FILE:-}" "${MLX_SWAP_ERROR_FILE:-}"
+        rm -f "$MLX_STATE_FILE" "${MLX_ROSTER_FILE:-}" "${MLX_STARTING_PID_FILE:-}" "${MLX_SWAP_REQUEST_FILE:-}" "${MLX_SWAP_ERROR_FILE:-}"
         render_dashboard || true
         [[ -t 1 ]] && printf '\033[?25h' 2>/dev/null || true
         stty sane 2>/dev/null || true
@@ -1582,7 +1647,7 @@ full_teardown() {
         stty sane 2>/dev/null || true
         wait_for_process_gone "$MLX_PROC_PATTERN" "MLX server" 20 || true
         declare -F stop_router > /dev/null 2>&1 && stop_router
-        rm -f "$MLX_STATE_FILE" "${MLX_ROSTER_FILE:-}" "${MLX_SWAP_REQUEST_FILE:-}" "${MLX_SWAP_ERROR_FILE:-}"
+        rm -f "$MLX_STATE_FILE" "${MLX_ROSTER_FILE:-}" "${MLX_STARTING_PID_FILE:-}" "${MLX_SWAP_REQUEST_FILE:-}" "${MLX_SWAP_ERROR_FILE:-}"
     fi
     exit 0
 }
@@ -2177,9 +2242,21 @@ main() {
     ensure_symlinked_on_path
     bootstrap_mlx
 
-    if [[ "$INTERACTIVE" == "true" ]]; then
+    if [[ "$SELECT_ONLY" == "true" ]]; then
+        run_interactive_selection
+        return 0
+    elif [[ "$FROM_ROSTER" == "true" ]]; then
+        load_primary_from_roster_file || exit 1
+    elif [[ "$INTERACTIVE" == "true" ]]; then
         run_interactive_selection
     fi
+
+    # Record our startup PID so a waiting launch_tool.sh (auto-split mode) can track
+    # startup progress, detect if this process dies before completing smoke checks, and
+    # wait until ensure_mlx_running finishes before attaching the coding tool.
+    printf '%s\n' "$$" > "$MLX_STARTING_PID_FILE"
+    trap 'rm -f "${MLX_STARTING_PID_FILE:-}"' EXIT
+    trap 'rm -f "${MLX_STARTING_PID_FILE:-}"; exit 130' INT HUP TERM
 
     # Runs AFTER model selection (not folded into bootstrap_mlx above) because the
     # interactive path doesn't know which model id it's serving until
@@ -2188,7 +2265,7 @@ main() {
     # itself needs them regardless of which backend gets selected.
     resolve_serving_config
 
-    if [[ "$INTERACTIVE" != "true" ]]; then
+    if [[ "$INTERACTIVE" != "true" && "$FROM_ROSTER" != "true" ]]; then
         ensure_roster_file_built "$LOCAL_MODEL"
     fi
 
@@ -2199,7 +2276,9 @@ main() {
     # the KV cache at ~10GB and tripped the memory backstop. Warn (and log the same
     # line into the server log) when the requested context exceeds the advisor's own
     # memory-fit recommendation for this model; never override the user's choice.
-    warn_if_context_exceeds_recommendation
+    if [[ "$FROM_ROSTER" != "true" ]]; then
+        warn_if_context_exceeds_recommendation
+    fi
 
     ensure_backend_installed
 
@@ -2213,6 +2292,7 @@ main() {
     ensure_model_downloaded || exit 1
     patch_known_chat_template_bugs
     ensure_mlx_running
+    rm -f "$MLX_STARTING_PID_FILE"
 
     run_dashboard
 }

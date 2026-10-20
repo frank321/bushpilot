@@ -4,13 +4,14 @@ set -euo pipefail
 # launch_tool.sh — attaches a coding tool (Claude Code / OpenCode / Aider / Cline / Pi)
 # to the already-running MLX supervisor (start_mlx_server.sh). See docs/PHASE_PLAN.md Phase 3.
 #
-# This script does NOT start or manage the model server itself -- that's
-# start_mlx_server.sh's job, and its dashboard is the thing keeping the shared
-# server alive for every tool/terminal attached to it. If the server isn't up yet,
-# this script offers to start it, but does so by `exec`-ing start_mlx_server.sh
-# directly (replacing itself in this terminal) rather than launching a background
-# copy -- the dashboard it takes over into already tells you to open another
-# terminal and re-run launch_tool.sh there once it's ready.
+# This script does NOT manage the model server itself -- that's start_mlx_server.sh's
+# job, and its dashboard is the thing keeping the shared server alive for every
+# tool/terminal attached to it. If the server isn't up yet, this script offers to
+# start it: when running inside a supported terminal (cmux, tmux, WezTerm, kitty,
+# iTerm2, Ghostty, or macOS Terminal.app), it runs the interactive model picker right
+# here, spawns start_mlx_server.sh's live dashboard in a split pane/tab, waits for it
+# to pass its startup smoke check, and then launches the chosen coding tool in this
+# original terminal. Otherwise it falls back to `exec`-ing start_mlx_server.sh here.
 #
 # Usage:
 #   launch_tool.sh                    → fzf tool picker (plain menu if fzf is missing)
@@ -39,6 +40,7 @@ START_PROXY_SCRIPT="$SCRIPT_DIR/start_mlx_server.sh"
 BUSHPILOT_HOME="$HOME/.bushpilot"
 MLX_STATE_FILE="$BUSHPILOT_HOME/state/mlx-loaded.txt"
 MLX_ROSTER_FILE="$BUSHPILOT_HOME/state/mlx-roster.json"
+MLX_STARTING_PID_FILE="$BUSHPILOT_HOME/state/mlx-starting.pid"
 BUSHPILOT_CONFIG_FILE="$BUSHPILOT_HOME/config.json"
 CONFIG_HOST=""
 CONFIG_PORT=""
@@ -260,16 +262,218 @@ proxy_is_healthy() {
     curl -fsS --max-time 5 "http://$MLX_HOST:$MLX_PORT/health" > /dev/null 2>&1
 }
 
-# Checks proxy/model health first; if down, confirms with the user, then `exec`s
-# start_mlx_server.sh directly -- see the header comment for why this replaces the
-# process instead of backgrounding it.
+resolve_cmux_bin() {
+    if [[ -n "${CMUX_BUNDLED_CLI_PATH:-}" && -x "${CMUX_BUNDLED_CLI_PATH}" ]]; then
+        echo "${CMUX_BUNDLED_CLI_PATH}"
+        return 0
+    fi
+    if is_command_available cmux; then
+        command -v cmux
+        return 0
+    fi
+    if [[ -x "/Applications/cmux.app/Contents/Resources/bin/cmux" ]]; then
+        echo "/Applications/cmux.app/Contents/Resources/bin/cmux"
+        return 0
+    fi
+    return 1
+}
+
+# Detects whether the current terminal supports opening a split pane or tab for the
+# server dashboard while keeping the current terminal free for the coding tool.
+# Honors BUSHPILOT_SPLIT_MODE=none|off|false|0 to force single-terminal fallback, or an
+# explicit splitter name (cmux|tmux|wezterm|kitty|iterm2|ghostty|apple_terminal).
+detect_terminal_splitter() {
+    local mode="${BUSHPILOT_SPLIT_MODE:-}"
+    case "$mode" in
+        none|off|false|0)
+            echo ""
+            return 0
+            ;;
+        cmux|tmux|wezterm|kitty|iterm2|ghostty|apple_terminal)
+            echo "$mode"
+            return 0
+            ;;
+    esac
+
+    if [[ -n "${CMUX_SURFACE_ID:-}" || -n "${CMUX_WORKSPACE_ID:-}" ]] && resolve_cmux_bin >/dev/null 2>&1; then
+        echo "cmux"
+        return 0
+    fi
+    if [[ -n "${TMUX:-}" ]] && is_command_available tmux; then
+        echo "tmux"
+        return 0
+    fi
+    if [[ -n "${WEZTERM_PANE:-}" ]] && is_command_available wezterm; then
+        echo "wezterm"
+        return 0
+    fi
+    if [[ -n "${KITTY_LISTEN_ON:-}" ]] && is_command_available kitty; then
+        echo "kitty"
+        return 0
+    fi
+    if [[ "${TERM_PROGRAM:-}" == "iTerm.app" || -n "${ITERM_SESSION_ID:-}" ]] && is_command_available osascript; then
+        echo "iterm2"
+        return 0
+    fi
+    if [[ "${TERM_PROGRAM:-}" == "ghostty" ]] && [[ -d "/Applications/Ghostty.app" || -d "$HOME/Applications/Ghostty.app" ]]; then
+        echo "ghostty"
+        return 0
+    fi
+    if [[ "${TERM_PROGRAM:-}" == "Apple_Terminal" ]] && is_command_available osascript; then
+        echo "apple_terminal"
+        return 0
+    fi
+    echo ""
+}
+
+splitter_display_name() {
+    case "$1" in
+        cmux) echo "cmux right split" ;;
+        tmux) echo "tmux split pane" ;;
+        wezterm) echo "WezTerm right split" ;;
+        kitty) echo "kitty window" ;;
+        iterm2) echo "iTerm2 vertical split" ;;
+        ghostty) echo "Ghostty window" ;;
+        apple_terminal) echo "Terminal.app tab" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+spawn_server_pane() {
+    local splitter="$1"
+    local cmd_str
+    printf -v cmd_str 'exec %q --from-roster' "$START_PROXY_SCRIPT"
+
+    case "$splitter" in
+        cmux)
+            local cmux_bin
+            cmux_bin="$(resolve_cmux_bin)" || return 1
+            "$cmux_bin" new-split right --focus false --command "$cmd_str" >/dev/null
+            ;;
+        tmux)
+            tmux split-window -h -d "$START_PROXY_SCRIPT" --from-roster
+            ;;
+        wezterm)
+            wezterm cli split-pane --right -- "$START_PROXY_SCRIPT" --from-roster >/dev/null
+            ;;
+        kitty)
+            kitty @ launch --type=window --keep-focus "$START_PROXY_SCRIPT" --from-roster >/dev/null
+            ;;
+        iterm2)
+            osascript - "$cmd_str" <<'APPLESCRIPT' >/dev/null
+on run argv
+    set cmd to item 1 of argv
+    tell application "iTerm2"
+        tell current window
+            set origSession to current session of current tab
+            tell origSession
+                split vertically with default profile command cmd
+            end tell
+            select origSession
+        end tell
+    end tell
+end run
+APPLESCRIPT
+            ;;
+        ghostty)
+            local ghostty_app="/Applications/Ghostty.app"
+            [[ -d "$ghostty_app" ]] || ghostty_app="$HOME/Applications/Ghostty.app"
+            [[ -d "$ghostty_app" ]] || return 1
+            open -na "$ghostty_app" --args -e "$START_PROXY_SCRIPT" --from-roster
+            ;;
+        apple_terminal)
+            osascript - "$cmd_str" <<'APPLESCRIPT' >/dev/null
+on run argv
+    set cmd to item 1 of argv
+    tell application "Terminal"
+        do script cmd
+    end tell
+end run
+APPLESCRIPT
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+wait_for_spawned_proxy() {
+    local poll_sec="${BUSHPILOT_WAIT_POLL_SEC:-1}"
+    local spawn_timeout_polls="${BUSHPILOT_SPAWN_TIMEOUT_POLLS:-15}"
+    local polls=0
+    local spin_chars='|/-\'
+    local spin_idx=0
+
+    while true; do
+        if [[ ! -f "$MLX_STARTING_PID_FILE" ]] && proxy_is_healthy; then
+            [[ -t 1 ]] && printf '\r\033[K'
+            log_success "Local model server is healthy on $MLX_HOST:$MLX_PORT."
+            return 0
+        fi
+
+        if [[ ! -f "$MLX_STARTING_PID_FILE" ]]; then
+            if proxy_is_healthy; then
+                [[ -t 1 ]] && printf '\r\033[K'
+                log_success "Local model server is healthy on $MLX_HOST:$MLX_PORT."
+                return 0
+            fi
+            [[ -t 1 ]] && printf '\r\033[K'
+            log_error "Server startup in split pane exited before becoming healthy. Check $BUSHPILOT_HOME/logs/mlx-server.log."
+            return 1
+        fi
+
+        local start_pid=""
+        start_pid="$(tr -d ' \t\r\n' < "$MLX_STARTING_PID_FILE" 2>/dev/null || true)"
+        if [[ "$start_pid" =~ ^[0-9]+$ ]]; then
+            if ! kill -0 "$start_pid" 2>/dev/null; then
+                if proxy_is_healthy; then
+                    rm -f "$MLX_STARTING_PID_FILE"
+                    [[ -t 1 ]] && printf '\r\033[K'
+                    log_success "Local model server is healthy on $MLX_HOST:$MLX_PORT."
+                    return 0
+                fi
+                rm -f "$MLX_STARTING_PID_FILE"
+                [[ -t 1 ]] && printf '\r\033[K'
+                log_error "Server process (PID $start_pid) exited during startup. Check $BUSHPILOT_HOME/logs/mlx-server.log."
+                return 1
+            fi
+        elif [[ "$start_pid" == "spawning" && "$polls" -ge "$spawn_timeout_polls" ]]; then
+            rm -f "$MLX_STARTING_PID_FILE"
+            [[ -t 1 ]] && printf '\r\033[K'
+            log_error "Timed out waiting for split pane to start $(basename "$START_PROXY_SCRIPT")."
+            return 1
+        fi
+
+        if [[ -t 1 ]]; then
+            local sc="${spin_chars:$((spin_idx % 4)):1}"
+            printf '\r[INFO] %s Waiting for model server to finish loading in split pane (%ds)...' "$sc" "$polls"
+            spin_idx=$((spin_idx + 1))
+        fi
+
+        sleep "$poll_sec"
+        polls=$((polls + 1))
+    done
+}
+
+# Checks proxy/model health first; if down, confirms with the user. When a supported
+# terminal splitter is available, runs the model picker in the current terminal,
+# spawns the server dashboard in a split pane/tab, waits for it to pass smoke checks,
+# and returns so the chosen coding tool launches right here. Otherwise `exec`s
+# start_mlx_server.sh directly in this terminal.
 ensure_proxy_running() {
+    local tool="${1:-}"
     if proxy_is_healthy; then
         return 0
     fi
     log_info "No healthy local model server detected on $MLX_HOST:$MLX_PORT."
+    local splitter
+    splitter="$(detect_terminal_splitter)"
+    local prompt_msg="Start it now with $(basename "$START_PROXY_SCRIPT")? [y/N] "
+    if [[ -n "$splitter" ]]; then
+        prompt_msg="Start it now in a $(splitter_display_name "$splitter") and launch $(tool_display_name "${tool:-tool}") here? [y/N] "
+    fi
     local confirm
-    read -r -p "Start it now with $(basename "$START_PROXY_SCRIPT")? [y/N] " confirm || confirm=""
+    read -r -p "$prompt_msg" confirm || confirm=""
     case "$confirm" in
         y|Y|yes|YES) ;;
         *)
@@ -277,8 +481,33 @@ ensure_proxy_running() {
             exit 1
             ;;
     esac
+
+    if [[ -n "$splitter" ]]; then
+        local select_args=(--select-only)
+        [[ -n "$tool" ]] && select_args+=(--tool "$tool")
+        "$START_PROXY_SCRIPT" "${select_args[@]}" || exit 1
+
+        mkdir -p "$(dirname "$MLX_STARTING_PID_FILE")"
+        rm -f "$MLX_STATE_FILE"
+        printf 'spawning\n' > "$MLX_STARTING_PID_FILE"
+
+        log_info "Opening server dashboard in $(splitter_display_name "$splitter")..."
+        if spawn_server_pane "$splitter"; then
+            wait_for_spawned_proxy || exit 1
+            return 0
+        fi
+
+        rm -f "$MLX_STARTING_PID_FILE"
+        log_info "Could not open $(splitter_display_name "$splitter") -- falling back to starting the dashboard in this terminal."
+        log_info "Once it's ready, run $(basename "$SCRIPT_PATH") again in a different terminal."
+        exec "$START_PROXY_SCRIPT" --from-roster
+    fi
+
     log_info "Starting the local model server in this terminal -- it becomes the live dashboard."
     log_info "Once it's ready, run $(basename "$SCRIPT_PATH") again in a different terminal."
+    if [[ -n "$tool" ]]; then
+        exec "$START_PROXY_SCRIPT" --interactive --tool "$tool"
+    fi
     exec "$START_PROXY_SCRIPT" --interactive
 }
 
@@ -1236,7 +1465,7 @@ main() {
         exit 1
     fi
 
-    ensure_proxy_running
+    ensure_proxy_running "$tool"
     read_loaded_state
     check_preload_fit "$tool"
 
@@ -1249,4 +1478,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

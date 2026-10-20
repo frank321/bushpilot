@@ -265,3 +265,191 @@ assert pi_names == [
 ], pi_names
 ' "$HOME/.config/opencode/opencode.jsonc" "$HOME/.pi/agent/models.json"
 }
+
+@test "detect_terminal_splitter prioritizes cmux, tmux, wezterm, kitty, iterm2, apple_terminal, and honors BUSHPILOT_SPLIT_MODE" {
+    source_launch_functions resolve_cmux_bin detect_terminal_splitter
+    is_command_available() { command -v "$1" > /dev/null 2>&1; }
+
+    local fake_cmux="$TEST_TMPDIR/fake-cmux"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_cmux"
+    chmod +x "$fake_cmux"
+
+    # Explicit disable via BUSHPILOT_SPLIT_MODE=none
+    BUSHPILOT_SPLIT_MODE="none" CMUX_SURFACE_ID="surface:1" CMUX_BUNDLED_CLI_PATH="$fake_cmux" \
+        run detect_terminal_splitter
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+
+    # Explicit override via BUSHPILOT_SPLIT_MODE=tmux
+    BUSHPILOT_SPLIT_MODE="tmux" CMUX_SURFACE_ID="" TMUX="" \
+        run detect_terminal_splitter
+    [ "$status" -eq 0 ]
+    [ "$output" = "tmux" ]
+
+    # cmux detection via CMUX_SURFACE_ID + CMUX_BUNDLED_CLI_PATH
+    BUSHPILOT_SPLIT_MODE="" CMUX_SURFACE_ID="surface:1" CMUX_BUNDLED_CLI_PATH="$fake_cmux" \
+        TMUX="" WEZTERM_PANE="" KITTY_LISTEN_ON="" TERM_PROGRAM="ghostty" \
+        run detect_terminal_splitter
+    [ "$status" -eq 0 ]
+    [ "$output" = "cmux" ]
+
+    # tmux detection when not in cmux
+    is_command_available() { [[ "$1" == "tmux" ]]; }
+    BUSHPILOT_SPLIT_MODE="" CMUX_SURFACE_ID="" CMUX_WORKSPACE_ID="" TMUX="/tmp/tmux-1000/default,123,0" \
+        WEZTERM_PANE="" KITTY_LISTEN_ON="" TERM_PROGRAM="" \
+        run detect_terminal_splitter
+    [ "$status" -eq 0 ]
+    [ "$output" = "tmux" ]
+
+    # wezterm detection
+    is_command_available() { [[ "$1" == "wezterm" ]]; }
+    BUSHPILOT_SPLIT_MODE="" CMUX_SURFACE_ID="" CMUX_WORKSPACE_ID="" TMUX="" WEZTERM_PANE="1" \
+        KITTY_LISTEN_ON="" TERM_PROGRAM="WezTerm" \
+        run detect_terminal_splitter
+    [ "$status" -eq 0 ]
+    [ "$output" = "wezterm" ]
+
+    # kitty detection
+    is_command_available() { [[ "$1" == "kitty" ]]; }
+    BUSHPILOT_SPLIT_MODE="" CMUX_SURFACE_ID="" CMUX_WORKSPACE_ID="" TMUX="" WEZTERM_PANE="" \
+        KITTY_LISTEN_ON="unix:/tmp/kitty" TERM_PROGRAM="" \
+        run detect_terminal_splitter
+    [ "$status" -eq 0 ]
+    [ "$output" = "kitty" ]
+
+    # iTerm2 detection
+    is_command_available() { [[ "$1" == "osascript" ]]; }
+    BUSHPILOT_SPLIT_MODE="" CMUX_SURFACE_ID="" CMUX_WORKSPACE_ID="" TMUX="" WEZTERM_PANE="" \
+        KITTY_LISTEN_ON="" TERM_PROGRAM="iTerm.app" ITERM_SESSION_ID="" \
+        run detect_terminal_splitter
+    [ "$status" -eq 0 ]
+    [ "$output" = "iterm2" ]
+
+    # Apple Terminal detection
+    BUSHPILOT_SPLIT_MODE="" CMUX_SURFACE_ID="" CMUX_WORKSPACE_ID="" TMUX="" WEZTERM_PANE="" \
+        KITTY_LISTEN_ON="" TERM_PROGRAM="Apple_Terminal" ITERM_SESSION_ID="" \
+        run detect_terminal_splitter
+    [ "$status" -eq 0 ]
+    [ "$output" = "apple_terminal" ]
+}
+
+@test "wait_for_spawned_proxy succeeds when startup PID file clears and proxy_is_healthy passes, and fails fast if startup PID dies" {
+    source_launch_functions wait_for_spawned_proxy
+    MLX_STARTING_PID_FILE="$BUSHPILOT_HOME/state/mlx-starting.pid"
+    START_PROXY_SCRIPT="$REPO_ROOT/start_mlx_server.sh"
+    BUSHPILOT_WAIT_POLL_SEC="0.05"
+    BUSHPILOT_SPAWN_TIMEOUT_POLLS="3"
+    mkdir -p "$BUSHPILOT_HOME/state"
+
+    # Case 1: Startup PID is alive on poll 1, then clears and server is healthy on poll 2
+    local poll_count=0
+    printf '%s\n' "$$" > "$MLX_STARTING_PID_FILE"
+    proxy_is_healthy() {
+        [[ ! -f "$MLX_STARTING_PID_FILE" ]]
+    }
+    (
+        sleep 0.08
+        rm -f "$MLX_STARTING_PID_FILE"
+    ) &
+    local bg_pid=$!
+    call wait_for_spawned_proxy
+    wait "$bg_pid" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+
+    # Case 2: Startup PID is a dead process and proxy_is_healthy is false -> immediate failure
+    printf '999999\n' > "$MLX_STARTING_PID_FILE"
+    proxy_is_healthy() { return 1; }
+    run wait_for_spawned_proxy
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Server process (PID 999999) exited during startup"* ]]
+
+    # Case 3: Stuck in 'spawning' past timeout -> failure
+    printf 'spawning\n' > "$MLX_STARTING_PID_FILE"
+    proxy_is_healthy() { return 1; }
+    run wait_for_spawned_proxy
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Timed out waiting for split pane"* ]]
+}
+
+@test "ensure_proxy_running auto-splits: runs --select-only in current terminal, spawns split pane with --from-roster, and aborts before split if picker is cancelled" {
+    source_launch_functions splitter_display_name tool_display_name ensure_proxy_running
+    MLX_STATE_FILE="$BUSHPILOT_HOME/state/mlx-loaded.txt"
+    MLX_STARTING_PID_FILE="$BUSHPILOT_HOME/state/mlx-starting.pid"
+    mkdir -p "$BUSHPILOT_HOME/state"
+
+    local calls_log="$TEST_TMPDIR/calls.log"
+    START_PROXY_SCRIPT="$TEST_TMPDIR/fake_start_mlx_server.sh"
+    cat <<'EOF' > "$START_PROXY_SCRIPT"
+#!/usr/bin/env bash
+echo "start_mlx_server:$*" >> "$CALLS_LOG"
+exit "${FAKE_SELECT_EXIT:-0}"
+EOF
+    chmod +x "$START_PROXY_SCRIPT"
+    export CALLS_LOG="$calls_log"
+
+    proxy_is_healthy() { return 1; }
+    detect_terminal_splitter() { echo "cmux"; }
+    spawn_server_pane() {
+        echo "spawn_server_pane:$1" >> "$calls_log"
+        rm -f "$MLX_STARTING_PID_FILE"
+        return 0
+    }
+    wait_for_spawned_proxy() {
+        echo "wait_for_spawned_proxy" >> "$calls_log"
+        return 0
+    }
+    ensure_proxy_running_with_yes() {
+        ensure_proxy_running "$1" <<<"y"
+    }
+
+    # Happy path: user confirms 'y', --select-only succeeds, split pane spawns, wait succeeds
+    export FAKE_SELECT_EXIT=0
+    run ensure_proxy_running_with_yes "claude"
+    [ "$status" -eq 0 ]
+    grep -q "^start_mlx_server:--select-only --tool claude$" "$calls_log"
+    grep -q "^spawn_server_pane:cmux$" "$calls_log"
+    grep -q "^wait_for_spawned_proxy$" "$calls_log"
+
+    # Cancel path: if --select-only exits non-zero, spawn_server_pane must NOT be called
+    : > "$calls_log"
+    export FAKE_SELECT_EXIT=1
+    run ensure_proxy_running_with_yes "claude"
+    [ "$status" -eq 1 ]
+    grep -q "^start_mlx_server:--select-only --tool claude$" "$calls_log"
+    ! grep -q "^spawn_server_pane:" "$calls_log"
+}
+
+@test "load_primary_from_roster_file in start_mlx_server.sh loads resolved primary model settings" {
+    source_backstop_functions apply_resolved_model_json load_primary_from_roster_file
+    mkdir -p "$BUSHPILOT_HOME/state"
+    MLX_ROSTER_FILE="$BUSHPILOT_HOME/state/mlx-roster.json"
+    cat <<'EOF' > "$MLX_ROSTER_FILE"
+{
+  "primary_id": "qwen3.5-9b-mlx-8bit",
+  "explicit_selection": true,
+  "models": [
+    {
+      "id": "qwen3.5-9b-mlx-8bit",
+      "huggingface": "mlx-community/Qwen3.5-9B-MLX-8bit",
+      "recommended_context": 131072,
+      "kv_bits": 8,
+      "kv_bits_apc_caveat": false,
+      "apc_num_blocks": 1024,
+      "concurrency": 2,
+      "prefill_step_size": 4096,
+      "backend": "mlx_vlm"
+    }
+  ]
+}
+EOF
+
+    call load_primary_from_roster_file
+    [ "$status" -eq 0 ]
+    [ "$LOCAL_MODEL" = "qwen3.5-9b-mlx-8bit" ]
+    [ "$MLX_MODEL" = "mlx-community/Qwen3.5-9B-MLX-8bit" ]
+    [ "$CONTEXT_WINDOW" = "131072" ]
+    [ "$KV_BITS" = "8" ]
+    [ "$APC_NUM_BLOCKS" = "1024" ]
+    [ "$CONCURRENCY" = "2" ]
+    [ "$PREFILL_STEP_SIZE" = "4096" ]
+}
