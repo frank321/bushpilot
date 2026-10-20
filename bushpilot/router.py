@@ -87,13 +87,19 @@ def read_roster(roster_file):
 
 
 def strip_provider_prefix(model_str):
-    """Strip common tool provider prefixes (`mlx-direct/`, `openai/`) when matching."""
+    """Strip common tool provider/display prefixes (`mlx-direct/`, `openai/`,
+    `bushpilot/`, `[BushPilot] `) when matching."""
     if not isinstance(model_str, str):
         return ""
-    for prefix in ("mlx-direct/", "openai/"):
-        if model_str.startswith(prefix):
-            return model_str[len(prefix):]
-    return model_str
+    s = model_str.strip()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in ("mlx-direct/", "openai/", "bushpilot/", "[BushPilot] "):
+            if s.startswith(prefix):
+                s = s[len(prefix):].strip()
+                changed = True
+    return s
 
 
 def is_background_alias(model_str):

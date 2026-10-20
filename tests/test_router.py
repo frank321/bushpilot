@@ -76,6 +76,10 @@ def test_match_roster_entry_distinguishes_active_vs_swap_vs_alias():
     assert needs_swap is True
     assert target["id"] == "qwen3.5-9b-mlx-8bit"
 
+    target_bp, needs_swap_bp = match_roster_entry("[BushPilot] mlx-community/Qwen3.5-9B-MLX-8bit", roster, loaded)
+    assert needs_swap_bp is True
+    assert target_bp["id"] == "qwen3.5-9b-mlx-8bit"
+
     target_dflash, needs_swap_dflash = match_roster_entry("qwen3.5-9b-mlx-8bit-dflash", roster, loaded)
     assert needs_swap_dflash is True
     assert target_dflash["id"] == "qwen3.5-9b-mlx-8bit-dflash"

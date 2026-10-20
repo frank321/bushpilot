@@ -562,6 +562,7 @@ def build_pi_entry(mid, ctx, hf_id, loc_id, backend):
     out_lim = min(32768, max(4096, ctx // 4))
     return {
         "id": mid,
+        "name": f"[BushPilot] {mid}",
         "contextWindow": ctx,
         "maxTokens": out_lim,
         "input": pi_input_modalities(models_json_path, hf_id, loc_id, backend),
@@ -718,10 +719,10 @@ roster_path = sys.argv[8] if len(sys.argv) > 8 else ""
 output_limit = min(32768, max(4096, context_window // 4))
 
 # Display strings for the OpenCode model picker. Provider name is the project name;
-# the model name is just its id (see the note at the assignment site for why the old
-# "(no LiteLLM)" suffixes were removed).
+# each model's display name is prefixed with "[BushPilot] " so local models are
+# immediately recognizable in flat/recent/search views alongside other providers.
 MLX_DIRECT_PROVIDER_NAME = "BushPilot"
-MLX_DIRECT_MODEL_NAME = lambda mid: mid
+MLX_DIRECT_MODEL_NAME = lambda mid: f"[BushPilot] {mid}"
 
 
 # Live-tested bug fix: without this, OpenCode custom-provider model entries have no way
@@ -981,6 +982,7 @@ roster_path = sys.argv[8] if len(sys.argv) > 8 else ""
 output_limit = min(32768, max(4096, context_window // 4))
 
 MLX_DIRECT_PROVIDER_NAME = "BushPilot"
+MLX_DIRECT_MODEL_NAME = lambda mid: f"[BushPilot] {mid}"
 MLX_DIRECT_PACKAGE = "@opencode/ai/providers/openai-compatible"
 MLX_DIRECT_MODEL_STRING = f"mlx-direct/{model_id}"
 
@@ -1026,6 +1028,7 @@ def build_v2_model_entry(mid, ctx, hf_id, loc_id, backend):
     out_lim = min(32768, max(4096, ctx // 4))
     mods = image_capable_modalities(models_json_path, hf_id, loc_id, backend)
     entry = {
+        "name": MLX_DIRECT_MODEL_NAME(mid),
         "modelID": mid,
         "limit": {"context": ctx, "output": out_lim},
         "attachment": mods is not None,
@@ -1136,6 +1139,7 @@ if has_roster:
 else:
     models_match = (
         model_id in existing.get("models", {})
+        and existing_model.get("name") == MLX_DIRECT_MODEL_NAME(model_id)
         and existing_model.get("modelID") == model_id
         and existing_model.get("limit", {}).get("context") == context_window
         and existing_model.get("limit", {}).get("output") == output_limit

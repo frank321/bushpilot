@@ -100,6 +100,7 @@ with open(sys.argv[1]) as f:
 p = d["providers"]["mlx-direct"]
 assert p["compatibility"] == {"maxTokensField": "max_tokens"}, p
 m = p["models"]["mlx-community/gemma-4-26b-a4b-it-4bit"]
+assert m["name"] == "[BushPilot] mlx-community/gemma-4-26b-a4b-it-4bit", m
 assert m["limit"] == {"context": 262144, "output": 32768}, m
 ' "$cfg"
 
@@ -142,6 +143,7 @@ p = d["providers"]["mlx-direct"]
 assert p["compat"] == {"maxTokensField": "max_tokens"}, p
 assert p["models"] == [{
     "id": "mlx-community/gemma-4-26b-a4b-it-4bit",
+    "name": "[BushPilot] mlx-community/gemma-4-26b-a4b-it-4bit",
     "contextWindow": 262144,
     "maxTokens": 32768,
     "input": ["text", "image"],
@@ -246,6 +248,8 @@ assert set(oc_models.keys()) == {
     "mlx-community/gemma-4-26b-a4b-it-4bit",
     "mlx-community/Qwen3.5-9B-MLX-8bit",
 }, oc_models
+assert oc_models["mlx-community/gemma-4-26b-a4b-it-4bit"]["name"] == "[BushPilot] mlx-community/gemma-4-26b-a4b-it-4bit"
+assert oc_models["mlx-community/Qwen3.5-9B-MLX-8bit"]["name"] == "[BushPilot] mlx-community/Qwen3.5-9B-MLX-8bit"
 
 with open(sys.argv[2]) as f:
     pi = json.load(f)
@@ -254,5 +258,10 @@ assert pi_ids == [
     "mlx-community/gemma-4-26b-a4b-it-4bit",
     "mlx-community/Qwen3.5-9B-MLX-8bit",
 ], pi_ids
+pi_names = [m["name"] for m in pi["providers"]["mlx-direct"]["models"]]
+assert pi_names == [
+    "[BushPilot] mlx-community/gemma-4-26b-a4b-it-4bit",
+    "[BushPilot] mlx-community/Qwen3.5-9B-MLX-8bit",
+], pi_names
 ' "$HOME/.config/opencode/opencode.jsonc" "$HOME/.pi/agent/models.json"
 }
