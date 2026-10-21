@@ -712,7 +712,8 @@
                     "full_attention"
                 ],
                 "sliding_window": null
-            }
+            },
+            "speed_correction_factor": 0.968
         },
         {
             "id": "qwen3.5-9b-mlx-8bit-dflash",
@@ -1303,7 +1304,8 @@
                     "sliding_attention",
                     "full_attention"
                 ]
-            }
+            },
+            "speed_correction_factor": 0.823
         },
         {
             "id": "gemma-4-12b-it-8bit-dflash",
@@ -1737,7 +1739,8 @@
                     "full_attention"
                 ],
                 "sliding_window": null
-            }
+            },
+            "speed_correction_factor": 0.869
         },
         {
             "id": "qwen3.8-27b-4bit-dflash",
