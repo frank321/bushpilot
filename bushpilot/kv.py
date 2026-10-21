@@ -322,6 +322,25 @@ def _has_sliding_window_layers(kv_config):
     return any(t == "sliding_attention" for t in kv_config.get("layer_types") or [])
 
 
+def _dspark_supports_kv_bits(model_entry):
+    """True unless `model_entry` is served through `mlx_dspark` on a target that
+    `mlx_dspark` routes to `mlx_vlm` (Gemma-4 / sliding-window-attention targets), where
+    `mlx_dspark.target.Target.__init__` raises `ValueError: --kv-bits is supported for
+    mlx-lm text targets only` whenever `--kv-bits` is non-zero (confirmed live during
+    `gemma-4-12b-it-4bit-dflash` sweep)."""
+    if not isinstance(model_entry, dict):
+        return True
+    serving = model_entry.get("serving") or {}
+    if serving.get("backend") != "mlx_dspark":
+        return True
+    if _has_sliding_window_layers(model_entry.get("kv_config")):
+        return False
+    hf = (model_entry.get("huggingface") or "").lower()
+    if "gemma" in hf:
+        return False
+    return True
+
+
 def _apply_preload(ctx, reason, preload_overhead):
     """Shared by both kv_bits branches of recommend_kv_bits_and_context below — applies
     the same tool-preload check build_recommendations always did, so both the
@@ -380,6 +399,12 @@ def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0
         max_context_tokens=max_context_tokens, prefix_cache_slots=prefix_cache_slots,
     )
     fits_u, reason_u, after_u = _apply_preload(ctx_u, reason_u, preload_overhead)
+    if not _dspark_supports_kv_bits(model_entry):
+        return {
+            "kv_bits": None, "recommended_context": ctx_u, "context_reason": reason_u,
+            "kv_formula_detail": detail_u, "context_after_preload": after_u, "fits": fits_u,
+            "kv_bits_apc_caveat": False, "apc_num_blocks": default_apc_blocks,
+        }
     if fits_u and (
         ctx_u >= COMFORTABLE_UNQUANTIZED_CONTEXT
         or ctx_u >= effective_cap

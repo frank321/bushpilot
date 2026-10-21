@@ -1624,7 +1624,8 @@
                     "sliding_attention",
                     "full_attention"
                 ]
-            }
+            },
+            "speed_correction_factor": 0.622
         },
         {
             "id": "qwen3.8-27b-4bit",

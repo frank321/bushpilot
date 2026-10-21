@@ -571,4 +571,13 @@ def test_select_cached_models_filters_by_status_and_existing_sweep(tmp_path, den
     assert [m["id"] for m in selected_force] == ["untested-m"]
 
 
+def test_dspark_supports_kv_bits_gemma_vs_qwen():
+    gemma_dspark = sm.load_model_entry("gemma-4-12b-it-4bit-dflash")
+    qwen_dspark = sm.load_model_entry("qwen3.5-9b-mlx-4bit-dflash")
+    gemma_vlm_drafter = sm.load_model_entry("gemma-4-12b-it-4bit-dflash-vlm")
+    assert ma._dspark_supports_kv_bits(gemma_dspark) is False
+    assert ma._dspark_supports_kv_bits(qwen_dspark) is True
+    assert ma._dspark_supports_kv_bits(gemma_vlm_drafter) is True
+
+
 

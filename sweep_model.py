@@ -974,7 +974,13 @@ def run_decode_vs_context_and_kv_bits_tier(model_entry, host, port, context_dept
                "speculative_decoding": None}
 
     deepest = max(context_depths)
-    for kv_bits, label in ((None, "unquantized"), (ma.MEMORY_CONSTRAINED_KV_BITS, "kv8")):
+    kv_variants = [(None, "unquantized")]
+    if ma._dspark_supports_kv_bits(model_entry):
+        kv_variants.append((ma.MEMORY_CONSTRAINED_KV_BITS, "kv8"))
+    else:
+        log(f"Note: '{model_entry.get('id')}' (backend=mlx_dspark) does not support "
+            "--kv-bits on mlx-vlm/Gemma-4 targets — skipping kv8 decode pass.")
+    for kv_bits, label in kv_variants:
         server = SweepServer(
             model_entry["huggingface"], host, port, context_window=deepest + 4096,
             log_path=os.path.join(log_dir, f"depth_{label}.log"),
@@ -1345,15 +1351,17 @@ def maybe_sync_verified():
     """Calls `add_model.sync_verified_results(write=True)` to ingest newly produced
     sweep and verification artifacts into `models.json`."""
     import add_model
-    updated = add_model.sync_verified_results(write=True)
-    if updated:
-        log(f"--sync-verified updated {len(updated)} catalog entry/entries in {ma.MODELS_JSON}:")
-        for mid, fields, promoted in updated:
-            status_tag = " [PROMOTED -> tested]" if promoted else ""
-            log(f"  - {mid}: {', '.join(fields)}{status_tag}")
+    res = add_model.sync_verified_results(write=True)
+    updated_models = res.get("updated_models") or []
+    promoted_set = set(res.get("promoted_to_tested") or [])
+    if updated_models:
+        log(f"--sync-verified updated {len(updated_models)} catalog entry/entries in {ma.MODELS_JSON}:")
+        for mid in updated_models:
+            status_tag = " [PROMOTED -> tested]" if mid in promoted_set else ""
+            log(f"  - {mid}{status_tag}")
     else:
         log(f"--sync-verified: {ma.MODELS_JSON} is already up to date with local verification/sweep files.")
-    return updated
+    return res
 
 
 def read_load_time_hint():
