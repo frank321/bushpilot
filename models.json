@@ -998,7 +998,8 @@
                     "full_attention"
                 ],
                 "sliding_window": null
-            }
+            },
+            "speed_correction_factor": 1.147
         },
         {
             "id": "qwen3.5-9b-mlx-4bit-dflash",
@@ -2494,7 +2495,8 @@
                     "full_attention"
                 ],
                 "sliding_window": 128
-            }
+            },
+            "speed_correction_factor": 0.85
         },
         {
             "id": "devstral-small-2-24b-instruct-2512-4bit",
@@ -2574,7 +2576,8 @@
                 "head_dim": 128,
                 "num_hidden_layers": 48,
                 "sliding_window": null
-            }
+            },
+            "speed_correction_factor": 0.617
         },
         {
             "id": "gemma-4-31b-it-4bit",

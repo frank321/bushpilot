@@ -902,12 +902,15 @@ def run_prefill_step_size_tier(model_entry, host, port, step_sizes, sweep_contex
     else:
         depths = [int(sweep_context_tokens)]
     max_depth = max(depths)
+    step_kv_bits = (
+        ma.MEMORY_CONSTRAINED_KV_BITS if ma._model_supports_kv_bits(model_entry) else None
+    )
     entries = []
     for step_size in step_sizes:
         server = SweepServer(
             model_entry["huggingface"], host, port, context_window=max_depth + 4096,
             log_path=os.path.join(log_dir, f"step{step_size}.log"),
-            prefill_step_size=step_size, kv_bits=ma.MEMORY_CONSTRAINED_KV_BITS,
+            prefill_step_size=step_size, kv_bits=step_kv_bits,
             max_num_seqs=max_num_seqs, apc_num_blocks=apc_num_blocks,
             serving=model_entry.get("serving"),
         )
@@ -922,7 +925,7 @@ def run_prefill_step_size_tier(model_entry, host, port, step_sizes, sweep_contex
             for d in depths:
                 avg, _runs = run_measured_requests(
                     host, port, model_entry["huggingface"], build_code_prompt,
-                    d, max_tokens=50, kv_bits=ma.MEMORY_CONSTRAINED_KV_BITS,
+                    d, max_tokens=50, kv_bits=step_kv_bits,
                     tag=f"step_size={step_size} depth={d}",
                 )
                 entry = {"step_size": step_size, "context_tokens": d}
@@ -975,11 +978,11 @@ def run_decode_vs_context_and_kv_bits_tier(model_entry, host, port, context_dept
 
     deepest = max(context_depths)
     kv_variants = [(None, "unquantized")]
-    if ma._dspark_supports_kv_bits(model_entry):
+    if ma._model_supports_kv_bits(model_entry):
         kv_variants.append((ma.MEMORY_CONSTRAINED_KV_BITS, "kv8"))
     else:
-        log(f"Note: '{model_entry.get('id')}' (backend=mlx_dspark) does not support "
-            "--kv-bits on mlx-vlm/Gemma-4 targets — skipping kv8 decode pass.")
+        log(f"Note: '{model_entry.get('id')}' does not support --kv-bits "
+            "(mlx-dspark SWA target or attention-sink model) — skipping kv8 decode pass.")
     for kv_bits, label in kv_variants:
         server = SweepServer(
             model_entry["huggingface"], host, port, context_window=deepest + 4096,

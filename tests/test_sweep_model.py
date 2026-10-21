@@ -575,9 +575,19 @@ def test_dspark_supports_kv_bits_gemma_vs_qwen():
     gemma_dspark = sm.load_model_entry("gemma-4-12b-it-4bit-dflash")
     qwen_dspark = sm.load_model_entry("qwen3.5-9b-mlx-4bit-dflash")
     gemma_vlm_drafter = sm.load_model_entry("gemma-4-12b-it-4bit-dflash-vlm")
+    gpt_oss = sm.load_model_entry("gpt-oss-20b-mxfp4-q8")
     assert ma._dspark_supports_kv_bits(gemma_dspark) is False
     assert ma._dspark_supports_kv_bits(qwen_dspark) is True
     assert ma._dspark_supports_kv_bits(gemma_vlm_drafter) is True
+    assert ma._model_supports_kv_bits(gemma_dspark) is False
+    assert ma._model_supports_kv_bits(qwen_dspark) is True
+    assert ma._model_supports_kv_bits(gemma_vlm_drafter) is True
+    assert ma._model_supports_kv_bits(gpt_oss) is False
+    # Even when memory is too tight for unquantized, recommend_kv_bits_and_context
+    # must never fall back to kv_bits=8 on gpt-oss (which crashes SDPA on attention sinks).
+    rec_tight = ma.recommend_kv_bits_and_context(gpt_oss, free_wired_gb=13.5)
+    assert rec_tight["kv_bits"] is None
+
 
 
 

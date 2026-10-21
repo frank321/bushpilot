@@ -341,6 +341,24 @@ def _dspark_supports_kv_bits(model_entry):
     return True
 
 
+def _model_supports_kv_bits(model_entry):
+    """True when `--kv-bits` is supported by both the serving backend and the model's
+    attention implementation. Returns False for:
+    - `mlx_dspark` on Gemma-4 / sliding-window targets (`_dspark_supports_kv_bits`), and
+    - `gpt-oss` models in `mlx_vlm`, whose attention passes `sinks=self.sinks` into
+      `scaled_dot_product_attention`, raising `ValueError: Quantized SDPA does not
+      support attention sinks.` (`mlx_vlm/models/base.py:412`, confirmed live during
+      the `gpt-oss-20b-mxfp4-q8` sweep)."""
+    if not _dspark_supports_kv_bits(model_entry):
+        return False
+    if not isinstance(model_entry, dict):
+        return True
+    ident = f"{model_entry.get('id') or ''} {model_entry.get('huggingface') or ''}".lower()
+    if "gpt-oss" in ident or "gpt_oss" in ident:
+        return False
+    return True
+
+
 def _apply_preload(ctx, reason, preload_overhead):
     """Shared by both kv_bits branches of recommend_kv_bits_and_context below — applies
     the same tool-preload check build_recommendations always did, so both the
@@ -399,7 +417,7 @@ def recommend_kv_bits_and_context(model_entry, free_wired_gb, preload_overhead=0
         max_context_tokens=max_context_tokens, prefix_cache_slots=prefix_cache_slots,
     )
     fits_u, reason_u, after_u = _apply_preload(ctx_u, reason_u, preload_overhead)
-    if not _dspark_supports_kv_bits(model_entry):
+    if not _model_supports_kv_bits(model_entry):
         return {
             "kv_bits": None, "recommended_context": ctx_u, "context_reason": reason_u,
             "kv_formula_detail": detail_u, "context_after_preload": after_u, "fits": fits_u,
