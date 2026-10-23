@@ -99,3 +99,7 @@ This is deliberately separate from `verify_max_kv_size.sh` / `verify_long_contex
 - [MLX_SERVER_USAGE.md](MLX_SERVER_USAGE.md): full usage guide
 - [docs/HARDWARE_SPEED_ESTIMATION.md](docs/HARDWARE_SPEED_ESTIMATION.md): research behind the recommendations
 - [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) and [docs/PHASE_PLAN.md](docs/PHASE_PLAN.md): project history and plan
+
+## License
+
+[MIT](LICENSE)

@@ -1,4 +1,22 @@
+# macOS
 .DS_Store
+
+# Python
 __pycache__/
+*.py[cod]
 .pytest_cache/
+.ruff_cache/
+venv/
+.venv/
+
+# Release bundle artifacts
 docs/*.zip
+
+# Local tool/agent config (machine-specific, may contain absolute paths)
+.claude/
+.devin/
+
+# Editors
+.idea/
+.vscode/
+*.swp

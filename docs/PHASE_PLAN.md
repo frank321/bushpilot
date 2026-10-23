@@ -825,7 +825,7 @@ docs/
   deferred: pushed this repo to a real remote —
   `https://github.com/frank321/bushpilot` (created public via `gh
   repo create`, at the user's direction) — and enabled GitHub Pages on it via the
-  API (`POST /repos/frank-yan/bushpilot/pages`, `source.branch=main`,
+  API (`POST /repos/frank321/bushpilot/pages`, `source.branch=main`,
   `source.path=/docs`), rather than leaving it as a manual step. `index.html` and
   the footer link both point at that real repo URL.
 - Built `docs/index.html` (tagline, requirements, download button, repo link, a

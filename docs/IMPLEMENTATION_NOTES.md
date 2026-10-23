@@ -411,7 +411,7 @@ main
 ## Files to Create/Modify
 
 ```
-~/scripts/
+bushpilot/
 ├── start_litellm_proxy.sh        (modify: add interactive + monitoring)
 ├── monitor_memory.sh             (NEW: background memory monitor)
 ├── models.json                   (NEW: model metadata database)
