@@ -1,0 +1,37 @@
+name: Release
+
+# Builds the end-user runtime bundle (docs/bushpilot.zip via docs/build_release.sh)
+# and attaches it to a GitHub Release whenever a version tag is pushed.
+#
+# Tag a release with:
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# The Pages site links to the stable asset URL
+#   https://github.com/frank321/bushpilot/releases/latest/download/bushpilot.zip
+# so the download button never needs updating again.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # required to create the Release and upload the asset
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release bundle
+        run: ./docs/build_release.sh
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            docs/bushpilot.zip \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

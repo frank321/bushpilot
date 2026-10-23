@@ -1647,3 +1647,53 @@ against the real catalog to confirm the new flag reaches the final recommendatio
 
 
 
+
+## Public release preparation (2026-10-23)
+
+Prep for making the repo public on GitHub (`github.com/frank321/bushpilot`).
+
+### 1. Licensing & community files
+
+- Added `LICENSE` (MIT) — previously unlicensed, which legally blocks use/forking.
+- Added `CONTRIBUTING.md` (setup, `./ci.sh` workflow, the invariants from `AGENTS.md`)
+  and `SECURITY.md` (private vulnerability reporting; scope limited to this repo's
+  own scripts, not upstream MLX / coding tools).
+- Added a `## License` section to `README.md`, plus a "download the latest release"
+  link in Quick start.
+
+### 2. Internal references scrubbed
+
+- `docs/index.html` and `docs/PHASE_PLAN.md` pointed at the internal GitLab host
+  (this project's pre-public remote) — repointed to the public GitHub repo. The
+  index.html "View on GitHub" button was the most visible case.
+- `docs/IMPLEMENTATION_NOTES.md` referenced a personal home path; genericized.
+- Commit history rewritten with `git filter-repo` so the corporate author email
+  that was on every commit (and internal-host URLs in blobs *and* commit messages)
+  no longer appear anywhere in the object database.
+
+### 3. `MONETIZATION.md` removed
+
+Dropped from the public repo — it is internal business strategy, not engineering
+rationale, and nothing referenced it. The phase/handoff docs were deliberately
+**kept** public: they are cited ~40 times from code comments (e.g.
+`start_mlx_server.sh`, `bushpilot/prefill.py`, `sweep_model.py`) as the "why" behind
+implementation decisions, so they earn their place in a public repo.
+
+### 4. Release method changed: GitHub Releases instead of a committed zip
+
+The old flow (`build_release.sh` → force-add `docs/bushpilot.zip` past `.gitignore`
+→ commit before each release) caused repeated git churn, history bloat, and 404s on
+the Pages download button whenever the force-add was forgotten. Replaced with:
+
+- **`.github/workflows/release.yml`** — on `v*` tag push, runs
+  `./docs/build_release.sh` and attaches the zip to a GitHub Release. No binaries in
+  git; the zip stays gitignored.
+- **`docs/index.html`** download buttons + **`README.md`** now link the stable asset
+  URL `.../releases/latest/download/bushpilot.zip`, which never needs updating again.
+- Cut a release with: `git tag v1.0.0 && git push origin v1.0.0`.
+
+### 5. Site accuracy
+
+- `docs/index.html` claimed "19 total selectable entries"; the catalog is now 58
+  entries (31 `tested`). Corrected, and surfaced as a hero credibility line.
+- Deleted the two stale tracked-then-ignored build-artifact zips from `docs/`.

@@ -29,7 +29,18 @@ Bushpilot skips that. It ships a curated catalog of models that have been tested
 
 ## Quick start
 
-**Single-terminal launch** (auto-splits iTerm2, `tmux`, or Terminal.app if the server isn't running yet):
+Get the latest release bundle (`bushpilot.zip`) — no build step needed:
+
+**→ [Download the latest release](https://github.com/frank321/bushpilot/releases/latest)** — unzip, `cd` in, then run `./launch_tool.sh`.
+
+Or clone the repo and run from source:
+
+```bash
+git clone https://github.com/frank321/bushpilot.git
+cd bushpilot
+```
+
+Then, **single-terminal launch** (auto-splits iTerm2, `tmux`, or Terminal.app if the server isn't running yet):
 
 ```bash
 ./launch_tool.sh
