@@ -46,7 +46,7 @@ recommendation as a real server-side cap — not just a client-side hint.
 
 | If you want... | Read this file |
 |---|---|
-| **The single best starting point to resume work** | This file (`PROJECT_STATUS.md`), then the "Resume prompt" section at the bottom |
+| **The single best starting point to resume work** | This file (`PROJECT_STATUS.md`) |
 | The current, real, verified model catalog (14 models) | `models.json` — the source of truth; every entry has a `verification` block AND (new this session) a `tool_calling` block |
 | Which models actually work with OpenCode/Claude Code tool use (webfetch, bash, edit, etc.) | `models.json`'s `tool_calling.verdict` field, or the "What's actually done" #13 below for the summary + methodology |
 | Raw verification data behind `models.json` (short-prompt admission gate) | `mlx_verification_results.json` |
@@ -476,112 +476,4 @@ IMPLEMENTATION_NOTES.md          ← old design notes (mostly superseded)
 MONITORING_ARCHITECTURE.md       ← monitor_memory.sh design (current — rewritten this session
                                     with the real percent-free calibration data)
 QUICK_START.md                   ← quick reference (partially stale)
-```
-
----
-
-## Resume prompt
-
-Paste this into a new session to pick up where this one left off:
-
-```
-I'm continuing work on a memory-aware local MLX model launcher in ~/scripts/. Please read
-~/scripts/PROJECT_STATUS.md first — it has a document map, what's verified vs. still open, and
-which other docs in that directory are stale vs. current. Don't just skim it, actually follow its
-document map to the specific files it points to before making changes.
-
-Short version: models.json has 14 real models verified SAFE via verify_max_kv_size.sh's 3-phase
-test (short-prompt admission gate only). model_advisor.py does live hardware detection + an exact
-context-size formula + an estimated speed formula, and start_litellm_proxy.sh --interactive is
-wired to it, including passing --max-kv-size to the actual MLX server. monitor_memory.sh
-(background memory-pressure safety monitor) is built and has now been proven live against the
-real MLX server, three times, in genuine danger scenarios — it correctly killed a runaway server
-each time before things got worse. It's wired into start_litellm_proxy.sh via a --monitor flag,
-though that specific flag/wiring itself is still untested end-to-end.
-
-monitor_memory.sh's abort trigger was redesigned mid-session from a flat wired-memory GB
-threshold to kern.memorystatus_level (percent-free, machine-size-normalized) plus an
-unconditional kern.memorystatus_vm_pressure_level==CRITICAL override, after the original flat-GB
-formula was found to break down on smaller machines (guessed 10GB headroom didn't match
-MONITORING_ARCHITECTURE.md's own second worked example, and would leave almost no margin on a
-16GB Mac). The new thresholds are calibrated against real failure data, not guessed — full
-writeup, calibration table, and sources in MONITORING_ARCHITECTURE.md (rewritten this session,
-now current rather than just historical design intent).
-
-A real long-context memory stress test (verify_long_context_memory.sh, new this session) found a
-CONFIRMED memory-safety failure in qwen3-coder-30b-a3b-instruct-4bit: safe up to 28,276 prompt
-tokens, but unbounded wired-memory growth during prefill above that (not proportional to token
-count — driven by elapsed prefill time/chunk count instead), monitor-killed before ~38GB both
-times it was pushed further. models.json has been updated with the confirmed finding and a new
-max_context_verified_safe field for this model, but model_advisor.py does NOT yet read that field
-and will still recommend unsafe context sizes for it based on free memory alone. Only this one
-model (of 14) has been through this real stress test so far.
-
-Also this session: live-tested tool-calling (OpenCode/Claude Code's actual tools — webfetch, bash,
-edit, etc.) for all 14 models, by sending a real /v1/chat/completions request with a web_search
-tool schema to each and checking whether it came back as a proper tool_calls response. Result: 9
-of 14 SUPPORTED, 5 NOT_SUPPORTED. All 4 qwen2.5-coder-*-instruct sizes fail identically — the
-model doesn't reliably emit the <tool_call> tags its own chat template instructs, confirmed as a
-model-level (not mlx_vlm-specific) issue by reproducing the same failure on vLLM (a third party
-independently hit it, see github.com/QwenLM/Qwen3-Coder/issues/180) and on Ollama/llama.cpp
-(tested directly on this machine). phi-4-mini-instruct-4bit fails for the opposite reason — it's a
-genuine mlx_vlm gap: Microsoft's own docs confirm this model supports function calling, but
-mlx_vlm's tool_parsers registry has no entry matching its <|tool|>/<|tool_call|> token format, so
-it never even tries to parse tool calls out of its output. models.json now has a tool_calling
-block per model (same style as verification), but model_advisor.py does NOT read it either — same
-gap pattern as max_context_verified_safe above.
-
-Also this session: confirmed --kv-bits 8 (the KV quantization flag start_litellm_proxy.sh passes
-to every model unconditionally) has a real decode-speed cost at short context, and that cost is
-NOT uniform across model sizes. Same fixed-prompt benchmark as HARDWARE_SPEED_ESTIMATION.md's
-existing speed-calibration data: Qwen2.5-Coder-3B-Instruct-4bit is 8.7% slower with KV
-quantization on (125.8→114.8 tok/s decode); Qwen3.5-9B-MLX-8bit is only ~1.0% slower (30.3→30.0
-tok/s, within noise). peak_memory was identical with/without quantization on both — confirms this
-is pure per-step compute overhead, not a memory trade-off, at this short context length. Full
-data, mechanism discussion, and open items (need an MoE model, a 14B+ model, and a genuine
-long-context run before this becomes a real dynamic-selection feature) are in
-HARDWARE_SPEED_ESTIMATION.md §10.
-
-Then, following up on that with a request to benchmark qwen3.5-9b-mlx-8bit against Ollama: the
-first Ollama pull (qwen3.5:9b) turned out to be Q4_K_M, NOT matched to MLX's 8-bit precision --
-made Ollama look ~47% faster than MLX, which was actually 100% a bit-width artifact, not an engine
-result. Pulled qwen3.5:9b-q8_0 to fix this and isolate bit-width from engine as two separate
-variables. Real numbers: Ollama's own Q4_K_M is 55.2% faster decode than its own Q8_0 (same
-engine, only precision differs) -- bit-width is the single biggest lever measured so far, bigger
-than engine choice or KV-quantization. At matched 8-bit precision, MLX is 5.9% faster than Ollama
--- real, same direction as the 3B result, much smaller margin than that ~15% figure. Full writeup
-in HARDWARE_SPEED_ESTIMATION.md §11 (§10's old "Open items" section is now §12 to make room, with
-a new item #7 flagging that the original 3B MLX-vs-Ollama comparison hasn't been independently
-re-confirmed against this same mismatched-precision risk, though it's not currently believed to
-have the issue).
-
-Next priorities, in the order PROJECT_STATUS.md's "What's NOT done yet" section lists them:
-1. model_advisor.py needs to clamp recommendations to a model's max_context_verified_safe field
-   when present, instead of only computing from free memory/KV-cache size.
-2. The other 13 models in models.json haven't been through the real long-context stress test yet
-   (verify_long_context_memory.sh is built and working — just needs to be run against the rest).
-3. --max-kv-size's ADMISSION GATE (rejecting an oversized request) hasn't been separately
-   re-verified with --kv-bits quantization active — this session's stress test only sent
-   under-cap prompts.
-4. gemma-4-26b-a4b-it-4bit's speed estimate is null (missing num_experts_per_tok).
-5. Multi-turn / gradual context growth untested.
-6. The full live launch (postgres → mlx_vlm.server → litellm → claude/opencode) with an
-   interactively-selected model hasn't actually been run end-to-end yet — only tested up through
-   model selection + download-check. This would also be the first real test of --monitor (the
-   flag/wiring, as opposed to monitor_memory.sh itself) against the actual MLX server.
-7. Minor, non-blocking: bootstrap_mlx's mlx-lm package-existence check always reports "not
-   installed" due to the hyphen-vs-import-name mismatch.
-8. model_advisor.py should warn on (and arguably deprioritize/exclude, when launch mode is
-   opencode/claude specifically) models with tool_calling.verdict == NOT_SUPPORTED
-   (qwen2.5-coder-3b/7b-3bit/7b-4bit/14b-instruct and phi-4-mini-instruct-4bit) — it doesn't
-   consult that field at all right now.
-9. Dynamic --kv-bits selection needs more calibration data (an MoE model, a 14B+ model, a genuine
-   long-context run to find the real crossover point) before it can become an actual
-   model_advisor.py feature rather than just a documented finding.
-10. §11's 3B MLX-vs-Ollama comparison (item #7 in HARDWARE_SPEED_ESTIMATION.md's own Open Items)
-    hasn't been independently re-confirmed to actually be precision-matched the way the 9B
-    re-test caught a real mismatch -- not currently believed to be an issue, but not verified
-    either.
-
-Ask me which of these (or something else) to work on next rather than assuming.
 ```

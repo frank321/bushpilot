@@ -1,8 +1,8 @@
 # Handoff — Comprehensive per-model sweep (prefill step size + diagnostic metrics)
 
 **Written:** 2026-10-02, from a planning-only conversation (no sweep code written yet —
-see "What's already built and tested" for what WAS written this session). This file is
-the spec + context for the session that actually builds the sweep harness. Read the
+see "What's already built and tested" for what WAS written). This file is
+the spec + context for the work that builds the sweep harness. Read the
 whole thing before writing code; it front-loads two real bash parser gotchas that would
 otherwise cost real time rediscovering.
 
@@ -46,7 +46,7 @@ below.
 
 ---
 
-## What's already built and tested this session (don't redo this)
+## What's already built and tested (don't redo this)
 
 Three gaps closed, all shipped and passing 107 tests (`pytest -q` from repo root):
 
@@ -218,7 +218,7 @@ Two artifacts, kept **separate** so the sweep never has to touch the already-tes
 
 ---
 
-## Gotchas discovered this session (don't rediscover these)
+## Implementation gotchas (don't rediscover these)
 
 Both bitten while writing `save_calibration_snapshot()`'s Python heredoc in
 `start_mlx_server.sh` — the sweep harness will need many more heredocs like it, so
@@ -311,7 +311,7 @@ Roughly in build order:
 
 ---
 
-## Quick orientation for a new session
+## Quick orientation
 
 - Run `pytest -q` from repo root first — should show `107 passed` before you add
   anything. If it doesn't, something regressed since this doc was written.

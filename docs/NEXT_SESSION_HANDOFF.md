@@ -12,8 +12,8 @@ was stale as a result (`PHASE_PLAN.md` Phase 8, `HARDWARE_SPEED_ESTIMATION.md` �
 "done" below was tested against a real running server on this machine, not just
 written and assumed correct.
 
-If you're picking this up in a new session, **read this whole file before touching
-code** — it front-loads the gotchas that cost real time this session, so you don't
+If you're picking this up, **read this whole file before touching
+code** — it front-loads the gotchas that cost real time, so you don't
 rediscover them. `PHASE_PLAN.md` Phase 8 and `HARDWARE_SPEED_ESTIMATION.md` §18 have
 the fuller decision-record/research version of what's summarized here.
 
@@ -67,7 +67,7 @@ the fuller decision-record/research version of what's summarized here.
 
 ---
 
-## Gotchas discovered this session (don't rediscover these)
+## Implementation gotchas (don't rediscover these)
 
 - **macOS's `/bin/bash` is 3.2.57** (ancient, pre-GPLv3). It has a real parser bug:
   `eval "$(cmd <<'EOF' ... EOF)"` — heredoc nested directly inside a command
@@ -79,21 +79,21 @@ the fuller decision-record/research version of what's summarized here.
   See `resolve_serving_config()` for the fixed pattern; copy that style for any future
   eval+heredoc inside a function.
 
-- **This dev sandbox sits behind a corporate TLS-intercepting proxy.**
-  Historically this broke every Python HTTPS download (`huggingface_hub`/
+- **Some networks (e.g. corporate environments) sit behind a TLS-intercepting
+  proxy.** Historically this broke every Python HTTPS download (`huggingface_hub`/
   `httpx`) two ways: `unable to get local issuer certificate` (bundle without
-  the intercepting corporate root) or `Basic Constraints of CA cert not marked
+  the intercepting root) or `Basic Constraints of CA cert not marked
   critical` (bundle with it). **Root cause was two-fold and BOTH halves are now
   fixed (2026-09-30):** (1) Python 3.14 enables `VERIFY_X509_STRICT` by default and
-  the intercepting corporate root CA is non-compliant (non-critical Basic
-  Constraints, no keyUsage) — fixed by patching the copy of that root in the
-  machine-local CA bundle pointed to by `~/.zshrc`'s `SSL_CERT_FILE`
+  a typical intercepting root CA is non-compliant (non-critical Basic
+  Constraints, no keyUsage) — worked around by patching the copy of that root in
+  a machine-local CA bundle pointed to by `~/.zshrc`'s `SSL_CERT_FILE`
   (BC marked critical, critical keyCertSign keyUsage added; trust-anchor
   self-signatures aren't checked by OpenSSL, so the DER surgery is safe —
   verified by a live strict-mode handshake to huggingface.co; the original
-  bundle is backed up alongside it). This bundle is machine-local and must
+  bundle is backed up alongside it). Such a bundle is machine-local and must
   NEVER be committed to the repo. (2) `start_mlx_server.sh` used to
-  clobber the user's `SSL_CERT_FILE` (pointing at that interception-aware
+  clobber a user's `SSL_CERT_FILE` (pointing at that proxy-aware
   bundle) with certifi's — it now respects an already-set, valid `SSL_CERT_FILE`,
   and falls back to certifi / the system bundle on machines where it is unset,
   so the script stays fully portable to non-intercepted networks.
@@ -226,7 +226,7 @@ month or two if curious, not urgent.
 
 ---
 
-## Quick orientation for a new session
+## Quick orientation
 
 - Real drafters are downloaded into the standard HF cache
   (`~/.bushpilot/models/hub/models--{org}--{repo}/`) for: `z-lab/gemma4-12B-it-DFlash`,
