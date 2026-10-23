@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Bushpilot — Run Claude Code & OpenCode on Your Mac</title>
-  <meta name="description" content="Run Claude Code or OpenCode against a local, on-device MLX-served model. Hardware-aware selection, memory monitoring, token speed estimation, safe context sizing, and optional speculative-decoding speedups.">
+  <title>Bushpilot — Run Claude Code, OpenCode, Aider, Cline & Pi on Your Mac</title>
+  <meta name="description" content="Run Claude Code, OpenCode, Aider, Cline, or Pi against a local, on-device MLX-served model. Hardware-aware selection, memory monitoring, token speed estimation, safe context sizing, and optional speculative-decoding speedups.">
   <style>
     :root {
       --bg: #f8f9fa;
@@ -426,7 +426,7 @@
     <h1>🚀 Bushpilot</h1>
     <p class="subtitle">Charted routes through the chaotic LLM landscape.</p>
     <p class="tagline">
-      Run Claude Code or OpenCode against a model served locally on your Mac by Apple's MLX,
+      Run Claude Code, OpenCode, Aider, Cline, or Pi against a model served locally on your Mac by Apple's MLX,
       instead of a cloud API. Hardware-aware model selection, memory monitoring with automatic
       termination, real-time token speed estimation, safe context sizing, and optional
       speculative-decoding speedups (up to 3x measured on some models) — all built-in.
@@ -461,7 +461,8 @@
   <section id="what-is-it">
     <h2>🎯 What Is Bushpilot?</h2>
     <p>
-      Bushpilot is a toolkit that lets you run <strong>Claude Code</strong> or <strong>OpenCode</strong>
+      Bushpilot is a toolkit that lets you run <strong>Claude Code</strong>, <strong>OpenCode</strong>,
+      <strong>Aider</strong>, <strong>Cline</strong>, or <strong>Pi</strong>
       against a model served locally on your Mac, instead of a cloud API. It detects your hardware and currently-free
       memory, recommends only models that actually fit (with a computed context size, speed estimate, and safe
       concurrency for each), then runs the server with continuous memory monitoring and a live dashboard — details
@@ -712,7 +713,7 @@ Terminal 3: ./launch_tool.sh  # Another tool or session</pre>
     <p>
       The MLX server implements OpenAI's chat completion API specification. Any AI coding tool, IDE extension,
       or custom application that accepts an OpenAI or Anthropic-compatible API endpoint will work with your
-      local model — not just Claude Code and OpenCode.
+      local model — not just Claude Code, OpenCode, Aider, Cline, and Pi.
     </p>
 
     <h3>Supported tools (built-in)</h3>
@@ -745,7 +746,7 @@ Terminal 3: ./launch_tool.sh  # Another tool or session</pre>
 
     <div class="info-box">
       <strong>Why this matters:</strong> You're not committed to one tool. Start with Claude Code, then attach
-      Cursor, or build your own integration — all against the same local model, same memory monitoring, same safety guardrails.
+      Aider, Cline, or Pi, or build your own integration — all against the same local model, same memory monitoring, same safety guardrails.
     </div>
   </section>
 
@@ -966,7 +967,8 @@ Terminal 3: ./launch_tool.sh  # Another tool or session</pre>
     <h3>API Compatibility & Port Configuration</h3>
     <p>
       The MLX server implements OpenAI's chat completion API (and Anthropic's <code class="inline">/v1/messages</code>
-      format natively too). Claude Code and OpenCode connect by pointing their API endpoint at
+      format natively too). Claude Code, OpenCode, Aider, Cline, and Pi connect by pointing
+      their API endpoint at
       <code class="inline">http://127.0.0.1:38472/v1</code> — that default port (38472) was chosen specifically to
       avoid colliding with commonly-used ports like 8000, 3000, 8080, or Ollama's own 11434.
     </p>
@@ -1005,7 +1007,7 @@ Terminal 3: ./launch_tool.sh  # Another tool or session</pre>
     <h2>🤔 Why MLX Instead of Ollama?</h2>
     <p>
       Ollama is a fantastic open-source inference engine with broad platform support. But this project
-      is specifically optimized for Mac + Claude Code / OpenCode, and uses MLX instead of Ollama for
+      is specifically optimized for Mac + coding agents (Claude Code, OpenCode, Aider, Cline, Pi), and uses MLX instead of Ollama for
       deliberate, technical reasons:
     </p>
 
@@ -1081,7 +1083,7 @@ Terminal 3: ./launch_tool.sh  # Another tool or session</pre>
     </ul>
 
     <h3>When to use this project (MLX)</h3>
-    <p>The reverse of the list above: an Apple Silicon Mac, running Claude Code or OpenCode, where you want the
+    <p>The reverse of the list above: an Apple Silicon Mac, running Claude Code, OpenCode, Aider, Cline, or Pi, where you want the
       safety/sizing features described throughout this page without configuring any of it by hand.</p>
   </section>
 
@@ -1104,7 +1106,7 @@ Terminal 3: ./launch_tool.sh  # Another tool or session</pre>
       <li>Close other memory-hungry apps (browser tabs, other IDEs, other local model servers)</li>
       <li>Set <code class="inline">preferred_model</code> in <code class="inline">config.json</code> to something that reliably fits, to skip the picker's live recheck each time</li>
     </ul>
-    <h3>Claude Code or OpenCode won't connect</h3>
+    <h3>Claude Code, OpenCode, Aider, Cline, or Pi won't connect</h3>
     <p>
       Verify the MLX server is running (check the Terminal 1 dashboard — the exact API endpoint URL is printed
       right at the top). If it is:
@@ -1125,7 +1127,7 @@ Terminal 3: ./launch_tool.sh  # Another tool or session</pre>
 
   <!-- Footer -->
   <footer>
-    <p><strong>Bushpilot</strong> — Run Claude Code & OpenCode on your Mac</p>
+    <p><strong>Bushpilot</strong> — Run Claude Code, OpenCode, Aider, Cline & Pi on your Mac</p>
     <p><a href="https://github.com/frank321/bushpilot">View on GitHub</a> • Built for on-device AI coding</p>
     <p style="margin-top: 16px; opacity: 0.7;">Last updated: 2026-10-23</p>
   </footer>
