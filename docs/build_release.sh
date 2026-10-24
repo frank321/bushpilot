@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# build_release.sh — regenerates docs/bushpilot.zip from the current runtime
-# files in the repo root. Manual, run-before-publishing step -- no CI/automation,
-# matching this project's plain-shell-scripts-only approach elsewhere (PHASE_PLAN.md
-# Phase 7).
+# build_release.sh — builds docs/bushpilot.zip from the current runtime files in
+# the repo root. Run automatically by .github/workflows/release.yml on a `v*` tag
+# push (which then attaches the zip to a GitHub Release); can also be run by hand
+# to inspect the bundle locally. The zip is a build artifact -- gitignored, never
+# committed. See docs/README.md and PHASE_PLAN.md Phase 7.
 #
 # Usage: ./docs/build_release.sh   (paths below are resolved relative to this
 #   script's own location, so it works regardless of the caller's cwd)
