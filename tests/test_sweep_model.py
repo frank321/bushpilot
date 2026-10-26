@@ -222,7 +222,15 @@ def test_concurrency_memory_guard_ok_false_when_tight(dense_model, monkeypatch):
                                            kv_bits=None) is False
 
 
-def test_concurrency_memory_guard_ok_true_when_no_kv_config():
+def test_concurrency_memory_guard_ok_true_when_no_kv_config(monkeypatch):
+    # chip/RAM detection must be monkeypatched here like every sibling test in this
+    # section: the real get_chip_info() shells out to `system_profiler`, which is
+    # macOS-only and raises FileNotFoundError on the Linux CI runner. The assertion
+    # below is unaffected either way -- the guard returns True at the "no kv_config"
+    # early exit before free memory is consulted -- but the call must not reach the
+    # host binary for this suite to stay pure-logic (see AGENTS.md).
+    monkeypatch.setattr(ma, "get_chip_info", lambda: ("Apple M5 Pro", 20, 48.0))
+    monkeypatch.setattr(ma, "get_current_wired_gb", lambda: 10.0)
     model_entry = {"id": "no-kv-config", "size_gb": 1.0}
     assert sm.concurrency_memory_guard_ok(model_entry, context_tokens=2048, concurrency=4,
                                            kv_bits=None) is True
