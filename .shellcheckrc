@@ -14,6 +14,15 @@ disable=SC2086
 # TERM` -- shellcheck doesn't track trap-based invocation.
 disable=SC2329
 
+# SC2155 (declare and assign separately): `local x="$(cmd)"` is used throughout
+# launch_tool.sh for one-line locals. None of these sites depend on inspecting
+# the command substitution's exit status -- failures there are handled by the
+# surrounding logic (or are harmless -- e.g. basename on a known path) -- so the
+# masking this warns about is not a real risk here. Disabled project-wide rather
+# than split into two lines at each of the sites, matching the SC2034 reasoning
+# below.
+disable=SC2155
+
 # SC2034 (variable appears unused): a few config constants (start_mlx_server.sh's
 # MEM_WARN_BELOW_PCT/MEM_CAUTION_BELOW_PCT, launch_tool.sh's PRELOAD_TOTAL, the
 # KV_BITS field in launch_tool.sh's `IFS='|' read -r MLX_MODEL CONTEXT_WINDOW

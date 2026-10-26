@@ -401,7 +401,9 @@ wait_for_spawned_proxy() {
     local poll_sec="${BUSHPILOT_WAIT_POLL_SEC:-1}"
     local spawn_timeout_polls="${BUSHPILOT_SPAWN_TIMEOUT_POLLS:-15}"
     local polls=0
-    local spin_chars='|/-\'
+    # The trailing backslash is a literal spinner frame (the |/-\ rotation), not
+    # an escape -- a double-quoted string makes that unambiguous to shellcheck.
+    local spin_chars="|/-\\"
     local spin_idx=0
 
     while true; do
