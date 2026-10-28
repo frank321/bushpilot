@@ -181,6 +181,13 @@ ensure_symlinked_on_path() {
     local target_name
     target_name="$(basename "$SCRIPT_PATH")"
     local candidate
+    # Homebrew-formula install (frank321/homebrew-bushpilot): the formula owns the
+    # bin wrappers and the Cellar files are read-only -- don't self-symlink. See the
+    # fuller comment in start_mlx_server.sh's ensure_symlinked_on_path.
+    if [[ "$SCRIPT_PATH" == */Cellar/bushpilot/* ]] \
+        || { [[ -n "${HOMEBREW_PREFIX:-}" ]] && [[ "$SCRIPT_PATH" == "$HOMEBREW_PREFIX"/* ]]; }; then
+        return 0
+    fi
     if is_command_available "$target_name"; then
         return 0
     fi

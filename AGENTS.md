@@ -71,6 +71,16 @@ in CI or on any non-Mac machine.
 6. **Safety-critical bash.** The memory backstop and backend-liveness check in
    `start_mlx_server.sh` use consecutive-poll debouncing on purpose — a single
    blip must never tear down a healthy session. Covered by `tests/shell/`.
+7. **Homebrew-formula install must not self-symlink.** `ensure_symlinked_on_path`
+   in `start_mlx_server.sh` / `launch_tool.sh` detects a Cellar install
+   (`*/Cellar/bushpilot/*` or a `$HOMEBREW_PREFIX`-prefixed `SCRIPT_PATH`) and
+   returns early — the tap formula owns the `bin` wrappers and the Cellar is
+   read-only. The guard must only match a formula install; the git-clone/zip
+   paths must keep self-symlinking. Covered by `tests/shell/homebrew_guard.bats`.
+   The tap itself (`frank321/homebrew-bushpilot`) is a separate repo, not part of
+   this one — its `Formula/bushpilot.rb` installs the release zip's runtime files
+   into `libexec` and wraps them as `bushpilot` / `bushpilot-server` /
+   `bushpilot-uninstall`.
 
 ## Conventions
 

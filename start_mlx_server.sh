@@ -316,6 +316,19 @@ ensure_symlinked_on_path() {
     target_name="$(basename "$SCRIPT_PATH")"
     local candidate
 
+    # Installed via a Homebrew formula (frank321/homebrew-bushpilot): the formula
+    # already places a wrapper for this script in $(brew --prefix)/bin, and the
+    # runtime files live read-only under the Cellar. Self-symlinking here would
+    # either clobber the formula's own bin entries or try to write into a Cellar
+    # path Homebrew owns -- so defer entirely to the formula. Matched two ways
+    # because HOMEBREW_PREFIX isn't guaranteed to be exported into the wrapper's
+    # environment, while the Cellar path layout always holds for a formula install.
+    # Only a Cellar install matches; the git-clone/zip paths below are unchanged.
+    if [[ "$SCRIPT_PATH" == */Cellar/bushpilot/* ]] \
+        || { [[ -n "${HOMEBREW_PREFIX:-}" ]] && [[ "$SCRIPT_PATH" == "$HOMEBREW_PREFIX"/* ]]; }; then
+        return 0
+    fi
+
     # Already reachable by name on $PATH (whether via this exact symlink or otherwise)
     # -> nothing to do.
     if is_command_available "$target_name"; then

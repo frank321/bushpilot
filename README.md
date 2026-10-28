@@ -29,7 +29,15 @@ Bushpilot skips that. It ships a curated catalog of models that have been tested
 
 ## Quick start
 
-Get the latest release bundle (`bushpilot.zip`) — no build step needed:
+**Homebrew (recommended):**
+
+```bash
+brew install frank321/bushpilot/bushpilot
+```
+
+That adds the tap and installs three commands: `bushpilot-server` (start the model server + dashboard), `bushpilot` (attach a coding tool), and `bushpilot-uninstall`. Upgrade with `brew update && brew upgrade bushpilot`.
+
+**Or the release bundle** (`bushpilot.zip`) — no build step needed:
 
 **→ [Download the latest release](https://github.com/frank321/bushpilot/releases/latest)** — unzip, `cd` in, then run `./launch_tool.sh`.
 
@@ -39,6 +47,8 @@ Or clone the repo and run from source:
 git clone https://github.com/frank321/bushpilot.git
 cd bushpilot
 ```
+
+The two paths below show the clone/bundle invocation (`./launch_tool.sh`); if you installed via Homebrew, use `bushpilot` and `bushpilot-server` instead.
 
 Then, **single-terminal launch** (auto-splits iTerm2, `tmux`, or Terminal.app if the server isn't running yet):
 
