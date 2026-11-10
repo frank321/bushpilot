@@ -265,6 +265,30 @@ class RouterConfig:
 
             return False, f"Timed out waiting {int(self.swap_timeout)}s for server to switch to '{target_id}'"
 
+    def wait_for_active_swap(self):
+        """If a model hot-swap is currently in progress (via `request_swap` on another
+        thread or a dashboard-initiated swap in `start_mlx_server.sh` that cleared
+        `mlx-loaded.txt`), wait up to `self.swap_timeout` for the active model state
+        to settle before forwarding an inference request."""
+        if (
+            not self.swap_lock.locked()
+            and not os.path.exists(self.swap_request_file)
+            and (read_loaded_state(self.state_file) is not None or not os.path.exists(self.roster_file))
+        ):
+            return read_loaded_state(self.state_file)
+
+        deadline = time.monotonic() + self.swap_timeout
+        while time.monotonic() < deadline:
+            if (
+                not self.swap_lock.locked()
+                and not os.path.exists(self.swap_request_file)
+            ):
+                loaded = read_loaded_state(self.state_file)
+                if loaded is not None or not os.path.exists(self.roster_file):
+                    return loaded
+            time.sleep(0.1)
+        return read_loaded_state(self.state_file)
+
 
 class BushpilotRouterServer(ThreadingHTTPServer):
     allow_reuse_address = True
@@ -343,7 +367,7 @@ class BushpilotRouterHandler(BaseHTTPRequestHandler):
             if isinstance(payload, dict):
                 req_model = payload.get("model")
                 roster = read_roster(cfg.roster_file)
-                loaded = read_loaded_state(cfg.state_file)
+                loaded = cfg.wait_for_active_swap()
                 target_entry, needs_swap = match_roster_entry(req_model, roster, loaded)
 
                 if needs_swap and target_entry:
@@ -402,9 +426,10 @@ class BushpilotRouterHandler(BaseHTTPRequestHandler):
             if method == "HEAD":
                 return
 
+            read_chunk = getattr(resp, "read1", resp.read)
             if is_chunked:
                 while True:
-                    chunk = resp.read(4096)
+                    chunk = read_chunk(4096)
                     if not chunk:
                         break
                     self.wfile.write(chunk)
@@ -420,7 +445,7 @@ class BushpilotRouterHandler(BaseHTTPRequestHandler):
                     remaining -= len(chunk)
             else:
                 while True:
-                    chunk = resp.read(4096)
+                    chunk = read_chunk(4096)
                     if not chunk:
                         break
                     self.wfile.write(chunk)

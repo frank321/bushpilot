@@ -30,7 +30,20 @@ set -euo pipefail
 # literally named "flash-cli" is a terminal flashcards app, not an AI coding agent).
 # Revisit if the user points at a specific repo for either name.
 
-SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+_resolve_script_path() {
+    local src="${BASH_SOURCE[0]}" dir link
+    while [[ -L "$src" ]]; do
+        dir="$(cd -P "$(dirname "$src")" && pwd)"
+        link="$(readlink "$src")"
+        if [[ "$link" != /* ]]; then
+            src="$dir/$link"
+        else
+            src="$link"
+        fi
+    done
+    printf '%s/%s\n' "$(cd -P "$(dirname "$src")" && pwd)" "$(basename "$src")"
+}
+SCRIPT_PATH="$(_resolve_script_path)"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 START_PROXY_SCRIPT="$SCRIPT_DIR/start_mlx_server.sh"
 
@@ -709,16 +722,153 @@ PYEOF
 # opposed to "openai-codex", which is OAuth-only against the real ChatGPT subscription
 # backend). Like Claude/OpenCode, this needs some API key value even for a keyless
 # local server -- forwarded as the Authorization header, never validated against our
-# side. Re-running `cline auth` with the same values on every launch is harmless
-# (overwrites the same provider entry with identical data) and avoids depending on
-# "last used provider" state the way a bare `cline` invocation would.
+# side. Because `cline auth` mutates ~/.cline/data/settings/providers.json on disk
+# (setting lastUsedProvider="openai-native" and overwriting providers["openai-native"]),
+# we snapshot providers.json beforehand and restore the previous non-BushPilot state on
+# exit (while preserving any provider switch the user made inside Cline during the session).
+snapshot_cline_providers() {
+    local providers_file="$1"
+    local snapshot_file="$2"
+    [[ -f "$providers_file" ]] || return 0
+    mkdir -p "$(dirname "$snapshot_file")"
+    local pyscript
+    pyscript="$(mktemp)"
+    cat <<'PYEOF' > "$pyscript"
+import json
+import os
+import shutil
+import sys
+
+providers_path, snapshot_path = sys.argv[1], sys.argv[2]
+BUSHPILOT_KEY = "sk-mlx-direct-local"
+
+try:
+    with open(providers_path) as f:
+        current = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError, OSError):
+    sys.exit(0)
+
+if not isinstance(current, dict):
+    sys.exit(0)
+
+providers = current.get("providers")
+cur_entry = providers.get("openai-native") if isinstance(providers, dict) else None
+cur_settings = (cur_entry.get("settings") if isinstance(cur_entry, dict) else None) or {}
+if cur_settings.get("apiKey") == BUSHPILOT_KEY and os.path.isfile(snapshot_path):
+    # Another BushPilot Cline session is already active (or exited abnormally before
+    # restoring); keep the original pre-BushPilot backup rather than overwriting it
+    # with BushPilot's temporary credentials.
+    sys.exit(0)
+
+try:
+    tmp_path = f"{snapshot_path}.tmp.{os.getpid()}"
+    shutil.copyfile(providers_path, tmp_path)
+    os.replace(tmp_path, snapshot_path)
+except OSError:
+    pass
+PYEOF
+    "$MLX_PYTHON" "$pyscript" "$providers_file" "$snapshot_file" 2>/dev/null || true
+    rm -f "$pyscript"
+}
+
+restore_cline_providers() {
+    local providers_file="$1"
+    local snapshot_file="$2"
+    local pyscript
+    pyscript="$(mktemp)"
+    cat <<'PYEOF' > "$pyscript"
+import json
+import os
+import sys
+
+providers_path, snapshot_path = sys.argv[1], sys.argv[2]
+BUSHPILOT_KEY = "sk-mlx-direct-local"
+
+try:
+    with open(providers_path) as f:
+        current = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError, OSError):
+    sys.exit(0)
+
+if not isinstance(current, dict):
+    sys.exit(0)
+
+snapshot = None
+if snapshot_path and os.path.isfile(snapshot_path):
+    try:
+        with open(snapshot_path) as f:
+            snapshot = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        snapshot = None
+
+providers = current.get("providers")
+if not isinstance(providers, dict):
+    sys.exit(0)
+
+cur_entry = providers.get("openai-native")
+cur_settings = (cur_entry.get("settings") if isinstance(cur_entry, dict) else None) or {}
+if cur_settings.get("apiKey") != BUSHPILOT_KEY:
+    # User reconfigured openai-native with their own credentials during the session.
+    sys.exit(0)
+
+prev_entry = None
+prev_last = None
+if isinstance(snapshot, dict):
+    snap_providers = snapshot.get("providers")
+    if isinstance(snap_providers, dict):
+        cand = snap_providers.get("openai-native")
+        cand_settings = (cand.get("settings") if isinstance(cand, dict) else None) or {}
+        if isinstance(cand, dict) and cand_settings.get("apiKey") != BUSHPILOT_KEY:
+            prev_entry = cand
+    cand_last = snapshot.get("lastUsedProvider")
+    if isinstance(cand_last, str) and cand_last:
+        if cand_last != "openai-native" or prev_entry is not None:
+            prev_last = cand_last
+
+if prev_entry is not None:
+    providers["openai-native"] = prev_entry
+else:
+    providers.pop("openai-native", None)
+
+if current.get("lastUsedProvider") == "openai-native":
+    if prev_last is not None:
+        current["lastUsedProvider"] = prev_last
+    elif prev_entry is None:
+        fallback = next(iter(providers.keys()), None)
+        if fallback:
+            current["lastUsedProvider"] = fallback
+        else:
+            current.pop("lastUsedProvider", None)
+
+try:
+    tmp_path = f"{providers_path}.tmp.{os.getpid()}"
+    with open(tmp_path, "w") as f:
+        json.dump(current, f, indent=2)
+        f.write("\n")
+    os.replace(tmp_path, providers_path)
+except OSError:
+    pass
+PYEOF
+    "$MLX_PYTHON" "$pyscript" "$providers_file" "$snapshot_file" 2>/dev/null || true
+    rm -f "$pyscript" "$snapshot_file"
+}
+
 launch_cline() {
     local base_url="http://$MLX_HOST:$MLX_PORT/v1"
+    CLINE_PROVIDERS_FILE="$HOME/.cline/data/settings/providers.json"
+    CLINE_SNAPSHOT_FILE="$BUSHPILOT_HOME/state/cline-providers-backup.json"
+    snapshot_cline_providers "$CLINE_PROVIDERS_FILE" "$CLINE_SNAPSHOT_FILE"
+
+    local rc=0
+    trap 'restore_cline_providers "$CLINE_PROVIDERS_FILE" "$CLINE_SNAPSHOT_FILE"' EXIT INT TERM HUP
     cline auth --provider openai-native --apikey sk-mlx-direct-local \
         --modelid "$MLX_MODEL" --baseurl "$base_url" > /dev/null
 
     log_success "Launching Cline against $MLX_MODEL (openai-native provider, baseURL $base_url)"
-    exec cline -P openai-native -m "$MLX_MODEL" -k sk-mlx-direct-local "$@"
+    cline -P openai-native -m "$MLX_MODEL" -k sk-mlx-direct-local "$@" || rc=$?
+    trap - EXIT INT TERM HUP
+    restore_cline_providers "$CLINE_PROVIDERS_FILE" "$CLINE_SNAPSHOT_FILE"
+    exit "$rc"
 }
 
 # Pi (pi.dev / github.com/earendil-works/pi) registers custom OpenAI-compatible
@@ -824,7 +974,7 @@ except (FileNotFoundError, json.JSONDecodeError, OSError):
 
 if not expected_models:
     expected_models = [build_pi_entry(model_id, context_window, model_id, local_model_id, loaded_backend)]
-elif all(m["id"] != model_id for m in expected_models):
+elif all(m["id"] not in (model_id, local_model_id) for m in expected_models):
     expected_models.insert(0, build_pi_entry(model_id, context_window, model_id, local_model_id, loaded_backend))
 
 try:
@@ -1049,8 +1199,13 @@ except (FileNotFoundError, json.JSONDecodeError, OSError):
     pass
 
 has_roster = bool(roster_models_dict)
-if has_roster and model_id not in roster_models_dict:
-    roster_models_dict[model_id] = build_v1_model_entry(model_id, context_window, model_id, local_model_id, loaded_backend)
+target_model_id = (
+    local_model_id
+    if has_roster and local_model_id and local_model_id in roster_models_dict
+    else model_id
+)
+if has_roster and target_model_id not in roster_models_dict:
+    roster_models_dict[target_model_id] = build_v1_model_entry(target_model_id, context_window, model_id, local_model_id, loaded_backend)
 
 ATTACHMENT_MODALITIES = image_capable_modalities(models_json_path, model_id, local_model_id, loaded_backend)
 
@@ -1182,21 +1337,26 @@ PYEOF
     esac
 }
 
-# v2 schema counterpart to register_opencode_model -- confirmed live against v2.0.22
+# v2 schema counterpart to register_opencode_model -- confirmed live against v2.0.22+
 # (see opencode_cli_is_v2): "providers" (plural) instead of "provider", a "package"
 # field instead of "npm" (and a different package name: @opencode/ai/providers/
 # openai-compatible, not @ai-sdk/openai-compatible), and each model entry needs its
-# own "modelID" rather than using the dict key as the id directly. Critically, this
-# ALSO sets the root "model" field -- v2 has no CLI flag to pick a model for a bare
-# launch (only `opencode run --model`), so the only way to launch straight into our
-# model is to make it the configured default (verified live: `opencode run` with no
-# --model at all correctly picked up this field and attempted to reach our model).
-# That default persists in opencode.jsonc after this script exits, unlike v1's
-# --model flag which only ever affected the one launch -- see uninstall.sh, which
-# already clears both the v1 and v2 shapes of this on removal.
+# own "modelID" rather than using the dict key as the id directly.
+#
+# IMPORTANT: Do NOT set the root "model" field in opencode.jsonc (and remove any
+# existing root "model" that points to "mlx-direct/..."). OpenCode v2's new-session
+# model resolution (Me() in Local provider) checks opencode.jsonc's root "model"
+# BEFORE ~/.local/state/opencode/model.json's "recent" list, whereas switching models
+# in OpenCode's TUI only updates model.json's "recent" list. Setting root "model" in
+# opencode.jsonc permanently overrides the user's last-selected model on every new
+# session even after BushPilot is stopped. Instead, we prepend {"providerID":
+# "mlx-direct", "modelID": <model_id>} to "recent" in model.json on launch so
+# OpenCode opens on the local model while still remembering any model the user switches
+# to afterward.
 register_opencode_model_v2() {
     local base_url="$1"
     local opencode_config="$HOME/.config/opencode/opencode.jsonc"
+    local opencode_model_state="${XDG_STATE_HOME:-$HOME/.local/state}/opencode/model.json"
     local roster_file="${MLX_ROSTER_FILE:-$BUSHPILOT_HOME/state/mlx-roster.json}"
     mkdir -p "$(dirname "$opencode_config")"
     log_info "Checking OpenCode's mlx-direct provider registration ($opencode_config)..."
@@ -1210,6 +1370,7 @@ register_opencode_model_v2() {
     # own boundary while scanning for the $(...)'s closing paren.
     cat <<'PYEOF' > "$pyscript"
 import json
+import os
 import re
 import sys
 
@@ -1217,12 +1378,20 @@ config_path, model_id, context_window, base_url, models_json_path = sys.argv[1],
 local_model_id = sys.argv[6] if len(sys.argv) > 6 else ""
 loaded_backend = sys.argv[7] if len(sys.argv) > 7 else ""
 roster_path = sys.argv[8] if len(sys.argv) > 8 else ""
+model_state_path = (
+    sys.argv[9]
+    if len(sys.argv) > 9 and sys.argv[9]
+    else os.path.join(
+        os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+        "opencode",
+        "model.json",
+    )
+)
 output_limit = min(32768, max(4096, context_window // 4))
 
 MLX_DIRECT_PROVIDER_NAME = "BushPilot"
 MLX_DIRECT_MODEL_NAME = lambda mid: f"[BushPilot] {mid}"
 MLX_DIRECT_PACKAGE = "@opencode/ai/providers/openai-compatible"
-MLX_DIRECT_MODEL_STRING = f"mlx-direct/{model_id}"
 
 
 def image_capable_modalities(models_json_path, hf_id, local_id="", backend=""):
@@ -1292,8 +1461,63 @@ except (FileNotFoundError, json.JSONDecodeError, OSError):
     pass
 
 has_roster = bool(roster_models_dict)
-if has_roster and model_id not in roster_models_dict:
-    roster_models_dict[model_id] = build_v2_model_entry(model_id, context_window, model_id, local_model_id, loaded_backend)
+target_model_id = (
+    local_model_id
+    if has_roster and local_model_id and local_model_id in roster_models_dict
+    else model_id
+)
+if has_roster and target_model_id not in roster_models_dict:
+    roster_models_dict[target_model_id] = build_v2_model_entry(target_model_id, context_window, model_id, local_model_id, loaded_backend)
+
+
+def update_model_state(state_path, target_mid):
+    if not state_path:
+        return False
+    entry = {"providerID": "mlx-direct", "modelID": target_mid}
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+        if not isinstance(state, dict):
+            state = {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        state = {}
+
+    recent = state.get("recent")
+    if not isinstance(recent, list):
+        recent = []
+    if recent and recent[0] == entry:
+        return False
+
+    new_recent = [entry]
+    for item in recent:
+        if (
+            isinstance(item, dict)
+            and isinstance(item.get("providerID"), str)
+            and item["providerID"]
+            and isinstance(item.get("modelID"), str)
+            and item["modelID"]
+        ):
+            if item["providerID"] == "mlx-direct" and item["modelID"] == target_mid:
+                continue
+            new_recent.append({"providerID": item["providerID"], "modelID": item["modelID"]})
+    state["recent"] = new_recent[:10]
+    if not isinstance(state.get("favorite"), list):
+        state["favorite"] = []
+    if not isinstance(state.get("variant"), dict):
+        state["variant"] = {}
+
+    try:
+        state_dir = os.path.dirname(state_path)
+        if state_dir:
+            os.makedirs(state_dir, exist_ok=True)
+        tmp_path = f"{state_path}.tmp.{os.getpid()}"
+        with open(tmp_path, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp_path, state_path)
+        return True
+    except OSError:
+        return False
+
 
 ATTACHMENT_MODALITIES = image_capable_modalities(models_json_path, model_id, local_model_id, loaded_backend)
 
@@ -1351,6 +1575,11 @@ except Exception as e:
     print(f"PARSE_ERROR: {e}")
     sys.exit(2)
 
+# Always place the active local model at the front of OpenCode's recent-models state
+# (even when opencode.jsonc itself is already up to date), so launching via BushPilot
+# opens on this model without locking opencode.jsonc's root "model" setting.
+update_model_state(model_state_path, target_model_id)
+
 # v1-schema leftovers, if this machine was ever set up against the 1.x line. Only
 # clean up what THIS script owns -- its own old "mlx-direct" entry under the OLD
 # singular "provider" key, and "default_model" if it specifically pointed there --
@@ -1368,6 +1597,17 @@ if had_v1_mlx_direct:
 had_v1_default_model = str(parsed.get("default_model", "")).startswith("mlx-direct/")
 if had_v1_default_model:
     parsed.pop("default_model", None)
+
+# Also remove any root "model" pointing to mlx-direct written by earlier BushPilot
+# versions -- leaving it in opencode.jsonc causes OpenCode v2 to override model.json's
+# recent[0] on every new session even after the user switches models in the TUI.
+raw_root_model = parsed.get("model")
+had_v2_mlx_direct_model = (
+    (isinstance(raw_root_model, str) and raw_root_model.startswith("mlx-direct/"))
+    or (isinstance(raw_root_model, dict) and raw_root_model.get("providerID") == "mlx-direct")
+)
+if had_v2_mlx_direct_model:
+    parsed.pop("model", None)
 
 providers = parsed.setdefault("providers", {})
 existing = providers.get("mlx-direct", {})
@@ -1387,12 +1627,12 @@ else:
 already_correct = (
     not had_v1_mlx_direct
     and not had_v1_default_model
+    and not had_v2_mlx_direct_model
     and existing.get("name") == MLX_DIRECT_PROVIDER_NAME
     and existing.get("package") == MLX_DIRECT_PACKAGE
     and existing.get("settings", {}).get("baseURL") == base_url
     and existing.get("compatibility", {}).get("maxTokensField") == "max_tokens"
     and models_match
-    and parsed.get("model") == MLX_DIRECT_MODEL_STRING
 )
 if already_correct:
     print("ALREADY_REGISTERED")
@@ -1412,26 +1652,28 @@ if has_roster:
 else:
     models = mlx_direct.setdefault("models", {})
     models[model_id] = build_v2_model_entry(model_id, context_window, model_id, local_model_id, loaded_backend)
-parsed["model"] = MLX_DIRECT_MODEL_STRING
 
 with open(config_path, "w") as f:
     json.dump(parsed, f, indent=2)
     f.write("\n")
 print("REGISTERED")
 PYEOF
-    result="$("$MLX_PYTHON" "$pyscript" "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" "${LOADED_LOCAL_MODEL:-}" "${LOADED_BACKEND:-}" "$roster_file")" || true
+    result="$("$MLX_PYTHON" "$pyscript" "$opencode_config" "$MLX_MODEL" "$CONTEXT_WINDOW" "$base_url" "$SCRIPT_DIR/models.json" "${LOADED_LOCAL_MODEL:-}" "${LOADED_BACKEND:-}" "$roster_file" "$opencode_model_state")" || true
     rm -f "$pyscript"
 
     case "$result" in
         ALREADY_REGISTERED)
-            log_success "$MLX_MODEL already registered under mlx-direct -- no changes needed"
+            log_success "$MLX_MODEL already registered under mlx-direct -- selected as active model in $opencode_model_state"
             ;;
         REGISTERED)
-            log_success "Registered $MLX_MODEL in opencode.jsonc's mlx-direct provider and set it as your default model (v2 has no --model flag for a direct launch -- see $opencode_config to change the default back)"
+            if is_command_available opencode; then
+                opencode reload > /dev/null 2>&1 || true
+            fi
+            log_success "Registered $MLX_MODEL in opencode.jsonc's mlx-direct provider and selected it in $opencode_model_state"
             ;;
         *)
             log_error "Could not auto-register $MLX_MODEL in opencode.jsonc ($result)"
-            log_error "Add it manually under providers.\"mlx-direct\".models and set root \"model\" to \"mlx-direct/$MLX_MODEL\", or OpenCode will fail with 'Model not found'."
+            log_error "Add it manually under providers.\"mlx-direct\".models, or OpenCode will fail with 'Model not found'."
             exit 1
             ;;
     esac
@@ -1443,6 +1685,23 @@ launch_opencode() {
     if opencode_cli_is_v2; then
         register_opencode_model_v2 "$base_url"
         log_success "Launching OpenCode against mlx-direct/$MLX_MODEL (context: ${CONTEXT_WINDOW} tokens)"
+        # In OpenCode v2, bare `opencode` takes no --model flag (reads recent[0] from
+        # ~/.local/state/opencode/model.json), whereas `opencode run` and `opencode mini`
+        # still accept --model on the CLI.
+        if [[ "${1:-}" == "run" || "${1:-}" == "mini" ]]; then
+            local subcmd="$1"
+            shift
+            local has_model_flag=0 arg
+            for arg in "$@"; do
+                case "$arg" in
+                    -m|--model|--model=*) has_model_flag=1; break ;;
+                esac
+            done
+            if (( ! has_model_flag )); then
+                exec opencode "$subcmd" --model "mlx-direct/$MLX_MODEL" "$@"
+            fi
+            exec opencode "$subcmd" "$@"
+        fi
         exec opencode "$@"
     fi
 

@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from .calibration import save_calibration
+from .calibration import _is_finite_number, save_calibration
 from .hardware import get_chip_info, get_current_wired_gb, log
 from .kv import MIN_USABLE_CONTEXT
 from .picker.cells import is_model_cached, model_engine
@@ -223,18 +223,28 @@ def main():
         except ValueError:
             log(f"ERROR: --decode-tok-s value '{decode_flag}' is not a number")
             sys.exit(2)
-        if decode_tok_s <= 0:
-            log(f"Skipping calibration save: non-positive decode_tok_s ({decode_tok_s}) — nothing real to record.")
+        if not _is_finite_number(decode_tok_s) or decode_tok_s <= 0:
+            log(f"Skipping calibration save: non-positive or non-finite decode_tok_s ({decode_tok_s}) — nothing real to record.")
             return
         context_flag = _flag_value(argv, "--context-tokens")
         ttft_flag = _flag_value(argv, "--ttft-s")
         peak_mem_flag = _flag_value(argv, "--peak-memory-gb")
         try:
             context_tokens = int(context_flag) if context_flag else None
-            ttft_s = float(ttft_flag) if ttft_flag else None
-            peak_memory_gb = float(peak_mem_flag) if peak_mem_flag else None
         except ValueError:
-            context_tokens = ttft_s = peak_memory_gb = None
+            context_tokens = None
+        try:
+            ttft_s = float(ttft_flag) if ttft_flag else None
+            if ttft_s is not None and not _is_finite_number(ttft_s):
+                ttft_s = None
+        except ValueError:
+            ttft_s = None
+        try:
+            peak_memory_gb = float(peak_mem_flag) if peak_mem_flag else None
+            if peak_memory_gb is not None and not _is_finite_number(peak_memory_gb):
+                peak_memory_gb = None
+        except ValueError:
+            peak_memory_gb = None
         # Both optional, additive (see save_calibration's own docstring) -- written by
         # the sweep harness (sweep_model.py), never by the plain teardown-time
         # save_calibration_snapshot() path, which has no sweep data to offer.

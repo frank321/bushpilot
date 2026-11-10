@@ -2,6 +2,7 @@
 a cache that's always safe to ignore, never a required input (see
 load_calibration's docstring)."""
 import json
+import math
 import os
 import re
 from datetime import datetime, timezone
@@ -10,6 +11,10 @@ from datetime import datetime, timezone
 # save_calibration/load_calibration below. Mirrors ~/.bushpilot's other state (the bash
 # side's BUSHPILOT_HOME) without model_advisor.py needing to import or shell out to it.
 CALIBRATION_DIR = os.path.expanduser("~/.bushpilot/calibration")
+
+
+def _is_finite_number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
 def _calibration_path(chip_name, model_id):
@@ -40,7 +45,11 @@ def load_calibration(chip_name, model_id):
             data = json.load(f)
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict) or not isinstance(data.get("decode_tok_s"), (int, float)):
+    if (
+        not isinstance(data, dict)
+        or not _is_finite_number(data.get("decode_tok_s"))
+        or data["decode_tok_s"] <= 0
+    ):
         return None
     return data
 
@@ -98,57 +107,95 @@ def save_calibration(chip_name, model_id, decode_tok_s, context_tokens=None,
     Written atomically (tmp file + os.replace) so a process killed mid-write never
     leaves a half-written, unparseable calibration file for the next launch to trip
     over."""
+    if not _is_finite_number(decode_tok_s) or decode_tok_s <= 0:
+        return
     os.makedirs(CALIBRATION_DIR, exist_ok=True)
     path = _calibration_path(chip_name, model_id)
     prior = load_calibration(chip_name, model_id)
+    prior_dict = prior if isinstance(prior, dict) else {}
+
+    clean_ctx = (
+        int(context_tokens)
+        if _is_finite_number(context_tokens) and context_tokens > 0
+        else None
+    )
+    clean_ttft = (
+        float(ttft_s)
+        if _is_finite_number(ttft_s) and ttft_s >= 0
+        else None
+    )
+    clean_peak = (
+        float(peak_memory_gb)
+        if _is_finite_number(peak_memory_gb) and peak_memory_gb > 0
+        else None
+    )
+    if clean_peak is None and prefill_step_size is None:
+        prior_peak = prior_dict.get("peak_memory_gb")
+        if _is_finite_number(prior_peak) and prior_peak > 0:
+            clean_peak = float(prior_peak)
+
     payload = {
-        "decode_tok_s": decode_tok_s,
-        "context_tokens": context_tokens,
-        "ttft_s": ttft_s,
-        "peak_memory_gb": peak_memory_gb,
+        "decode_tok_s": float(decode_tok_s) if isinstance(decode_tok_s, float) else decode_tok_s,
+        "context_tokens": clean_ctx,
+        "ttft_s": clean_ttft,
+        "peak_memory_gb": clean_peak,
         "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    if prefill_step_size is not None:
-        payload["prefill_step_size"] = prefill_step_size
-    if kv_bits_safe_at_long_context is not None:
-        payload["kv_bits_safe_at_long_context"] = kv_bits_safe_at_long_context
+
+    eff_prefill_step = prefill_step_size
+    if eff_prefill_step is None:
+        prior_step = prior_dict.get("prefill_step_size")
+        if isinstance(prior_step, int) and not isinstance(prior_step, bool) and prior_step > 0:
+            eff_prefill_step = prior_step
+    if isinstance(eff_prefill_step, int) and not isinstance(eff_prefill_step, bool) and eff_prefill_step > 0:
+        payload["prefill_step_size"] = eff_prefill_step
+
+    eff_kv_bits_safe = kv_bits_safe_at_long_context
+    if eff_kv_bits_safe is None and isinstance(prior_dict.get("kv_bits_safe_at_long_context"), bool):
+        eff_kv_bits_safe = prior_dict["kv_bits_safe_at_long_context"]
+    if isinstance(eff_kv_bits_safe, bool):
+        payload["kv_bits_safe_at_long_context"] = eff_kv_bits_safe
+
     if drafter is not None:
         payload["drafter"] = drafter
+
+    merged_by_ctx = {}
+    if isinstance(prior_dict.get("prefill_step_size_by_context"), dict):
+        for k, v in prior_dict["prefill_step_size_by_context"].items():
+            try:
+                if int(k) > 0:
+                    merged_by_ctx[str(int(k))] = v
+            except (TypeError, ValueError):
+                continue
     if isinstance(prefill_step_size_by_context, dict) and prefill_step_size_by_context:
-        merged_by_ctx = {}
-        if isinstance(prior, dict) and isinstance(prior.get("prefill_step_size_by_context"), dict):
-            for k, v in prior["prefill_step_size_by_context"].items():
-                try:
-                    if int(k) > 0:
-                        merged_by_ctx[str(int(k))] = v
-                except (TypeError, ValueError):
-                    continue
         for k, v in prefill_step_size_by_context.items():
             try:
                 if int(k) > 0:
                     merged_by_ctx[str(int(k))] = v
             except (TypeError, ValueError):
                 continue
-        if merged_by_ctx:
-            payload["prefill_step_size_by_context"] = merged_by_ctx
-    if isinstance(decode_tok_s_by_context, dict) and decode_tok_s_by_context:
-        merged_decode_by_ctx = {}
-        if isinstance(prior, dict) and isinstance(prior.get("decode_tok_s_by_context"), dict):
-            for k, v in prior["decode_tok_s_by_context"].items():
-                try:
-                    if int(k) > 0 and isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
-                        merged_decode_by_ctx[str(int(k))] = round(float(v), 2)
-                except (TypeError, ValueError):
-                    continue
-        for k, v in decode_tok_s_by_context.items():
+    if merged_by_ctx:
+        payload["prefill_step_size_by_context"] = merged_by_ctx
+
+    merged_decode_by_ctx = {}
+    if isinstance(prior_dict.get("decode_tok_s_by_context"), dict):
+        for k, v in prior_dict["decode_tok_s_by_context"].items():
             try:
-                if int(k) > 0 and isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                if int(k) > 0 and _is_finite_number(v) and v > 0:
                     merged_decode_by_ctx[str(int(k))] = round(float(v), 2)
             except (TypeError, ValueError):
                 continue
-        if merged_decode_by_ctx:
-            payload["decode_tok_s_by_context"] = merged_decode_by_ctx
-    tmp_path = f"{path}.tmp"
+    if isinstance(decode_tok_s_by_context, dict) and decode_tok_s_by_context:
+        for k, v in decode_tok_s_by_context.items():
+            try:
+                if int(k) > 0 and _is_finite_number(v) and v > 0:
+                    merged_decode_by_ctx[str(int(k))] = round(float(v), 2)
+            except (TypeError, ValueError):
+                continue
+    if merged_decode_by_ctx:
+        payload["decode_tok_s_by_context"] = merged_decode_by_ctx
+
+    tmp_path = f"{path}.tmp.{os.getpid()}"
     with open(tmp_path, "w") as f:
         json.dump(payload, f)
     os.replace(tmp_path, path)

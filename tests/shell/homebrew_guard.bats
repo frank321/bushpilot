@@ -104,3 +104,20 @@ teardown() {
     [ "$status" -eq 0 ]
     [ -z "$(find "$HOME" -type l -print -quit)" ]
 }
+
+@test "_resolve_script_path resolves file symlinks to the real script directory" {
+    local real_dir="$TEST_TMPDIR/real_install"
+    local link_dir="$TEST_TMPDIR/bin"
+    mkdir -p "$real_dir" "$link_dir"
+
+    sed -n '/^_resolve_script_path() {/,/^SCRIPT_DIR=/p' "$REPO_ROOT/start_mlx_server.sh" > "$real_dir/start_mlx_server.sh"
+    printf 'printf "%%s|%%s\\n" "$SCRIPT_PATH" "$SCRIPT_DIR"\n' >> "$real_dir/start_mlx_server.sh"
+    chmod +x "$real_dir/start_mlx_server.sh"
+    ln -s "$real_dir/start_mlx_server.sh" "$link_dir/start_mlx_server.sh"
+
+    local out
+    out="$("$link_dir/start_mlx_server.sh")"
+    local expected_dir
+    expected_dir="$(cd -P "$real_dir" && pwd)"
+    [ "$out" = "$expected_dir/start_mlx_server.sh|$expected_dir" ]
+}

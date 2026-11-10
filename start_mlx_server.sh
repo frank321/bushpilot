@@ -32,7 +32,20 @@ set -euo pipefail
 # context doesn't already fit free memory unquantized (see model_advisor.py); the
 # fixed-model form has no such computed decision and defaults to unquantized.
 
-SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+_resolve_script_path() {
+    local src="${BASH_SOURCE[0]}" dir link
+    while [[ -L "$src" ]]; do
+        dir="$(cd -P "$(dirname "$src")" && pwd)"
+        link="$(readlink "$src")"
+        if [[ "$link" != /* ]]; then
+            src="$dir/$link"
+        else
+            src="$link"
+        fi
+    done
+    printf '%s/%s\n' "$(cd -P "$(dirname "$src")" && pwd)" "$(basename "$src")"
+}
+SCRIPT_PATH="$(_resolve_script_path)"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 
 INTERACTIVE=false
@@ -363,6 +376,17 @@ wait_for_url() {
         if [[ -n "$watch_pid" ]] && ! kill -0 "$watch_pid" 2>/dev/null; then
             return 1
         fi
+        # Enforce the memory backstop while waiting on MLX_PID to load model weights so
+        # a load-time memory spike trips emergency teardown instead of waiting up to 600s.
+        if [[ -n "$watch_pid" && "$watch_pid" == "${MLX_PID:-}" ]] \
+            && declare -F check_memory_backstop > /dev/null 2>&1; then
+            if ! check_memory_backstop; then
+                if declare -F full_teardown > /dev/null 2>&1; then
+                    full_teardown "$TEARDOWN_REASON" "emergency"
+                fi
+                return 1
+            fi
+        fi
         attempts=$((attempts + 1))
         sleep 1
     done
@@ -424,7 +448,7 @@ wait_for_port_free() {
     local attempts=0
     local pids
 
-    pids="$(lsof -ti "tcp:$port" 2>/dev/null || true)"
+    pids="$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null || true)"
     if [[ -z "$pids" ]]; then
         return 0
     fi
@@ -433,7 +457,7 @@ wait_for_port_free() {
     kill -TERM $pids > /dev/null 2>&1 || true
 
     while true; do
-        pids="$(lsof -ti "tcp:$port" 2>/dev/null || true)"
+        pids="$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null || true)"
         if [[ -z "$pids" ]]; then
             return 0
         fi
@@ -447,7 +471,7 @@ wait_for_port_free() {
         sleep 1
     done
 
-    pids="$(lsof -ti "tcp:$port" 2>/dev/null || true)"
+    pids="$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null || true)"
     if [[ -n "$pids" ]]; then
         log_error "Port $port is still in use by PID(s): $pids"
         return 1
@@ -1063,7 +1087,7 @@ patch_known_chat_template_bugs() {
 mlx_port_owner_is_expected() {
     local check_port="${MLX_BACKEND_PORT:-$MLX_PORT}"
     local pids
-    pids="$(lsof -ti "tcp:$check_port" 2>/dev/null || true)"
+    pids="$(lsof -ti "tcp:$check_port" -sTCP:LISTEN 2>/dev/null || true)"
     [[ -z "$pids" ]] && return 1
 
     local pid
@@ -1077,7 +1101,7 @@ mlx_port_owner_is_expected() {
 
 router_port_owner_is_expected() {
     local pids
-    pids="$(lsof -ti "tcp:$MLX_PORT" 2>/dev/null || true)"
+    pids="$(lsof -ti "tcp:$MLX_PORT" -sTCP:LISTEN 2>/dev/null || true)"
     [[ -z "$pids" ]] && return 1
 
     local pid
@@ -1315,7 +1339,7 @@ ensure_mlx_running() {
         else
             log_error "Port $MLX_PORT is answering /health, but it is NOT this script's managed router/backend ($MLX_PROC_PATTERN):"
             local owner_pids
-            owner_pids="$(lsof -ti "tcp:$MLX_PORT" 2>/dev/null || true)"
+            owner_pids="$(lsof -ti "tcp:$MLX_PORT" -sTCP:LISTEN 2>/dev/null || true)"
             if [[ -n "$owner_pids" ]]; then
                 ps -p $owner_pids -o pid=,command= 2>/dev/null | sed 's/^/  /' >&2 || true
             fi

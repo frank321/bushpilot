@@ -160,3 +160,22 @@ stub_memory() {
     [ "$actual" = "log,kill(3),render," ]
 }
 
+@test "wait_for_url enforces check_memory_backstop while waiting on MLX_PID" {
+    source_backstop_functions wait_for_url
+    MLX_PID="$$"
+    curl() { return 7; }
+    sleep() { :; }
+
+    stub_memory 5 4
+    local teardown_called=0
+    full_teardown() {
+        teardown_called=1
+        return 0
+    }
+
+    call wait_for_url "http://127.0.0.1:38473/health" 5 "$$"
+    [ "$status" -eq 1 ]
+    [ "$teardown_called" -eq 1 ]
+    [[ "$TEARDOWN_REASON" == *"CRITICAL"* ]]
+}
+

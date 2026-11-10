@@ -47,18 +47,36 @@ setup() {
     log_info() { :; }
     log_error() { echo "[ERROR] $*" >&2; }
     log_success() { :; }
+    is_command_available() { return 1; }
 }
 
 teardown() {
     rm -rf "$TEST_TMPDIR"
 }
 
-@test "register_opencode_model_v2 sets compatibility.maxTokensField=max_tokens and upgrades existing entries" {
+@test "register_opencode_model_v2 sets compatibility.maxTokensField=max_tokens, strips sticky root model, and updates model.json recent[0]" {
     source_launch_functions register_opencode_model_v2
     local cfg="$HOME/.config/opencode/opencode.jsonc"
-    mkdir -p "$(dirname "$cfg")"
+    local state_file="$HOME/.local/state/opencode/model.json"
+    mkdir -p "$(dirname "$cfg")" "$(dirname "$state_file")"
 
-    # Seed an older v2 config that lacks compatibility.maxTokensField
+    # Seed an existing model.json with user's previous recent models and favorites
+    cat <<'EOF' > "$state_file"
+{
+  "recent": [
+    {"providerID": "amazon-bedrock", "modelID": "us.anthropic.claude-sonnet-5"},
+    {"providerID": "mlx-direct", "modelID": "mlx-community/gemma-4-26b-a4b-it-4bit"}
+  ],
+  "favorite": [
+    {"providerID": "amazon-bedrock", "modelID": "us.anthropic.claude-sonnet-5"}
+  ],
+  "variant": {
+    "amazon-bedrock/us.anthropic.claude-sonnet-5": "default"
+  }
+}
+EOF
+
+    # Seed an older v2 config that lacks compatibility.maxTokensField and has a sticky root "model"
     cat <<'EOF' > "$cfg"
 {
   "$schema": "https://opencode.ai/config.json",
@@ -97,16 +115,193 @@ EOF
 import json, sys
 with open(sys.argv[1]) as f:
     d = json.load(f)
+assert "model" not in d, f"sticky root model should be removed: {d}"
 p = d["providers"]["mlx-direct"]
 assert p["compatibility"] == {"maxTokensField": "max_tokens"}, p
 m = p["models"]["mlx-community/gemma-4-26b-a4b-it-4bit"]
 assert m["name"] == "[BushPilot] mlx-community/gemma-4-26b-a4b-it-4bit", m
 assert m["limit"] == {"context": 262144, "output": 32768}, m
-' "$cfg"
 
-    # Second call should be a no-op (ALREADY_REGISTERED)
+with open(sys.argv[2]) as f:
+    st = json.load(f)
+assert st["recent"] == [
+    {"providerID": "mlx-direct", "modelID": "mlx-community/gemma-4-26b-a4b-it-4bit"},
+    {"providerID": "amazon-bedrock", "modelID": "us.anthropic.claude-sonnet-5"},
+], st["recent"]
+assert st["favorite"] == [{"providerID": "amazon-bedrock", "modelID": "us.anthropic.claude-sonnet-5"}], st
+' "$cfg" "$state_file"
+
+    # Simulate user switching model inside OpenCode TUI (which updates model.json recent[0])
+    cat <<'EOF' > "$state_file"
+{
+  "recent": [
+    {"providerID": "amazon-bedrock", "modelID": "us.anthropic.claude-sonnet-5"},
+    {"providerID": "mlx-direct", "modelID": "mlx-community/gemma-4-26b-a4b-it-4bit"}
+  ],
+  "favorite": [],
+  "variant": {}
+}
+EOF
+
+    # Second call should be ALREADY_REGISTERED for opencode.jsonc, but still update model.json recent[0]
     call register_opencode_model_v2 "http://127.0.0.1:38472/v1"
     [ "$status" -eq 0 ]
+
+    python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    st = json.load(f)
+assert st["recent"][0] == {"providerID": "mlx-direct", "modelID": "mlx-community/gemma-4-26b-a4b-it-4bit"}, st["recent"]
+' "$state_file"
+}
+
+@test "restore_cline_providers restores previous provider state on exit while preserving in-session provider switches" {
+    source_launch_functions snapshot_cline_providers restore_cline_providers
+    local providers_file="$HOME/.cline/data/settings/providers.json"
+    local snapshot_file="$TEST_TMPDIR/cline-snapshot.json"
+    mkdir -p "$(dirname "$providers_file")"
+
+    # Case 1: User previously used anthropic; launch_cline set openai-native (sk-mlx-direct-local);
+    # on exit without switching providers in Cline, anthropic is restored as lastUsedProvider
+    # and temporary openai-native entry is removed.
+    cat <<'EOF' > "$snapshot_file"
+{
+  "version": 1,
+  "lastUsedProvider": "anthropic",
+  "providers": {
+    "anthropic": {
+      "settings": {"provider": "anthropic", "model": "claude-sonnet-4-6"}
+    }
+  }
+}
+EOF
+    cat <<'EOF' > "$providers_file"
+{
+  "version": 1,
+  "lastUsedProvider": "openai-native",
+  "providers": {
+    "anthropic": {
+      "settings": {"provider": "anthropic", "model": "claude-sonnet-4-6"}
+    },
+    "openai-native": {
+      "settings": {
+        "provider": "openai-native",
+        "apiKey": "sk-mlx-direct-local",
+        "model": "mlx-community/gemma-4-26b-a4b-it-4bit",
+        "baseUrl": "http://127.0.0.1:38472/v1"
+      }
+    }
+  }
+}
+EOF
+
+    call restore_cline_providers "$providers_file" "$snapshot_file"
+    [ "$status" -eq 0 ]
+
+    python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+assert d["lastUsedProvider"] == "anthropic", d
+assert "openai-native" not in d["providers"], d
+' "$providers_file"
+
+    # Case 2: User switched to openrouter during the Cline session; restore_cline_providers
+    # removes temporary openai-native entry but keeps lastUsedProvider="openrouter".
+    cat <<'EOF' > "$snapshot_file"
+{
+  "version": 1,
+  "lastUsedProvider": "anthropic",
+  "providers": {}
+}
+EOF
+    cat <<'EOF' > "$providers_file"
+{
+  "version": 1,
+  "lastUsedProvider": "openrouter",
+  "providers": {
+    "openrouter": {
+      "settings": {"provider": "openrouter", "model": "deepseek/deepseek-r1"}
+    },
+    "openai-native": {
+      "settings": {
+        "provider": "openai-native",
+        "apiKey": "sk-mlx-direct-local",
+        "model": "mlx-community/gemma-4-26b-a4b-it-4bit",
+        "baseUrl": "http://127.0.0.1:38472/v1"
+      }
+    }
+  }
+}
+EOF
+
+    call restore_cline_providers "$providers_file" "$snapshot_file"
+    [ "$status" -eq 0 ]
+
+    python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+assert d["lastUsedProvider"] == "openrouter", d
+assert "openai-native" not in d["providers"], d
+' "$providers_file"
+
+    # Case 3: User had lastUsedProvider="anthropic" AND their own openai-native config;
+    # overlapping snapshot_cline_providers preserves original backup and restore_cline_providers
+    # restores both lastUsedProvider="anthropic" and the user's real openai-native entry.
+    cat <<'EOF' > "$providers_file"
+{
+  "version": 1,
+  "lastUsedProvider": "anthropic",
+  "providers": {
+    "anthropic": {
+      "settings": {"provider": "anthropic", "model": "claude-sonnet-4-6"}
+    },
+    "openai-native": {
+      "settings": {
+        "provider": "openai-native",
+        "apiKey": "sk-user-real-openai-key",
+        "model": "gpt-4.1"
+      }
+    }
+  }
+}
+EOF
+    call snapshot_cline_providers "$providers_file" "$snapshot_file"
+    [ "$status" -eq 0 ]
+
+    cat <<'EOF' > "$providers_file"
+{
+  "version": 1,
+  "lastUsedProvider": "openai-native",
+  "providers": {
+    "anthropic": {
+      "settings": {"provider": "anthropic", "model": "claude-sonnet-4-6"}
+    },
+    "openai-native": {
+      "settings": {
+        "provider": "openai-native",
+        "apiKey": "sk-mlx-direct-local",
+        "model": "mlx-community/gemma-4-26b-a4b-it-4bit",
+        "baseUrl": "http://127.0.0.1:38472/v1"
+      }
+    }
+  }
+}
+EOF
+    call snapshot_cline_providers "$providers_file" "$snapshot_file"
+    [ "$status" -eq 0 ]
+
+    call restore_cline_providers "$providers_file" "$snapshot_file"
+    [ "$status" -eq 0 ]
+
+    python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+assert d["lastUsedProvider"] == "anthropic", d
+assert d["providers"]["openai-native"]["settings"]["apiKey"] == "sk-user-real-openai-key", d
+' "$providers_file"
 }
 
 @test "register_pi_model sets compat.maxTokensField=max_tokens, contextWindow, maxTokens, and input modalities" {
@@ -452,4 +647,74 @@ EOF
     [ "$APC_NUM_BLOCKS" = "1024" ]
     [ "$CONCURRENCY" = "2" ]
     [ "$PREFILL_STEP_SIZE" = "4096" ]
+}
+
+@test "register_opencode_model_v2 selects expose_catalog_id entry without duplicating HF repo key" {
+    source_launch_functions register_opencode_model_v2
+    mkdir -p "$BUSHPILOT_HOME/state"
+    MLX_MODEL="mlx-community/Qwen3.5-9B-MLX-8bit"
+    LOADED_LOCAL_MODEL="qwen3.5-9b-mlx-8bit-dflash"
+    LOADED_BACKEND="mlx_dspark"
+    CONTEXT_WINDOW=65536
+
+    cat <<'EOF' > "$BUSHPILOT_HOME/state/mlx-roster.json"
+{
+  "models": [
+    {
+      "id": "qwen3.5-9b-mlx-8bit-dflash",
+      "huggingface": "mlx-community/Qwen3.5-9B-MLX-8bit",
+      "backend": "mlx_dspark",
+      "recommended_context": 65536,
+      "expose_catalog_id": true
+    }
+  ]
+}
+EOF
+
+    call register_opencode_model_v2 "http://127.0.0.1:38472/v1"
+    [ "$status" -eq 0 ]
+
+    python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    oc = json.load(f)
+models = oc["providers"]["mlx-direct"]["models"]
+assert list(models.keys()) == ["qwen3.5-9b-mlx-8bit-dflash"], models
+with open(sys.argv[2]) as f:
+    st = json.load(f)
+assert st["recent"][0] == {"providerID": "mlx-direct", "modelID": "qwen3.5-9b-mlx-8bit-dflash"}, st
+' "$HOME/.config/opencode/opencode.jsonc" "$HOME/.local/state/opencode/model.json"
+}
+
+@test "uninstall.sh remove_opencode_provider cleans model.json even when opencode.jsonc is missing" {
+    is_command_available() { [[ "$1" == "python3" ]]; }
+    local model_state="$HOME/.local/state/opencode/model.json"
+    mkdir -p "$(dirname "$model_state")"
+    cat <<'EOF' > "$model_state"
+{
+  "recent": [
+    {"providerID": "mlx-direct", "modelID": "mlx-community/Qwen3.5-9B-MLX-4bit"},
+    {"providerID": "anthropic", "modelID": "claude-sonnet-4-6"}
+  ],
+  "favorite": [],
+  "variant": {}
+}
+EOF
+
+    OPENCODE_CONFIG="$HOME/.config/opencode/opencode.jsonc"
+    local tmpf
+    tmpf="$(mktemp)"
+    awk -v fn="remove_opencode_provider" '$0 == fn "() {" { p=1 } p { print } /<<'\''PYEOF'\''/ { hd=1 } /^PYEOF$/ { hd=0 } p && !hd && $0 == "}" { exit }' "$REPO_ROOT/uninstall.sh" > "$tmpf"
+    source "$tmpf"
+    rm -f "$tmpf"
+
+    call remove_opencode_provider
+    [ "$status" -eq 0 ]
+
+    python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    st = json.load(f)
+assert st["recent"] == [{"providerID": "anthropic", "modelID": "claude-sonnet-4-6"}], st
+' "$model_state"
 }

@@ -1,7 +1,7 @@
 """--prefill-step-size recommendation -- time-to-first-token tuning, independent of
 the --kv-bits/context decision in kv.py. See recommend_prefill_step_size's own
 docstring for the memory-safety check this applies to a calibrated value."""
-from .calibration import load_calibration
+from .calibration import _is_finite_number, load_calibration
 from .kv import SAFETY_BUFFER_GB
 
 # Mirrors start_mlx_server.sh's own PREFILL_STEP_SIZE default -- two separate copies of the
@@ -34,7 +34,7 @@ def _select_depth_calibrated_step_size(calibrated, context_tokens):
     for the swept context depth closest to context_tokens (ties broken toward the
     deeper depth so long-context memory/TTFT behavior is preferred at the midpoint).
     Returns None if no depth-keyed entry is usable."""
-    if not isinstance(context_tokens, (int, float)) or context_tokens <= 0:
+    if not _is_finite_number(context_tokens) or context_tokens <= 0:
         return None
     by_ctx = calibrated.get("prefill_step_size_by_context")
     if not isinstance(by_ctx, dict) or not by_ctx:
@@ -117,7 +117,7 @@ def recommend_prefill_step_size(model_entry, chip_name, free_wired_gb,
             f"({chip_name}){depth_note}, saved {saved_at}"
         )
 
-    if not isinstance(peak_mem, (int, float)) or peak_mem <= 0:
+    if not _is_finite_number(peak_mem) or peak_mem <= 0:
         return DEFAULT_PREFILL_STEP_SIZE, (
             f"default (calibrated step size {step_size}{depth_note} has no recorded peak_memory_gb "
             "to safety-check against — falling back rather than risk an unverified value)"

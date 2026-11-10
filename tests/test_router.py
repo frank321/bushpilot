@@ -273,6 +273,32 @@ def test_router_end_to_end_models_forwarding_and_hot_swap(tmp_path):
         conn.close()
         sup_thread.join(timeout=2)
         assert resp_data["received_model"] == "mlx-community/Qwen3.5-9B-MLX-8bit"
+
+        # 4. Dashboard-initiated swap: mlx-loaded.txt is removed while supervisor swaps models;
+        # incoming inference request waits for mlx-loaded.txt to reappear and normalizes model ID.
+        os.remove(state_file)
+
+        def delayed_dashboard_swap():
+            time.sleep(0.25)
+            with open(state_file, "w") as sf:
+                sf.write("mlx-community/gemma-4-26b-a4b-it-4bit|262144|8|gemma-4-26b-a4b-it-4bit|mlx_vlm\n")
+
+        dash_thread = threading.Thread(target=delayed_dashboard_swap, daemon=True)
+        dash_thread.start()
+
+        conn = http.client.HTTPConnection("127.0.0.1", router_port, timeout=5)
+        conn.request(
+            "POST",
+            "/v1/chat/completions",
+            body=json.dumps({"model": "bushpilot-active", "messages": []}),
+            headers={"Content-Type": "application/json"},
+        )
+        r = conn.getresponse()
+        assert r.status == 200
+        resp_data = json.loads(r.read().decode("utf-8"))
+        conn.close()
+        dash_thread.join(timeout=2)
+        assert resp_data["received_model"] == "mlx-community/gemma-4-26b-a4b-it-4bit"
     finally:
         router_srv.shutdown()
         router_srv.server_close()

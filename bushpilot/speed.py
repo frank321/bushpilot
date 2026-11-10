@@ -1,7 +1,7 @@
 """Token-generation speed estimation: a memory-bandwidth-bound physics formula,
 overridden by a real per-(chip, model) calibration measurement when one exists
 (see load_calibration)."""
-from .calibration import load_calibration
+from .calibration import _is_finite_number, load_calibration
 
 # Sourced in docs/HARDWARE_SPEED_ESTIMATION.md §4 — cross-checked across two independent
 # sources for M5 Pro/Max specifically; M1-M4 figures are long-established/widely
@@ -39,7 +39,7 @@ def resolve_speed_correction_factor(model_entry):
     2. Measured architecture-family factor from `ARCHITECTURE_SPEED_CORRECTION_FACTORS`
     3. Global `SPEED_CORRECTION_FACTOR` (0.87) fallback."""
     explicit = model_entry.get("speed_correction_factor")
-    if isinstance(explicit, (int, float)) and not isinstance(explicit, bool) and explicit > 0:
+    if _is_finite_number(explicit) and explicit > 0:
         return float(explicit)
     arch = model_entry.get("architecture")
     if isinstance(arch, str) and arch in ARCHITECTURE_SPEED_CORRECTION_FACTORS:
@@ -59,8 +59,7 @@ def resolve_calibrated_decode_speed(calibrated, context_tokens=None):
     if (
         isinstance(by_ctx, dict)
         and by_ctx
-        and isinstance(context_tokens, (int, float))
-        and not isinstance(context_tokens, bool)
+        and _is_finite_number(context_tokens)
         and context_tokens > 0
     ):
         parsed = {}
@@ -69,13 +68,18 @@ def resolve_calibrated_decode_speed(calibrated, context_tokens=None):
                 depth = int(k)
             except (TypeError, ValueError):
                 continue
-            if depth > 0 and isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            if depth > 0 and _is_finite_number(v) and v > 0:
                 parsed[depth] = float(v)
         if parsed:
             target = int(context_tokens)
             chosen_depth = min(parsed.keys(), key=lambda d: (abs(d - target), -d))
             return parsed[chosen_depth], chosen_depth
-    return calibrated.get("decode_tok_s"), calibrated.get("context_tokens")
+    top_tok_s = calibrated.get("decode_tok_s")
+    top_ctx = calibrated.get("context_tokens")
+    return (
+        (float(top_tok_s) if _is_finite_number(top_tok_s) and top_tok_s > 0 else None),
+        (int(top_ctx) if _is_finite_number(top_ctx) and top_ctx > 0 else None),
+    )
 
 
 def estimate_speed_tok_s(model_entry, chip_name, gpu_cores, context_tokens=None):
@@ -118,10 +122,10 @@ def estimate_speed_tok_s(model_entry, chip_name, gpu_cores, context_tokens=None)
         recorded_drafter = calibrated.get("drafter")
         if recorded_drafter is None or recorded_drafter == expected_drafter:
             cal_tok_s, cal_ctx = resolve_calibrated_decode_speed(calibrated, context_tokens=context_tokens)
-            if isinstance(cal_tok_s, (int, float)) and cal_tok_s > 0:
+            if _is_finite_number(cal_tok_s) and cal_tok_s > 0:
                 ctx_note = (
                     f" at ~{int(cal_ctx):,} tokens of context"
-                    if isinstance(cal_ctx, (int, float)) else ""
+                    if _is_finite_number(cal_ctx) and cal_ctx > 0 else ""
                 )
                 return round(cal_tok_s, 1), (
                     f"measured on this machine ({chip_name}){ctx_note}, saved {calibrated.get('saved_at', 'previously')} "

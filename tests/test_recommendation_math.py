@@ -1191,4 +1191,72 @@ def test_add_model_sync_verified_results_promotes_and_updates_catalog(tmp_path):
     assert m_part["status"] == "untested"
 
 
+def test_save_calibration_preserves_prior_sweep_fields_on_teardown_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
+    # 1. Sweep saves full sweep metadata
+    ma.save_calibration(
+        "Apple M5 Pro",
+        "gemma-4-12b-it-4bit",
+        69.2,
+        context_tokens=16384,
+        ttft_s=20.1,
+        peak_memory_gb=7.84,
+        prefill_step_size=512,
+        kv_bits_safe_at_long_context=True,
+        prefill_step_size_by_context={"7200": {"step_size": 2048, "peak_memory_gb": 7.5}, "16384": {"step_size": 512, "peak_memory_gb": 7.84}},
+        decode_tok_s_by_context={"4096": 74.14, "16384": 68.54},
+    )
+
+    # 2. Normal session teardown calls save_calibration with only session metrics (sweep args None)
+    ma.save_calibration(
+        "Apple M5 Pro",
+        "gemma-4-12b-it-4bit",
+        70.5,
+        context_tokens=32768,
+        ttft_s=1.8,
+        peak_memory_gb=8.1,
+    )
+
+    loaded = ma.load_calibration("Apple M5 Pro", "gemma-4-12b-it-4bit")
+    assert loaded["decode_tok_s"] == 70.5
+    assert loaded["context_tokens"] == 32768
+    assert loaded["prefill_step_size"] == 512
+    assert loaded["kv_bits_safe_at_long_context"] is True
+    assert set(loaded["prefill_step_size_by_context"].keys()) == {"7200", "16384"}
+    assert loaded["decode_tok_s_by_context"] == {"4096": 74.14, "16384": 68.54}
+
+
+def test_calibration_rejects_nan_infinity_and_booleans(dense_model, tmp_path, monkeypatch):
+    import json
+    import os
+
+    monkeypatch.setattr(_calibration, "CALIBRATION_DIR", str(tmp_path))
+    path = ma._calibration_path("Apple M5 Pro", dense_model["id"])
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    # Corrupt file with boolean decode_tok_s
+    with open(path, "w") as f:
+        json.dump({"decode_tok_s": True, "context_tokens": True}, f)
+    assert ma.load_calibration("Apple M5 Pro", dense_model["id"]) is None
+
+    # Corrupt file with NaN decode_tok_s
+    with open(path, "w") as f:
+        f.write('{"decode_tok_s": NaN, "context_tokens": 4096}')
+    assert ma.load_calibration("Apple M5 Pro", dense_model["id"]) is None
+
+    # Valid decode_tok_s but corrupt NaN/bool optional fields degrade gracefully in speed & prefill
+    with open(path, "w") as f:
+        f.write(
+            '{"decode_tok_s": 64.2, "context_tokens": NaN, "peak_memory_gb": Infinity, '
+            '"prefill_step_size": 4096, "decode_tok_s_by_context": {"4096": NaN, "8192": true}}'
+        )
+    tok_s, reason = ma.estimate_speed_tok_s(dense_model, "Apple M5 Pro", 20, context_tokens=4096)
+    assert tok_s == 64.2
+    assert "measured on this machine" in reason
+
+    step_size, step_reason = ma.recommend_prefill_step_size(
+        dense_model, "Apple M5 Pro", 24, context_tokens=4096
+    )
+    assert step_size == ma.DEFAULT_PREFILL_STEP_SIZE
+    assert "no recorded peak_memory_gb" in step_reason
 
