@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Guide — Bushpilot</title>
+  <meta name="description" content="Quick start, requirements, compatible coding tools, model catalog, configuration, and troubleshooting for Bushpilot.">
+  <link rel="canonical" href="https://bushpilot.dev/guide.html">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <nav class="topnav">
+    <a class="brand" href="index.html">Bushpilot</a>
+    <div class="links">
+      <a href="index.html">Home</a>
+      <a class="active" href="guide.html">Guide</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="https://github.com/frank321/bushpilot">GitHub</a>
+    </div>
+  </nav>
+
+  <header class="page-header">
+    <h1>Guide</h1>
+    <p>Installation, compatible coding tools, curated models, configuration, and troubleshooting.</p>
+  </header>
+
+  <div class="toc">
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#quick-start">Quick Start</a></li>
+      <li><a href="#requirements">Requirements</a></li>
+      <li><a href="#compatible-tools">Compatible Tools</a></li>
+      <li><a href="#models">Available Models</a></li>
+      <li><a href="#config">Configuration</a></li>
+      <li><a href="#troubleshooting">Troubleshooting</a></li>
+    </ol>
+  </div>
+
+  <section id="quick-start">
+    <h2>Quick Start</h2>
+
+    <h3>Option A: Homebrew (recommended)</h3>
+    <pre>brew install frank321/bushpilot/bushpilot</pre>
+    <p>
+      This installs three commands: <code class="inline">bushpilot-server</code> (start the model server + dashboard),
+      <code class="inline">bushpilot</code> (attach a coding tool, auto-splitting a pane if the server isn't running yet), and
+      <code class="inline">bushpilot-uninstall</code>. Upgrade anytime with <code class="inline">brew update &amp;&amp; brew upgrade bushpilot</code>.
+    </p>
+
+    <h3>Option B: Release bundle or source</h3>
+    <p>
+      Download <a href="https://github.com/frank321/bushpilot/releases/latest/download/bushpilot.zip">bushpilot.zip</a>
+      (or clone <a href="https://github.com/frank321/bushpilot">the repository</a>) and run <code class="inline">./launch_tool.sh</code>
+      and <code class="inline">./start_mlx_server.sh</code> from inside the folder.
+    </p>
+
+    <h3>Running</h3>
+    <ol class="steps">
+      <li>
+        <strong>Single terminal (auto-split)</strong>
+        <pre>bushpilot   # or ./launch_tool.sh</pre>
+        <p>
+          If the server isn't running yet, Bushpilot offers to split a terminal pane/window (iTerm2, <code class="inline">tmux</code>, or Terminal.app)
+          for the server dashboard, waits for your chosen model to become healthy, and launches your coding tool in the original pane.
+        </p>
+      </li>
+      <li>
+        <strong>Two terminals (manual)</strong>
+        <div class="terminal-label">Terminal 1 — Start the server</div>
+        <pre>bushpilot-server   # or ./start_mlx_server.sh</pre>
+        <p>
+          Detects your chip and currently-free memory, filters models that fit safely, downloads the chosen model if needed,
+          and displays the live dashboard. Press <code class="inline">Tab</code> in the <code class="inline">fzf</code> picker to pre-register
+          multiple models, or press <code class="inline">m</code> on the dashboard anytime to hot-swap models live.
+        </p>
+        <div class="terminal-label">Terminal 2+ — Attach coding tools</div>
+        <pre>bushpilot   # or ./launch_tool.sh</pre>
+        <p>
+          Pick Claude Code, OpenCode, Aider, Cline, or Pi. Open more terminals and run <code class="inline">bushpilot</code> again
+          to attach additional tools or sessions to the same shared server.
+        </p>
+      </li>
+      <li>
+        <strong>Stop</strong>
+        <p>
+          Press <code class="inline">q</code> or <code class="inline">Ctrl-C</code> in the server terminal to stop gracefully.
+        </p>
+      </li>
+    </ol>
+  </section>
+
+  <section id="requirements">
+    <h2>Requirements</h2>
+    <div class="features-grid">
+      <div class="feature-card">
+        <h4>Apple Silicon Mac</h4>
+        <p>M1, M2, M3, or M4 (or later). MLX requires Apple Silicon for GPU acceleration.</p>
+      </div>
+      <div class="feature-card">
+        <h4>Sufficient RAM</h4>
+        <p>The picker only offers models that fit your currently-free memory — more RAM unlocks larger models (under 1B to ~27B).</p>
+      </div>
+      <div class="feature-card">
+        <h4>Python 3.10+ &amp; Homebrew</h4>
+        <p>Homebrew (<a href="https://brew.sh">brew.sh</a>) and Python 3.10+. <code class="inline">fzf</code> is optional for nicer pickers (<code class="inline">brew install fzf</code>).</p>
+      </div>
+      <div class="feature-card">
+        <h4>Coding Tool &amp; First-Run Network</h4>
+        <p>Claude Code, OpenCode, Aider, Cline, or Pi installed. Internet is only needed on first run to download weights.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="compatible-tools">
+    <h2>Compatible Tools</h2>
+    <p>
+      Bushpilot implements OpenAI's chat completion API and Anthropic's <code class="inline">/v1/messages</code> format natively.
+      <code class="inline">launch_tool.sh</code> has built-in launchers for <strong>Claude Code</strong>, <strong>OpenCode</strong>,
+      <strong>Aider</strong>, <strong>Cline</strong>, and <strong>Pi</strong>.
+    </p>
+    <p>
+      Any other OpenAI-compatible IDE extension, CLI tool, or custom script (Cursor, Windsurf, VS Code extensions, <code class="inline">llm</code>, <code class="inline">litellm</code>, OpenAI SDK)
+      can also connect to the endpoint shown on the dashboard (default):
+    </p>
+    <pre>http://127.0.0.1:38472/v1</pre>
+    <p style="font-size: 14px; color: var(--text-dim);">
+      Use any non-empty string for the API key (e.g. <code class="inline">local</code>). Port <code class="inline">38472</code> was chosen to avoid colliding with 3000, 8000, 8080, or Ollama's 11434.
+    </p>
+  </section>
+
+  <section id="models">
+    <h2>Available Models (<code class="inline">models.json</code>)</h2>
+    <p>The curated catalog currently ships <strong>58 selectable entries</strong> (<strong>31 verified</strong> as <code class="inline">tested</code> on real Apple Silicon), roughly smallest to largest:</p>
+    <ul>
+      <li><strong>Qwen3.5 0.8B (4-bit):</strong> ~0.6GB — fits on almost anything, useful on very memory-constrained machines</li>
+      <li><strong>Gemma-4 E4B (4-bit):</strong> ~4.8GB — also available with an MTP speculative-decoding speedup</li>
+      <li><strong>Gemma-4 12B (4-bit):</strong> ~6.3GB — also available with speculative decoding (text-only and multimodal variants)</li>
+      <li><strong>Qwen3.5 9B (4-bit):</strong> ~6.3GB — also available with speculative decoding (text-only and multimodal variants)</li>
+      <li><strong>Qwen3.5 9B (8-bit):</strong> ~9.7GB — higher precision; also available with speculative decoding (text-only and multimodal variants)</li>
+      <li><strong>Gemma-4 12B (8-bit):</strong> ~12GB — also available with speculative decoding (text-only and multimodal variants)</li>
+      <li><strong>Gemma-4 26B-A4B (4-bit, MoE):</strong> ~14GB — mixture-of-experts, only a fraction of weights active per token</li>
+      <li><strong>Qwen3.8 27B (4-bit):</strong> ~15GB — largest model in the catalog; also available with speculative decoding (text-only and multimodal variants)</li>
+    </ul>
+    <p>
+      Want a different HF MLX model? Run <code class="inline">add_model.py</code> to generate an entry in <code class="inline">models.json</code>.
+      Bushpilot serves MLX-format weights only (not GGUF).
+    </p>
+  </section>
+
+  <section id="config">
+    <h2>Configuration (<code class="inline">~/.bushpilot/config.json</code>)</h2>
+    <p>
+      Both server and launcher read <code class="inline">~/.bushpilot/config.json</code> (overridden by <code class="inline">MLX_PORT</code> / <code class="inline">MLX_HOST</code> env vars):
+    </p>
+    <pre>{
+  "port": 9000,
+  "host": "127.0.0.1",
+  "preferred_model": "qwen3.5-9b-mlx-4bit",
+  "concurrency": 2,
+  "max_context_tokens": 65536,
+  "dspark_prefix_cache_slots": 4,
+  "dspark_prefix_cache_dir": "/path/to/ssd/spill"
+}</pre>
+    <ul>
+      <li><code class="inline">preferred_model</code>: skips the picker on launch as long as it still fits currently-free memory.</li>
+      <li><code class="inline">concurrency</code>: omit for auto mode, or force a fixed number of concurrent slots (trades per-slot context for guaranteed headroom).</li>
+      <li><code class="inline">max_context_tokens</code>: optional persistent upper bound on computed context (free-memory fit math still runs underneath).</li>
+      <li><code class="inline">dspark_prefix_cache_*</code>: optional prefix cache tuning for the <code class="inline">mlx-dspark</code> backend.</li>
+    </ul>
+  </section>
+
+  <section id="troubleshooting">
+    <h2>Troubleshooting</h2>
+    <h3>Model download is slow</h3>
+    <p>
+      Weights range from under 1GB to ~15GB. Once downloaded, models are cached under <code class="inline">~/.bushpilot/models</code> and reused on subsequent runs.
+    </p>
+    <h3>The server shut itself down unexpectedly</h3>
+    <p>
+      Check the reason printed on screen — it's either sustained low free memory (&lt;10%) or macOS reporting critical memory pressure.
+      Pick a smaller model, close memory-heavy apps, or set <code class="inline">preferred_model</code> in <code class="inline">config.json</code>.
+    </p>
+    <h3>Tool won't connect</h3>
+    <p>
+      Check the exact API endpoint URL printed at the top of the server dashboard, verify your tool points to it, and ensure local connections to <code class="inline">127.0.0.1</code> aren't blocked.
+    </p>
+  </section>
+
+  <footer>
+    <p><strong>Bushpilot</strong> — Local MLX cockpit for Apple Silicon coding agents</p>
+    <p>
+      <a href="index.html">Home</a> ·
+      <a href="architecture.html">Architecture</a> ·
+      <a href="https://github.com/frank321/bushpilot">GitHub</a> ·
+      <a href="https://github.com/frank321/bushpilot/blob/main/LICENSE">MIT License</a>
+    </p>
+  </footer>
+
+</div>
+</body>
+</html>

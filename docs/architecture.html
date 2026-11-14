@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Architecture &amp; Safety — Bushpilot</title>
+  <meta name="description" content="How Bushpilot works: hardware detection, safe context sizing, memory backstop, bounded concurrency, speculative decoding, and MLX vs Ollama.">
+  <link rel="canonical" href="https://bushpilot.dev/architecture.html">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <nav class="topnav">
+    <a class="brand" href="index.html">Bushpilot</a>
+    <div class="links">
+      <a href="index.html">Home</a>
+      <a href="guide.html">Guide</a>
+      <a class="active" href="architecture.html">Architecture</a>
+      <a href="https://github.com/frank321/bushpilot">GitHub</a>
+    </div>
+  </nav>
+
+  <header class="page-header">
+    <h1>Architecture &amp; Safety</h1>
+    <p>How Bushpilot prevents OOM crashes, sizes KV cache, and serves MLX models.</p>
+  </header>
+
+  <div class="toc">
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#safety">Safe Bushpilot</a></li>
+      <li><a href="#how-it-works">How It Works</a></li>
+      <li><a href="#internals">Technical Details</a></li>
+      <li><a href="#mlx-vs-ollama">Why MLX Instead of Ollama?</a></li>
+    </ol>
+  </div>
+
+  <section id="safety">
+    <h2>Safe Bushpilot — No Crashes, No Guessing</h2>
+    <p>
+      Coding agents send large system prompts and repository context. On unified memory, guessing a quantization or context size
+      often leads to swap thrashing or an unresponsive Mac. Bushpilot is built around safety guardrails:
+    </p>
+    <div class="features-grid">
+      <div class="feature-card">
+        <h4>Live hardware detection</h4>
+        <p>Reads your chip and currently-free unified memory via <code class="inline">sysctl</code> and kernel memory counters (<code class="inline">kern.memorystatus_level</code>).</p>
+      </div>
+      <div class="feature-card">
+        <h4>Safe model filtering</h4>
+        <p>Greys out models that don't fit your live free memory and computes a safe context size with OS headroom reserved.</p>
+      </div>
+      <div class="feature-card">
+        <h4>Speed estimate upfront</h4>
+        <p>Shows estimated tok/s (from chip memory bandwidth and calibrated family factors) before you commit to a download.</p>
+      </div>
+      <div class="feature-card">
+        <h4>Continuous memory monitoring</h4>
+        <p>Polls free memory and <code class="inline">kern.memorystatus_vm_pressure_level</code> every few seconds while the server runs.</p>
+      </div>
+      <div class="feature-card">
+        <h4>Debounced automatic teardown</h4>
+        <p>Shuts down cleanly if free memory stays below ~10% for consecutive polls or macOS reports critical memory pressure.</p>
+      </div>
+      <div class="feature-card">
+        <h4>Bounded concurrency</h4>
+        <p>Explicitly sets <code class="inline">--max-num-seqs</code> to what free memory can hold, preventing unbounded concurrent KV allocations.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="how-it-works">
+    <h2>How It Works</h2>
+    <div class="how-it-works">
+      <div class="phase">
+        <div class="phase-number">1</div>
+        <h3>Detect</h3>
+        <p>Scan chip and currently-free memory</p>
+      </div>
+      <div class="phase">
+        <div class="phase-number">2</div>
+        <h3>Recommend</h3>
+        <p>Filter models that fit; estimate tok/s</p>
+      </div>
+      <div class="phase">
+        <div class="phase-number">3</div>
+        <h3>Serve</h3>
+        <p>Start MLX server + hot-swap router</p>
+      </div>
+      <div class="phase">
+        <div class="phase-number">4</div>
+        <h3>Monitor</h3>
+        <p>Track memory &amp; tear down if critical</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="internals">
+    <h2>Technical Details</h2>
+
+    <h3>Components</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Component</th>
+          <th>Purpose</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code class="inline">start_mlx_server.sh</code></td>
+          <td>Orchestrates hardware detection, model selection, server startup, dashboard, and memory/liveness backstops</td>
+        </tr>
+        <tr>
+          <td><code class="inline">model_advisor.py</code> / <code class="inline">bushpilot/</code></td>
+          <td>Detects hardware specs and computes safe context, APC blocks, concurrency, and tok/s estimates</td>
+        </tr>
+        <tr>
+          <td><code class="inline">launch_tool.sh</code></td>
+          <td>Attaches Claude Code, OpenCode, Aider, Cline, or Pi (auto-splitting a terminal pane to start the server if needed)</td>
+        </tr>
+        <tr>
+          <td><code class="inline">bushpilot/router.py</code></td>
+          <td>HTTP router proxy on port 38472 holding client connections open while hot-swapping the internal MLX backend (port 38473)</td>
+        </tr>
+        <tr>
+          <td><code class="inline">mlx_vlm.server</code> / <code class="inline">mlx-dspark</code></td>
+          <td>OpenAI &amp; Anthropic-compatible MLX inference backends (multimodal default or text-only speculative decoding)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Token Speed Estimation</h3>
+    <p>
+      The tok/s shown per model is a calculated estimate (not a live per-model benchmark at startup):
+    </p>
+    <pre>estimated tok/s = (chip's memory bandwidth / model's active weight size) × correction factor</pre>
+    <p>
+      Calibrated against real decode-speed benchmarks on Apple Silicon hardware (documented in
+      <a href="https://github.com/frank321/bushpilot/blob/main/docs/HARDWARE_SPEED_ESTIMATION.md">HARDWARE_SPEED_ESTIMATION.md</a>).
+    </p>
+
+    <h3>Speculative Decoding: Two Backends</h3>
+    <p>
+      Some catalog entries pair the main model with a small drafter model for real measured speedups (1.5x to 3x+):
+    </p>
+    <ul>
+      <li><strong><code class="inline">-dflash</code> (text-only via <code class="inline">mlx-dspark</code>):</strong> Fastest option (~15–20% faster than native drafter support after one-time kernel calibration), drops image/video input.</li>
+      <li><strong><code class="inline">-dflash-vlm</code> / <code class="inline">-mtp</code> (multimodal via <code class="inline">mlx_vlm.server</code>):</strong> Smaller speedup while keeping full vision support.</li>
+      <li><strong>Plain entry:</strong> Unchanged baseline, safest when deterministic byte-for-byte output matters.</li>
+    </ul>
+
+    <h3>Bounded Concurrency</h3>
+    <ul>
+      <li><strong>Auto (default):</strong> Sizes context to fill free memory for 1 sequence first, then checks whether rounding leftover fits extra identical slots (capped at 4).</li>
+      <li><strong>Forced (<code class="inline">concurrency</code> in <code class="inline">config.json</code>):</strong> Shrinks per-slot context so all requested slots fit safely.</li>
+    </ul>
+  </section>
+
+  <section id="mlx-vs-ollama">
+    <h2>Why MLX Instead of Ollama?</h2>
+    <p>
+      Ollama is a great cross-platform inference server. Bushpilot is built specifically for Apple Silicon Macs + coding agents:
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 24%;">Aspect</th>
+          <th style="width: 38%;">Ollama</th>
+          <th style="width: 38%;">Bushpilot (MLX)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Hardware &amp; context sizing</strong></td>
+          <td>Generic server; manual context/model sizing.</td>
+          <td><strong>Built-in:</strong> detects chip + live free memory, filters models, and computes safe context + tok/s.</td>
+        </tr>
+        <tr>
+          <td><strong>Memory backstop</strong></td>
+          <td>None built-in; relies on OS handling OOM.</td>
+          <td><strong>Continuous:</strong> polls free memory &amp; OS pressure, shutting down cleanly before critical pressure.</td>
+        </tr>
+        <tr>
+          <td><strong>Speed on Apple Silicon</strong></td>
+          <td>Fast (includes a native MLX backend option).</td>
+          <td>In one internal precision-matched (~4-bit) test, <code class="inline">mlx_vlm.server</code> ran ~23% faster than Ollama's MLX backend (<a href="https://github.com/frank321/bushpilot/blob/main/docs/HARDWARE_SPEED_ESTIMATION.md">methodology</a>).</td>
+        </tr>
+        <tr>
+          <td><strong>Platform scope</strong></td>
+          <td><strong>Cross-platform:</strong> Linux, Mac, Windows.</td>
+          <td>Apple Silicon macOS only, by design.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    <p><strong>Bushpilot</strong> — Local MLX cockpit for Apple Silicon coding agents</p>
+    <p>
+      <a href="index.html">Home</a> ·
+      <a href="guide.html">Guide</a> ·
+      <a href="https://github.com/frank321/bushpilot">GitHub</a> ·
+      <a href="https://github.com/frank321/bushpilot/blob/main/LICENSE">MIT License</a>
+    </p>
+  </footer>
+
+</div>
+</body>
+</html>
