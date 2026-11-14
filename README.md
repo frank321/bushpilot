@@ -4,6 +4,8 @@
 
 *From "where do I start?" to running locally. Bushpilot has done the research, tested the models, and watches your memory so you can just fly.*
 
+![Bushpilot demo — hardware-aware picker, MLX server, and live memory dashboard](docs/assets/demo.gif)
+
 ## Why
 
 New models, frameworks, and inference tricks appear every week, and the tutorials you read six months ago are already out of date. Getting a local LLM running on a Mac usually means digging through instructions, learning a new framework, and guessing which model and context size won't crash your machine.
