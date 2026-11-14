@@ -4,7 +4,7 @@
 
 *From "where do I start?" to running locally. Bushpilot has done the research, tested the models, and watches your memory so you can just fly.*
 
-![Bushpilot demo — hardware-aware picker, MLX server, and live memory dashboard](docs/assets/demo.gif)
+![Bushpilot demo — pick a coding tool, auto-split the MLX server, and run locally](docs/assets/launch_demo.gif)
 
 ## Why
 
